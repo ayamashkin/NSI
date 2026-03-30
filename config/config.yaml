@@ -1,0 +1,22 @@
+# Nomenclature Processor Configuration
+# API ключи загружаются из файлов в secrets/
+
+api:
+  openwebui:
+    base_url: "https://webui.game73.ru/api"
+    api_key_file: "secrets/openwebui_key.txt"
+    timeout: 120
+    default_model: "qwen-30b"
+
+  mws:
+    base_url: "https://gpt.mwsapis.ru/projects/YOUR_PROJECT_NAME/openai/v1"
+    api_key_file: "secrets/mws_key.txt"
+    timeout: 120
+    default_model: "gpt-4"
+
+database:
+  path: "results.db"
+
+processing:
+  default_workers: 4
+  batch_size: 100
