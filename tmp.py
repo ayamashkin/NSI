@@ -1,4 +1,4 @@
-# Nomenclature Processor
+readme_updated = """# Nomenclature Processor
 
 Система автоматической обработки номенклатуры с использованием LLM (Large Language Models) для извлечения технических параметров изделий.
 
@@ -16,8 +16,12 @@
 nomenclature-processor/
 ├── config/
 │   ├── __init__.py
-│   ├── settings.py          # Конфигурация API и путей
-│   └── prompts.yaml         # Реестр промптов по категориям
+│   ├── config.yaml          # Основной конфиг (без API ключей)
+│   └── settings.py          # Загрузчик конфигурации и ключей
+├── secrets/                 # ← В .gitignore! API ключи
+│   ├── openwebui_key.txt    # Ключ OpenWebUI
+│   ├── mws_key.txt          # Ключ MWS Cloud GPT
+│   └── README.md            # Инструкция по настройке
 ├── core/
 │   ├── __init__.py
 │   ├── models.py            # Pydantic модели данных
@@ -41,11 +45,9 @@ nomenclature-processor/
 │   ├── __init__.py
 │   ├── excel_loader.py      # Загрузка Excel
 │   └── json_export.py       # Экспорт результатов
-├── data/
-│   └── sample_nomenclature.xlsx    # пример файла для проверки
 ├── cli.py                   # CLI интерфейс
 ├── requirements.txt
-├── .env.example
+├── .gitignore
 └── README.md
 ```
 
@@ -62,45 +64,54 @@ cd nomenclature-processor
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # или
-venv\Scripts\activate  # Windows
+venv\\Scripts\\activate  # Windows
 
 # Установка зависимостей
 pip install -r requirements.txt
 ```
 
-### 2. Конфигурация
+### 2. Настройка API ключей
 
-Создайте файл `.env` в корне проекта:
+Создайте файлы с ключами в директории `secrets/`:
 
-```env
-# OpenWebUI (локальные модели)
-OPENWEBUI_URL=http://localhost:3000
-OPENWEBUI_API_KEY=your_openwebui_key
+```bash
+# Создать директорию secrets
+mkdir secrets
 
-# MWS Cloud GPT (облачный API)
-MWS_URL=https://mws.ru/api/v1
-MWS_API_KEY=your_mws_api_key
+# OpenWebUI ключ (если требуется авторизация)
+echo "your-openwebui-api-key" > secrets/openwebui_key.txt
 
-# База данных
-DATABASE_PATH=results.db
+# MWS Cloud GPT ключ
+echo "your-mws-api-key" > secrets/mws_key.txt
 ```
 
-### 3. Подготовка промптов
+Или создайте файлы вручную через текстовый редактор.
 
-Поместите файлы промптов в директорию `prompts/templates/`:
-- `krepezh_v1.txt` - для крепежных изделий
-- `eri_v1.txt` - для электрорадиоизделий
-- `materials_v1.txt` - для материалов
-- `purchased_v1.txt` - для покупных изделий
+**Важно**: Директория `secrets/` уже добавлена в `.gitignore`, ключи не попадут в репозиторий.
+
+### 3. Проверка конфигурации
+
+```bash
+# Проверка загрузки конфига
+python -c "from config.settings import get_settings; print(get_settings().api.keys())"
+```
+
+### 4. Подготовка промптов
+
+Поместите файлы промптов в `prompts/templates/`:
+- `krepezh_v1.txt` — для крепежных изделий
+- `eri_v1.txt` — для электрорадиоизделий
+- `materials_v1.txt` — для материалов
+- `purchased_v1.txt` — для покупных изделий
 
 Настройте `config/prompts.yaml` для регистрации промптов.
 
-### 4. Подготовка данных
+### 5. Подготовка данных
 
 Excel файл должен содержать колонки:
-- `артикул` - уникальный код изделия
-- `Краткое наименование` - наименование для анализа
-- `GUID` - внутренний идентификатор
+- `артикул` — уникальный код изделия
+- `Краткое наименование` — наименование для анализа
+- `GUID` — внутренний идентификатор
 
 ## 🚀 Использование
 
@@ -214,9 +225,33 @@ python cli.py stats
 }
 ```
 
-## 🔧 Конфигурация промптов
+## 🔧 Конфигурация
 
-Файл `config/prompts.yaml`:
+### `config/config.yaml`
+
+```yaml
+api:
+  openwebui:
+    base_url: "http://localhost:3000"
+    api_key_file: "secrets/openwebui_key.txt"  # ← путь к файлу с ключом
+    timeout: 120
+    default_model: "qwen-30b"
+
+  mws:
+    base_url: "https://mws.ru/api/v1"
+    api_key_file: "secrets/mws_key.txt"  # ← путь к файлу с ключом
+    timeout: 120
+    default_model: "gpt-4"
+
+database:
+  path: "results.db"
+
+processing:
+  default_workers: 4
+  batch_size: 100
+```
+
+### `config/prompts.yaml`
 
 ```yaml
 prompts:
@@ -245,11 +280,47 @@ prompts:
 - **Материалы**: сталь, алюминий, медь, латунь, пластик, резина, лента
 - **Покупные**: подшипник, сальник, ремень, цепь, шланг, клапан
 
+## 🔐 Безопасность API ключей
+
+### Хранение ключей
+
+| Метод | Безопасность | Использование |
+|-------|-------------|---------------|
+| Файлы в `secrets/` | ✅ Высокая | Локальная разработка |
+| Переменные окружения | ✅ Высокая | CI/CD, продакшн |
+| Жестко в коде | ❌ Низкая | Никогда |
+
+### Для CI/CD (GitHub Actions, GitLab CI)
+
+```yaml
+# .github/workflows/process.yml
+- name: Run processor
+  env:
+    MWS_API_KEY: ${{ secrets.MWS_API_KEY }}
+  run: |
+    echo "$MWS_API_KEY" > secrets/mws_key.txt
+    python cli.py process data.xlsx --api mws
+```
+
+### Проверка доступа к API
+
+```python
+from config.settings import get_settings
+
+settings = get_settings()
+mws_key = settings.get_api_key('mws')
+
+if mws_key:
+    print(f"Ключ MWS загружен: {mws_key[:10]}...")
+else:
+    print("Ключ MWS не найден!")
+```
+
 ## 🔄 Upsert семантика
 
 База данных SQLite гарантирует уникальность записей по составному ключу `(article, prompt_id)`:
-- Если запись существует - она обновляется
-- Если записи нет - она создается
+- Если запись существует — она обновляется
+- Если записи нет — она создается
 - Это позволяет безопасно перезапускать обработку
 
 ## 🛡️ Обработка ошибок
@@ -272,13 +343,15 @@ prompts:
 
 ### OpenWebUI
 - Поддержка локальных моделей (Qwen, Llama, etc.)
-- Конфигурация через переменные окружения
+- Конфигурация через `config/config.yaml`
+- Ключ загружается из `secrets/openwebui_key.txt`
 - Автоматический парсинг JSON из markdown
 
 ### MWS Cloud GPT
-- Облачный API от MWS
+- Облачный API от MWS (mws.ru)
 - Модели GPT-4 и аналоги
-- Требуется API ключ от MWS
+- Ключ загружается из `secrets/mws_key.txt`
+- Требуется регистрация на mws.ru
 
 ## 🧪 Тестирование
 
@@ -291,6 +364,9 @@ python cli.py process test_sample.xlsx --auto -w 2
 
 # Проверка статистики после теста
 python cli.py stats
+
+# Проверка загрузки конфигурации
+python -c "from config.settings import get_settings; s = get_settings(); print('APIs:', list(s.api.keys()))"
 ```
 
 ## 📝 Логирование
@@ -313,13 +389,15 @@ python cli.py stats
 
 1. Создать класс в `api_clients/`, наследующий `BaseLLMClient`
 2. Реализовать методы `complete()` и `health_check()`
-3. Добавить выбор в CLI
+3. Добавить конфигурацию в `config/config.yaml`
+4. Создать файл ключа в `secrets/`
 
 ## 📋 Требования
 
 - Python 3.9+
 - Доступ к API (OpenWebUI или MWS)
 - Excel файл с номенклатурой
+- API ключи в файлах `secrets/`
 
 ## 📄 Лицензия
 
@@ -328,12 +406,17 @@ MIT License
 ## 🆘 Поддержка
 
 При возникновении проблем:
-1. Проверьте доступность API: `python cli.py stats`
-2. Проверьте конфигурацию в `.env`
-3. Проверьте формат Excel файла
-4. Обратитесь к документации API провайдера
+1. Проверьте наличие ключей: `ls secrets/`
+2. Проверьте доступность API: `python cli.py stats`
+3. Проверьте конфигурацию в `config/config.yaml`
+4. Проверьте формат Excel файла
+5. Обратитесь к документации API провайдера
 
 ---
 
 **Версия**: 1.0.0  
 **Дата обновления**: 2024
+"""
+
+print(readme_updated)
+print(f"\n\nРазмер README: {len(readme_updated)} символов")

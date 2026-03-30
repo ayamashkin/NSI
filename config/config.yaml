@@ -1,22 +1,52 @@
 # Nomenclature Processor Configuration
-# API ключи загружаются из файлов в secrets/
+# API ключи загружаются из отдельных файлов (не хранятся в git)
 
+# =============================================================================
+# API Configuration
+# =============================================================================
 api:
   openwebui:
-    base_url: "https://webui.game73.ru/api"
-    api_key_file: "secrets/openwebui_key.txt"
+    base_url: "http://localhost:3000"
+    api_key_file: "secrets/openwebui_key.txt"  # Путь к файлу с ключом
     timeout: 120
     default_model: "qwen-30b"
 
   mws:
-    base_url: "https://gpt.mwsapis.ru/projects/YOUR_PROJECT_NAME/openai/v1"
-    api_key_file: "secrets/mws_key.txt"
+    base_url: "https://mws.ru/api/v1"
+    api_key_file: "secrets/mws_key.txt"  # Путь к файлу с ключом
     timeout: 120
     default_model: "gpt-4"
 
+# =============================================================================
+# Database Configuration
+# =============================================================================
 database:
   path: "results.db"
+  backup_enabled: true
+  backup_interval: 1000  # записей
 
+# =============================================================================
+# Processing Configuration
+# =============================================================================
 processing:
   default_workers: 4
+  default_timeout: 120
   batch_size: 100
+  retry_attempts: 3
+  retry_delay: 5  # секунд
+
+# =============================================================================
+# Prompts Configuration
+# =============================================================================
+prompts:
+  directory: "prompts/templates"
+  registry: "config/prompts.yaml"
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  level: "INFO"
+  file: "logs/processor.log"
+  max_size: "10MB"
+  backup_count: 5
