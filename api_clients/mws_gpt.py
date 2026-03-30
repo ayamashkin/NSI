@@ -35,8 +35,8 @@ class MWSGPTClient(BaseLLMClient):
         url = f"{self.base_url}/chat/completions"
 
         # Добавить логирование
-        logger.info(f"MWS API URL: {url}")
-        logger.info(f"MWS base_url from config: {self.base_url}")
+        #logger.info(f"MWS API URL: {url}")
+        #logger.info(f"MWS base_url from config: {self.base_url}")
 
         headers = {
             "Content-Type": "application/json",

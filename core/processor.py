@@ -135,13 +135,13 @@ class NomenclatureProcessor:
 
         # Отправляем запрос к API
         try:
-            logger.info(f"Calling API for {item.article} with prompt {prompt_id}")
+            #logger.info(f"Calling API for {item.article} with prompt {prompt_id}")
             response = client.complete(
                 prompt=prompt_text,
                 model=prompt_cfg.model,
                 temperature=prompt_cfg.temperature
             )
-            logger.info(f"API response: success={response.get('success')}, error={response.get('error')}")
+            #logger.info(f"API response: success={response.get('success')}, error={response.get('error')}")
         except Exception as e:
             return self._create_error_result(item, prompt_id, f"API error: {e}")
 
