@@ -245,5 +245,56 @@ def detect(name):
         click.echo("🔧 Нет подходящих промптов")
 
 
+@cli.command()
+@click.option('--api', type=click.Choice(['openwebui', 'mws', 'all']), default='all',
+              help='Сервис для запроса моделей')
+def models(api):
+    """Список доступных моделей у сервисов API"""
+    settings = get_settings()
+
+    services_to_check = []
+    if api == 'all':
+        services_to_check = list(settings.api.keys())
+    else:
+        if api not in settings.api:
+            click.echo(f"❌ API '{api}' не настроен в config.yaml", err=True)
+            return
+        services_to_check = [api]
+
+    for service_name in services_to_check:
+        api_config = settings.api[service_name]
+        click.echo(f"\n🔌 Сервис: {service_name}")
+        click.echo(f"   URL: {api_config.base_url}")
+        click.echo(f"   Модель по умолчанию: {api_config.default_model or 'N/A'}")
+
+        try:
+            if service_name == "openwebui":
+                from api_clients.openwebui import OpenWebUIClient
+                client = OpenWebUIClient(
+                    base_url=api_config.base_url,
+                    api_key=api_config.api_key
+                )
+            elif service_name == "mws":
+                from api_clients.mws_gpt import MWSGPTClient
+                client = MWSGPTClient(
+                    base_url=api_config.base_url,
+                    api_key=api_config.api_key
+                )
+            else:
+                continue
+
+            available_models = client.get_models()
+
+            if available_models:
+                click.echo(f"   Доступные модели ({len(available_models)}):")
+                for model in available_models[:20]:
+                    click.echo(f"      • {model}")
+                if len(available_models) > 20:
+                    click.echo(f"      ... и ещё {len(available_models) - 20} моделей")
+            else:
+                click.echo("   ⚠️ Не удалось получить список моделей")
+
+        except Exception as e:
+            click.echo(f"   ❌ Ошибка подключения: {e}", err=True)
 if __name__ == '__main__':
     cli()

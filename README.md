@@ -106,14 +106,15 @@ Excel файл должен содержать колонки:
 
 #### Основные команды
 
-| Команда | Описание | Пример |
-|---------|----------|--------|
-| `prompts` | Список доступных промптов | `python cli.py prompts` |
-| `process` | Обработка Excel файла | `python cli.py process data.xlsx -p hardware` |
-| `export` | Экспорт результатов в JSON | `python cli.py export -o results.json` |
-| `stats` | Статистика обработки | `python cli.py stats` |
-| `errors` | Просмотр ошибок | `python cli.py errors -l 20` |
-| `detect` | Определить категорию | `python cli.py detect "Болт М12х50"` |
+| Команда | Описание                         | Пример |
+|---------|----------------------------------|--------|
+| `prompts` | Список доступных промптов        | `python cli.py prompts` |
+| `process` | Обработка Excel файла            | `python cli.py process data.xlsx -p hardware` |
+| `export` | Экспорт результатов в JSON       | `python cli.py export -o results.json` |
+| `stats` | Статистика обработки             | `python cli.py stats` |
+| `errors` | Просмотр ошибок                  | `python cli.py errors -l 20` |
+| `detect` | Определить категорию             | `python cli.py detect "Болт М12х50"` |
+| `models` | Вывести список доступных моделей | `python cli.py models` |
 
 #### Подробное описание
 
@@ -224,7 +225,17 @@ $ python cli.py process data.xlsx -p hardware
 ❌ Ошибок: 5
 💡 Просмотр ошибок: python cli.py errors
 ```
+#### Список доступных моделей
 
+Запрос списка моделей
+```bash
+# Все сервисы
+python cli.py models
+
+# Конкретный сервис
+python cli.py models --api openwebui
+python cli.py models --api mws
+```
 
 ## 📊 Форматы данных
 

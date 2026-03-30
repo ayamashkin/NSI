@@ -6,37 +6,18 @@ MWS GPT API Client Module
 import requests
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from .base import BaseLLMClient
 
 logger = logging.getLogger(__name__)
 
 
 class MWSGPTClient(BaseLLMClient):
-    """
-    Клиент для MWS Cloud GPT API.
-
-    Использует OpenAI-compatible API от MWS.
-    Документация: https://mws.ru/docs/cloud-platform/gpt/
-    """
+    """Клиент для MWS Cloud GPT API."""
 
     def complete(self, prompt: str, model: str, temperature: float = 0.1) -> Dict[str, Any]:
-        """
-        Отправка запроса на генерацию через MWS GPT.
-
-        Args:
-            prompt: Текст промпта
-            model: Название модели (например, "gpt-oss-120b")
-            temperature: Температура генерации
-
-        Returns:
-            Результат генерации
-        """
+        """Отправка запроса на генерацию через MWS GPT."""
         url = f"{self.base_url}/chat/completions"
-
-        # Добавить логирование
-        #logger.info(f"MWS API URL: {url}")
-        #logger.info(f"MWS base_url from config: {self.base_url}")
 
         headers = {
             "Content-Type": "application/json",
@@ -53,17 +34,15 @@ class MWSGPTClient(BaseLLMClient):
 
         try:
             response = requests.post(
-                url, 
-                headers=headers, 
-                json=payload, 
+                url,
+                headers=headers,
+                json=payload,
                 timeout=self.timeout
             )
             response.raise_for_status()
             data = response.json()
 
             content = data['choices'][0]['message']['content']
-
-            # Пытаемся извлечь JSON
             parsed = self._extract_json_from_response(content)
 
             return {
@@ -87,7 +66,6 @@ class MWSGPTClient(BaseLLMClient):
     def health_check(self) -> bool:
         """Проверка доступности MWS GPT API."""
         try:
-            # Пробуем получить список моделей
             response = requests.get(
                 f"{self.base_url}/models",
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -97,3 +75,24 @@ class MWSGPTClient(BaseLLMClient):
         except Exception as e:
             logger.debug(f"MWS GPT health check failed: {e}")
             return False
+
+    def get_models(self) -> List[str]:
+        """Получение списка доступных моделей из MWS GPT."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            models = []
+            for model in data.get('data', []):
+                if isinstance(model, dict) and 'id' in model:
+                    models.append(model['id'])
+
+            return sorted(models)
+        except Exception as e:
+            logger.error(f"Failed to get models from MWS GPT: {e}")
+            return []
