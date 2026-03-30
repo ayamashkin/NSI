@@ -332,21 +332,29 @@ class DatabaseManager:
             return count
 
     def export_to_json(
-        self, 
-        output_path: str, 
-        structure: str = "flat"
+        self,
+        output_path: str,
+        structure: str = "flat",
+        include_raw: bool = False  # ← Добавить параметр
     ) -> str:
         """
-        Экспорт результатов в JSON файл.
+         Экспорт результатов в JSON файл.
 
-        Args:
-            output_path: Путь для сохранения файла
-            structure: Формат структуры ('flat' или 'by_code')
+         Args:
+             output_path: Путь для сохранения файла
+             structure: Формат структуры ('flat' или 'by_code')
+             include_raw: Включать ли raw_response в вывод (по умолчанию False)
 
-        Returns:
-            Путь к созданному файлу
-        """
+         Returns:
+             Путь к созданному файлу
+         """
         results = self.get_all_results()
+
+        # Очищаем результаты от raw_response если не нужен
+        if not include_raw:
+            for r in results:
+                r.pop('raw_response', None)
+                r.pop('error_message', None)  # ← Опционально: убрать и ошибки
 
         if structure == "by_code":
             # Группировка по артикулам
@@ -365,9 +373,8 @@ class DatabaseManager:
                     "category": r['category'],
                     "display_name": r['display_name'],
                     "params": r.get('params', []),
-                    "processed_at": r['processed_at'],
-                    "model_used": r.get('model_used'),
-                    "api_source": r.get('api_source')
+                    "processed_at": r['processed_at']
+                    # raw_response убран
                 }
         else:
             # Плоский список

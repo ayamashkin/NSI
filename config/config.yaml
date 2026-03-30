@@ -15,7 +15,7 @@ api:
     base_url: "https://api.gpt.mws.ru/"
     api_key_file: "secrets/mws_key.txt"  # Путь к файлу с ключом
     timeout: 120
-    default_model: "gpt-oss-120b"
+    default_model: "gpt-oss-120b" #gpt-oss-120b
 
 # =============================================================================
 # Database Configuration

@@ -21,5 +21,5 @@ prompts:
       - "штифт"
       - "хомут"
     service: "mws"           # ← БЫЛО: указано
-    model: "gpt-oss-120b"
+    model: "QWEN 2.5 72B INSTRUCT" #gpt-oss-120b или QWEN 2.5 72B INSTRUCT
     temperature: 0.1
