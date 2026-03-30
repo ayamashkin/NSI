@@ -1,9 +1,10 @@
-pandas>=2.0.0
-openpyxl>=3.1.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-pyyaml>=6.0
+# Core dependencies (обязательные)
 click>=8.0.0
+pyyaml>=6.0
 requests>=2.31.0
 tqdm>=4.65.0
-python-dotenv>=1.0.0c
+
+# Optional: Excel processing (только для команды process)
+# Установить: pip install pandas openpyxl
+#pandas>=2.0.0
+#openpyxl>=3.1.0

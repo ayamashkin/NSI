@@ -41,8 +41,6 @@ nomenclature-processor/
 │   ├── __init__.py
 │   ├── excel_loader.py      # Загрузка Excel
 │   └── json_export.py       # Экспорт результатов
-├── data/
-│   └── sample_nomenclature.xlsx    # пример файла для проверки
 ├── cli.py                   # CLI интерфейс
 ├── requirements.txt
 ├── .env.example
@@ -106,49 +104,127 @@ Excel файл должен содержать колонки:
 
 ### CLI команды
 
-#### Просмотр доступных промптов
+#### Основные команды
+
+| Команда | Описание | Пример |
+|---------|----------|--------|
+| `prompts` | Список доступных промптов | `python cli.py prompts` |
+| `process` | Обработка Excel файла | `python cli.py process data.xlsx -p hardware` |
+| `export` | Экспорт результатов в JSON | `python cli.py export -o results.json` |
+| `stats` | Статистика обработки | `python cli.py stats` |
+| `errors` | Просмотр ошибок | `python cli.py errors -l 20` |
+| `detect` | Определить категорию | `python cli.py detect "Болт М12х50"` |
+
+#### Подробное описание
+
+##### `prompts` — Список промптов
 ```bash
 python cli.py prompts
 ```
+Выводит список всех настроенных промптов с указанием:
+- Название и категория
+- Используемый сервис API (openwebui/mws)
+- Модель LLM
+- Ключевые слова для автоопределения
 
-#### Обработка с автоопределением категорий
+##### `process` — Обработка Excel
 ```bash
-python cli.py process nomenclature.xlsx --auto --api openwebui -w 8
+# Автоопределение промптов
+python cli.py process data/nomenclature.xlsx --auto
+
+# Конкретный промпт
+python cli.py process data.xlsx -p hardware
+
+# Несколько промптов
+python cli.py process data.xlsx -p krepezh_v1 -p eri_v1
+
+# С указанием API (проверяет соответствие сервиса в промпте)
+python cli.py process data.xlsx -p hardware --api mws
+
+# Параллельная обработка (4 workers)
+python cli.py process data.xlsx --auto -w 4
+
+# Перезапись существующих результатов
+python cli.py process data.xlsx -p hardware -f
 ```
 
-#### Обработка конкретными промптами
+**Опции:**
+- `-p, --prompt` — ID промпта (можно несколько)
+- `-a, --auto` — Автоопределение подходящих промптов по ключевым словам
+- `--api` — Принудительный выбор API (openwebui/mws)
+- `-w, --workers` — Количество параллельных workers
+- `-f, --force` — Перезаписать существующие результаты
+
+##### `errors` — Просмотр ошибок
 ```bash
-python cli.py process nomenclature.xlsx -p krepezh_v1 -p krepezh_v2 --api openwebui
+# Последние 10 ошибок
+python cli.py errors
+
+# Последние 20 ошибок
+python cli.py errors -l 20
+
+# Ошибки конкретного промпта
+python cli.py errors -p hardware
 ```
 
-#### Использование MWS Cloud GPT
-```bash
-python cli.py process nomenclature.xlsx --auto --api mws -w 4
-```
+Выводит детали ошибок:
+- Артикул и наименование
+- Промпт и сервис API
+- Текст ошибки
+- Первые 300 символов ответа API (если есть)
 
-#### Форсированная перезапись результатов
+##### `export` — Экспорт результатов
 ```bash
-python cli.py process nomenclature.xlsx --auto --api openwebui -f
-```
-
-#### Проверка категории для наименования
-```bash
-python cli.py detect "Болт М12х50 ГОСТ 7798-70"
-```
-
-#### Экспорт результатов
-```bash
-# Плоская структура
+# Плоская структура (список)
 python cli.py export -o results.json --structure flat
 
 # Группировка по артикулам
 python cli.py export -o results_by_code.json --structure by_code
+
+# Группировка по категориям
+python cli.py export -o results.json --structure by_category
+
+# Группировка по промптам
+python cli.py export -o results.json --structure by_prompt
 ```
 
-#### Просмотр статистики
+##### `stats` — Статистика
 ```bash
 python cli.py stats
 ```
+Показывает:
+- Общее количество записей
+- Распределение по статусам (completed/ignored/error)
+- Распределение по категориям
+- Распределение по сервисам API
+
+##### `detect` — Определение категории
+```bash
+python cli.py detect "Болт М12х50 ГОСТ 7798-70"
+```
+Проверяет, какие промпты подходят для указанного наименования по ключевым словам.
+
+#### Обработка ошибок
+
+При несоответствии сервиса API:
+```bash
+$ python cli.py process data.xlsx -p hardware --api openwebui
+❌ Несоответствие сервиса API:
+   Промпт 'hardware' использует сервис 'mws', но выбран 'openwebui'
+
+💡 Варианты:
+   1. Используйте --api mws
+   2. Или не указывайте --api для использования всех промптов
+```
+
+После обработки с ошибками:
+```bash
+$ python cli.py process data.xlsx -p hardware
+...
+❌ Ошибок: 5
+💡 Просмотр ошибок: python cli.py errors
+```
+
 
 ## 📊 Форматы данных
 

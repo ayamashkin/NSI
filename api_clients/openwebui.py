@@ -1,16 +1,38 @@
-# api_clients/openwebui.py
+"""
+OpenWebUI API Client Module
+Клиент для работы с локальным OpenWebUI API.
+"""
+
 import requests
 import json
 import logging
 from typing import Dict, Any, Optional
-from api_clients.base import BaseLLMClient
+from .base import BaseLLMClient
 
 logger = logging.getLogger(__name__)
 
 
 class OpenWebUIClient(BaseLLMClient):
+    """
+    Клиент для OpenWebUI API.
+
+    Поддерживает локальные модели через OpenWebUI интерфейс.
+    Документация: https://docs.openwebui.com/api
+    """
+
     def complete(self, prompt: str, model: str, temperature: float = 0.1) -> Dict[str, Any]:
-        url = f"{self.base_url}/api/chat/completions"
+        """
+        Отправка запроса на генерацию через OpenWebUI.
+
+        Args:
+            prompt: Текст промпта
+            model: Название модели (например, "qwen3-30b")
+            temperature: Температура генерации
+
+        Returns:
+            Результат генерации
+        """
+        url = f"{self.base_url}/chat/completions"
 
         headers = {
             "Content-Type": "application/json",
@@ -20,7 +42,7 @@ class OpenWebUIClient(BaseLLMClient):
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "Вы - эксперт по техническим стандартам."},
+                {"role": "system", "content": "Вы - эксперт по техническим стандартам ГОСТ."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": temperature,
@@ -28,37 +50,27 @@ class OpenWebUIClient(BaseLLMClient):
         }
 
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response = requests.post(
+                url, 
+                headers=headers, 
+                json=payload, 
+                timeout=self.timeout
+            )
             response.raise_for_status()
             data = response.json()
 
             content = data['choices'][0]['message']['content']
 
-            # Пытаемся извлечь JSON из ответа
-            try:
-                # Ищем JSON в markdown code blocks
-                if "```json" in content:
-                    json_str = content.split("```json")[1].split("```")[0]
-                elif "```" in content:
-                    json_str = content.split("```")[1].split("```")[0]
-                else:
-                    json_str = content
+            # Пытаемся извлечь JSON
+            parsed = self._extract_json_from_response(content)
 
-                parsed = json.loads(json_str.strip())
-                return {
-                    "success": True,
-                    "content": parsed,
-                    "raw": content,
-                    "model": model
-                }
-            except json.JSONDecodeError:
-                return {
-                    "success": False,
-                    "content": None,
-                    "raw": content,
-                    "error": "JSON parse error",
-                    "model": model
-                }
+            return {
+                "success": parsed is not None,
+                "content": parsed,
+                "raw": content,
+                "model": model,
+                "error": None if parsed else "JSON parse error"
+            }
 
         except requests.exceptions.RequestException as e:
             logger.error(f"OpenWebUI request failed: {e}")
@@ -71,8 +83,14 @@ class OpenWebUIClient(BaseLLMClient):
             }
 
     def health_check(self) -> bool:
+        """Проверка доступности OpenWebUI API."""
         try:
-            response = requests.get(f"{self.base_url}/api/models", timeout=10)
+            response = requests.get(
+                f"{self.base_url}/api/models",
+                headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
+                timeout=10
+            )
             return response.status_code == 200
-        except:
+        except Exception as e:
+            logger.debug(f"OpenWebUI health check failed: {e}")
             return False

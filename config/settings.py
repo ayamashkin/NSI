@@ -6,8 +6,8 @@ Configuration Module
 import yaml
 import logging
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Any
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +22,18 @@ class APIConfig:
     default_model: Optional[str] = None
 
     def load_key(self) -> Optional[str]:
-        """Загрузка ключа из файла если указан."""
-        if self.api_key_file and Path(self.api_key_file).exists():
-            try:
-                key = Path(self.api_key_file).read_text(encoding='utf-8').strip()
-                self.api_key = key
-                logger.debug(f"Loaded API key from {self.api_key_file}")
-                return key
-            except Exception as e:
-                logger.warning(f"Failed to load key from {self.api_key_file}: {e}")
+        """Загружает ключ из указанного файла."""
+        if self.api_key_file:
+            key_path = Path(self.api_key_file)
+            if key_path.exists():
+                try:
+                    self.api_key = key_path.read_text(encoding='utf-8').strip()
+                    logger.debug(f"Loaded API key from {self.api_key_file}")
+                    return self.api_key
+                except Exception as e:
+                    logger.error(f"Failed to load key from {self.api_key_file}: {e}")
+            else:
+                logger.warning(f"Key file not found: {self.api_key_file}")
         return self.api_key
 
 
@@ -53,19 +56,25 @@ class ProcessingConfig:
 
 
 @dataclass
-class PromptsConfig:
-    """Конфигурация промптов."""
-    directory: str = "prompts/templates"
-    registry: str = "config/prompts.yaml"
+class PromptConfig:
+    """Конфигурация промпта."""
+    id: str
+    name: str
+    file: str  # Путь к файлу промпта (как в YAML)
+    category: str
+    keywords: List[str]
+    service: str  # "openwebui" или "mws"
+    model: str
+    temperature: float = 0.1
 
+    @property
+    def file_path(self) -> str:
+        """Свойство для совместимости (возвращает self.file)."""
+        return self.file
 
-@dataclass
-class LoggingConfig:
-    """Конфигурация логирования."""
-    level: str = "INFO"
-    file: str = "logs/processor.log"
-    max_size: str = "10MB"
-    backup_count: int = 5
+    def get_api_config(self, settings: 'Settings') -> 'APIConfig':
+        """Получает конфиг API для этого промпта."""
+        return settings.api[self.service]
 
 
 @dataclass
@@ -78,78 +87,77 @@ class Settings:
     api: Dict[str, APIConfig] = field(default_factory=dict)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
-    prompts: PromptsConfig = field(default_factory=PromptsConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-
-    def __post_init__(self):
-        """Инициализация после создания объекта."""
-        # Загружаем ключи для всех API
-        for name, config in self.api.items():
-            if isinstance(config, APIConfig):
-                config.load_key()
+    prompts: Dict[str, PromptConfig] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: str = "config/config.yaml") -> "Settings":
+    def load(cls, config_path: str = "config/config.yaml", 
+             prompts_path: str = "config/prompts.yaml") -> 'Settings':
         """
-        Загрузка настроек из YAML файла.
+        Загрузка настроек из YAML файлов.
 
         Args:
-            path: Путь к YAML конфигу
+            config_path: Путь к основному конфигу
+            prompts_path: Путь к реестру промптов
 
         Returns:
             Объект Settings с загруженными значениями
         """
-        config_path = Path(path)
+        # Загрузка основного конфига
+        config_data = cls._load_yaml(config_path)
 
-        if not config_path.exists():
-            logger.warning(f"Config file not found: {path}, using defaults")
-            return cls()
+        # Загрузка реестра промптов
+        prompts_data = cls._load_yaml(prompts_path)
 
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f)
+        # Парсинг API конфигураций
+        api_configs = {}
+        for name, cfg in config_data.get('api', {}).items():
+            api_cfg = APIConfig(**cfg)
+            api_cfg.load_key()  # Загружаем ключ из файла
+            api_configs[name] = api_cfg
 
-            # Парсинг API конфигураций
-            api_configs = {}
-            if 'api' in data:
-                for name, cfg in data['api'].items():
-                    api_configs[name] = APIConfig(**cfg)
+        # Парсинг промптов
+        prompt_configs = {}
+        for pid, pdata in prompts_data.get('prompts', {}).items():
+            pdata['id'] = pid
+            prompt_configs[pid] = PromptConfig(**pdata)
 
-            # Создание объекта
-            settings = cls(
-                api=api_configs,
-                database=DatabaseConfig(**data.get('database', {})),
-                processing=ProcessingConfig(**data.get('processing', {})),
-                prompts=PromptsConfig(**data.get('prompts', {})),
-                logging=LoggingConfig(**data.get('logging', {}))
-            )
+        return cls(
+            api=api_configs,
+            database=DatabaseConfig(**config_data.get('database', {})),
+            processing=ProcessingConfig(**config_data.get('processing', {})),
+            prompts=prompt_configs
+        )
 
-            logger.info(f"Loaded configuration from {path}")
-            return settings
+    @staticmethod
+    def _load_yaml(path: str) -> Dict[str, Any]:
+        """Загрузка YAML файла."""
+        file_path = Path(path)
+        if not file_path.exists():
+            logger.warning(f"Config file not found: {path}")
+            return {}
 
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}, using defaults")
-            return cls()
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f) or {}
 
-    def get_api_config(self, name: str) -> Optional[APIConfig]:
-        """Получение конфигурации API по имени."""
-        return self.api.get(name)
+    def get_api_key(self, service_name: str) -> Optional[str]:
+        """Получает ключ API по имени сервиса."""
+        if service_name in self.api:
+            return self.api[service_name].api_key
+        return None
+
+    def get_prompt(self, prompt_id: str) -> Optional[PromptConfig]:
+        """Получает конфигурацию промпта по ID."""
+        return self.prompts.get(prompt_id)
+
+    def list_prompts(self) -> List[PromptConfig]:
+        """Возвращает список всех промптов."""
+        return list(self.prompts.values())
 
     def reload_keys(self):
         """Перезагрузка API ключей из файлов."""
         for config in self.api.values():
-            if isinstance(config, APIConfig):
-                config.load_key()
+            config.load_key()
         logger.info("API keys reloaded")
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Конвертация в словарь (для отладки, без ключей)."""
-        result = asdict(self)
-        # Маскируем ключи
-        for api_name, api_cfg in result.get('api', {}).items():
-            if api_cfg.get('api_key'):
-                api_cfg['api_key'] = '***HIDDEN***'
-        return result
 
 
 # Глобальный singleton

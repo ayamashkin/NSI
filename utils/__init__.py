@@ -3,13 +3,12 @@ Utils Package
 Вспомогательные модули для работы с данными.
 """
 
-from .excel_loader import ExcelLoader, NomenclatureItem, load_nomenclature
+# НЕ импортируем excel_loader здесь, чтобы избежать импорта pandas
+# pandas загружается только при явном вызове функций
+
 from .json_export import JSONExporter, export_results
 
 __all__ = [
-    'ExcelLoader',
-    'NomenclatureItem', 
-    'load_nomenclature',
     'JSONExporter',
     'export_results'
 ]

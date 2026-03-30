@@ -6,16 +6,16 @@
 # =============================================================================
 api:
   openwebui:
-    base_url: "http://localhost:3000"
+    base_url: "https://webui.game73.ru/api"
     api_key_file: "secrets/openwebui_key.txt"  # Путь к файлу с ключом
     timeout: 120
-    default_model: "qwen-30b"
+    default_model: "qwen3-30b"
 
   mws:
-    base_url: "https://mws.ru/api/v1"
+    base_url: "https://api.gpt.mws.ru/"
     api_key_file: "secrets/mws_key.txt"  # Путь к файлу с ключом
     timeout: 120
-    default_model: "gpt-4"
+    default_model: "gpt-oss-120b"
 
 # =============================================================================
 # Database Configuration

@@ -3,7 +3,6 @@ Excel Loader Module
 Загрузка и валидация данных номенклатуры из Excel файлов.
 """
 
-import pandas as pd
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -50,7 +49,7 @@ class ExcelLoader:
             file_path: Путь к Excel файлу
         """
         self.file_path = Path(file_path)
-        self.df: Optional[pd.DataFrame] = None
+        self.df: Optional[Any] = None
 
     def load(self) -> List[NomenclatureItem]:
         """
@@ -62,7 +61,16 @@ class ExcelLoader:
         Raises:
             FileNotFoundError: Если файл не существует
             ValueError: Если отсутствуют обязательные колонки
+            ImportError: Если pandas не установлен
         """
+        # ЛЕНИВЫЙ ИМПОРТ pandas
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError(
+                "pandas не установлен. Установите: pip install pandas openpyxl"
+            )
+
         if not self.file_path.exists():
             raise FileNotFoundError(f"File not found: {self.file_path}")
 
@@ -90,6 +98,9 @@ class ExcelLoader:
 
     def _parse_dataframe(self) -> List[NomenclatureItem]:
         """Парсинг DataFrame в список объектов."""
+        # ЛЕНИВЫЙ ИМПОРТ pandas
+        import pandas as pd
+
         items = []
 
         for idx, row in self.df.iterrows():
@@ -116,7 +127,7 @@ class ExcelLoader:
 
         return items
 
-    def get_preview(self, n: int = 5) -> pd.DataFrame:
+    def get_preview(self, n: int = 5) -> Any:
         """
         Получение предпросмотра данных.
 

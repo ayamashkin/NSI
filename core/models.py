@@ -1,3 +1,8 @@
+"""
+Core Models Module
+Pydantic модели данных для системы обработки номенклатуры.
+"""
+
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
@@ -5,6 +10,7 @@ from enum import Enum
 
 
 class ProcessingStatus(str, Enum):
+    """Статусы обработки."""
     COMPLETED = "completed"
     IGNORED = "ignored"
     ERROR = "error"
@@ -12,6 +18,8 @@ class ProcessingStatus(str, Enum):
 
 
 class Category(str, Enum):
+    """Категории номенклатуры."""
+    HARDWARE = "hardware"
     KREPEZH = "krepezh"
     ERI = "eri"
     MATERIALS = "materials"
@@ -20,18 +28,20 @@ class Category(str, Enum):
 
 
 class Parameter(BaseModel):
+    """Модель параметра изделия."""
     name: str
     value: Optional[str] = ""
     default: Optional[str] = ""
-    um: Optional[str] = ""
+    um: Optional[str] = ""  # Единица измерения
 
 
 class ProcessingResult(BaseModel):
+    """Результат обработки номенклатуры."""
     article: str
     name: str
     guid: str
     prompt_id: str
-    category: Category
+    category: str
     status: ProcessingStatus
     display_name: Optional[str] = None
     params: List[Parameter] = Field(default_factory=list)
@@ -43,6 +53,7 @@ class ProcessingResult(BaseModel):
 
 
 class NomenclatureItem(BaseModel):
+    """Элемент номенклатуры из Excel."""
     article: str = Field(..., alias="артикул")
     name: str = Field(..., alias="Краткое наименование")
     guid: str = Field(..., alias="GUID")
@@ -51,11 +62,22 @@ class NomenclatureItem(BaseModel):
         populate_by_name = True
 
 
-class PromptConfig(BaseModel):
+class PromptConfigModel(BaseModel):
+    """Модель конфигурации промпта (для валидации)."""
     id: str
     name: str
-    file_path: str
-    category: Category
+    file: str
+    category: str
     keywords: List[str]
+    service: str
     model: str
     temperature: float = 0.1
+
+
+class APIConfigModel(BaseModel):
+    """Модель конфигурации API."""
+    base_url: str
+    api_key_file: Optional[str] = None
+    api_key: Optional[str] = None
+    timeout: int = 120
+    default_model: Optional[str] = None
