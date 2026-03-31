@@ -2,7 +2,7 @@
 Core Processor Module
 Основной движок обработки номенклатуры с параллельной обработкой.
 """
-
+import re
 import logging
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -83,20 +83,22 @@ class NomenclatureProcessor:
         """
         Обработка одного элемента номенклатуры.
 
-        Args:
-            item: Элемент номенклатуры
-            prompt_id: ID промпта для обработки
-            force_reprocess: Принудительная перезапись результата
-
-        Returns:
-            Словарь с результатом обработки
+        Кэширование: возвращается только успешно обработанная запись (status='completed').
+        Ошибочные и проигнорированные записи перепроверяются при каждом запуске.
         """
-        # Проверяем кэш
+        # Проверяем кэш только для успешно обработанных записей
         if not force_reprocess:
             cached = self.db.get_result(item.article, prompt_id)
-            if cached:
-                logger.debug(f"Cache hit for {item.article}/{prompt_id}")
+            # Возвращаем из кэша только если статус 'completed'
+            if cached and cached.get('status') == 'completed':
+                logger.debug(f"Cache hit for {item.article}/{prompt_id} (completed)")
                 return cached
+            # Если статус 'error' или 'ignored' — логируем и перепроверяем
+            elif cached:
+                logger.info(
+                    f"Reprocessing {item.article}/{prompt_id} "
+                    f"(previous status: {cached.get('status')})"
+                )
 
         # Получаем конфигурацию промпта
         prompt_cfg = self.settings.get_prompt(prompt_id)
@@ -105,7 +107,7 @@ class NomenclatureProcessor:
                 item, prompt_id, f"Prompt {prompt_id} not found"
             )
 
-        # Проверяем соответствие категории (простая проверка по ключевым словам)
+        # Проверяем соответствие категории по ключевым словам
         if not self._check_category_match(item.name, prompt_cfg):
             return {
                 "article": item.article,
@@ -116,7 +118,9 @@ class NomenclatureProcessor:
                 "status": "ignored",
                 "display_name": item.name,
                 "params": [],
-                "processed_at": datetime.utcnow().isoformat()
+                "processed_at": datetime.utcnow().isoformat(),
+                "model_used": None,
+                "api_source": prompt_cfg.service
             }
 
         # Загружаем текст промпта
@@ -124,8 +128,6 @@ class NomenclatureProcessor:
             prompt_text = self._load_prompt_text(prompt_cfg.file_path, item.name)
         except Exception as e:
             return self._create_error_result(item, prompt_id, f"Failed to load prompt: {e}")
-
-        logger.info(f"Prompt {prompt_id} uses service: {prompt_cfg.service}")  # ← Добавить лог
 
         # Получаем клиент API для сервиса из промпта
         try:
@@ -135,20 +137,18 @@ class NomenclatureProcessor:
 
         # Отправляем запрос к API
         try:
-            #logger.info(f"Calling API for {item.article} with prompt {prompt_id}")
             response = client.complete(
                 prompt=prompt_text,
                 model=prompt_cfg.model,
                 temperature=prompt_cfg.temperature
             )
-            #logger.info(f"API response: success={response.get('success')}, error={response.get('error')}")
         except Exception as e:
             return self._create_error_result(item, prompt_id, f"API error: {e}")
 
         # Парсим ответ
         result = self._parse_response(item, prompt_id, prompt_cfg, response)
 
-        # Сохраняем в БД
+        # Сохраняем в БД (upsert)
         self.db.upsert_result(result)
 
         return result
@@ -166,13 +166,42 @@ class NomenclatureProcessor:
         return text.replace("{{NOMENCLATURE}}", nomenclature)
 
     def _check_category_match(self, name: str, prompt_cfg: PromptConfig) -> bool:
-        """Проверка соответствия категории по ключевым словам."""
+        """
+        Проверка соответствия категории по ключевым словам.
+        Поддерживает обычные строки и регулярные выражения.
+        """
         name_lower = name.lower()
-        for keyword in prompt_cfg.keywords:
-            if keyword.lower() in name_lower:
-                return True
-        return False
 
+        for keyword in prompt_cfg.keywords:
+            keyword = keyword.strip()
+
+            # Проверяем, является ли keyword регулярным выражением
+            if keyword.startswith('regex:') or keyword.startswith('re:'):
+                # Извлекаем паттерн
+                pattern = keyword.split(':', 1)[1].strip()
+                try:
+                    if re.search(pattern, name, re.IGNORECASE):
+                        return True
+                except re.error as e:
+                    logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+                    continue
+
+            # Проверяем как обычную строку (с поддержкой wildcard *)
+            elif '*' in keyword or '?' in keyword:
+                # Конвертируем glob в regex
+                pattern = keyword.replace('.', r'\.').replace('*', '.*').replace('?', '.')
+                try:
+                    if re.search(pattern, name_lower):
+                        return True
+                except re.error:
+                    continue
+
+            # Простое вхождение подстроки
+            else:
+                if keyword.lower() in name_lower:
+                    return True
+
+        return False
     def _parse_response(
             self,
             item: NomenclatureItem,
@@ -346,11 +375,26 @@ class NomenclatureProcessor:
             results.extend(batch_results)
 
         return results
-def load_excel_items(self, excel_path: str) -> List[NomenclatureItem]:
-    """Загрузка элементов из Excel (ленивый импорт)."""
-    from utils.excel_loader import ExcelLoader  # ← Импорт внутри метода
-    loader = ExcelLoader(excel_path)
-    return loader.load()
+
+def load_excel_items(excel_path: str):
+    """Загрузка Excel с fallback на openpyxl-only."""
+    # Пробуем pandas
+    try:
+        import pandas as pd
+        df = pd.read_excel(excel_path)
+        return [
+            NomenclatureItem(
+                article=str(row['артикул']),
+                name=str(row['Краткое наименование']),
+                guid=str(row['GUID'])
+            )
+            for _, row in df.iterrows()
+        ]
+    except ImportError:
+        logger.info("Pandas not available, using openpyxl-only loader")
+        from utils.excel_loader_simple import ExcelLoader
+        loader = ExcelLoader(excel_path)
+        return loader.load()
 
 from datetime import datetime
 from pathlib import Path

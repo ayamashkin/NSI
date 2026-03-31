@@ -53,7 +53,9 @@ class ProcessingConfig:
     batch_size: int = 100
     retry_attempts: int = 3
     retry_delay: int = 5
-
+    cache_completed_only: bool = True
+    retry_errors: bool = True
+    retry_ignored: bool = True
 
 @dataclass
 class PromptConfig:

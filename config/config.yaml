@@ -34,6 +34,9 @@ processing:
   batch_size: 100
   retry_attempts: 3
   retry_delay: 5  # секунд
+  cache_completed_only: true  # ← Только completed из кэша
+  retry_errors: true          # ← Перепроверять ошибки
+  retry_ignored: true         # ← Перепроверять ignored
 
 # =============================================================================
 # Prompts Configuration
