@@ -96,7 +96,7 @@ class NomenclatureProcessor:
             # Если статус 'error' или 'ignored' — логируем и перепроверяем
             elif cached:
                 logger.info(
-                    f"Reprocessing {item.article}/{prompt_id} "
+                    f"Reprocessing {item.name} ({item.article})/{prompt_id} "
                     f"(previous status: {cached.get('status')})"
                 )
 

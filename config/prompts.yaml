@@ -22,13 +22,12 @@ prompts:
       - "хомут"
       - "анкер"
       - "саморез"
-      - "гвоздь"
     service: "mws"           # ← БЫЛО: указано
     model: "qwen2.5-72b-instruct" #gpt-oss-120b или QWEN 2.5 72B INSTRUCT
     temperature: 0.1
 
   rolledMetal:
-    rolledmetal: "Прокат - полный разбор ГОСТ"
+    name: "Прокат - полный разбор ГОСТ"
     file: "prompts/templates/rolledmetal.txt"
     category: "rolledmetal"
     keywords:
@@ -48,7 +47,7 @@ prompts:
       - "пруток"
       - "прутки"
         # Регулярное выражение
-      - "regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\.|ст\.сорт\.|ст\.констр\."
+      - 'regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\.|ст\.сорт\.|ст\.констр\.|ст\.КАЧ\.'
     service: "mws"           # ← БЫЛО: указано
     model: "qwen2.5-72b-instruct" #gpt-oss-120b или QWEN 2.5 72B INSTRUCT
     temperature: 0.1

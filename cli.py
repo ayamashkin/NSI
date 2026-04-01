@@ -4,6 +4,7 @@ Nomenclature Processor CLI
 Управление обработкой номенклатуры через командную строку.
 """
 
+import re
 import click
 import logging
 from pathlib import Path
@@ -40,6 +41,46 @@ def prompts():
         click.echo(f"    Сервис: {cfg.service}")
         click.echo(f"    Модель: {cfg.model}")
         click.echo(f"    Ключевые слова: {', '.join(cfg.keywords)}")
+
+
+def _check_category_match(name: str, prompt_cfg) -> bool:
+    """
+    Проверка соответствия категории по ключевым словам.
+    Поддерживает обычные строки, регулярные выражения и glob-шаблоны.
+    (Копия метода из processor.py для использования в CLI)
+    """
+    name_lower = name.lower()
+
+    for keyword in prompt_cfg.keywords:
+        keyword = keyword.strip()
+
+        # Проверяем, является ли keyword регулярным выражением
+        if keyword.startswith('regex:') or keyword.startswith('re:'):
+            # Извлекаем паттерн
+            pattern = keyword.split(':', 1)[1].strip()
+            try:
+                if re.search(pattern, name, re.IGNORECASE):
+                    return True
+            except re.error as e:
+                logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+                continue
+
+        # Проверяем как glob-шаблон (с поддержкой wildcard * и ?)
+        elif '*' in keyword or '?' in keyword:
+            # Конвертируем glob в regex
+            pattern = keyword.replace('.', r'\.').replace('*', '.*').replace('?', '.')
+            try:
+                if re.search(pattern, name_lower):
+                    return True
+            except re.error:
+                continue
+
+        # Простое вхождение подстроки
+        else:
+            if keyword.lower() in name_lower:
+                return True
+
+    return False
 
 
 @cli.command()
@@ -227,19 +268,30 @@ def detect(name):
 
     click.echo(f"📋 Наименование: {name}")
 
-    # Проверяем все промпты на совпадение
+    # Проверяем все промпты на совпадение (с полной поддержкой regex и glob)
     matched = []
     for pid, cfg in settings.prompts.items():
-        name_lower = name.lower()
-        for keyword in cfg.keywords:
-            if keyword.lower() in name_lower:
-                matched.append((pid, cfg))
-                break
+        if _check_category_match(name, cfg):
+            matched.append((pid, cfg))
 
     if matched:
         click.echo(f"🏷️  Найдено {len(matched)} подходящих промптов:")
         for pid, cfg in matched:
             click.echo(f"    - {pid} ({cfg.category}, сервис: {cfg.service})")
+            # Показываем какое ключевое слово сработало
+            for kw in cfg.keywords:
+                kw_stripped = kw.strip()
+                if kw_stripped.startswith('regex:') or kw_stripped.startswith('re:'):
+                    pattern = kw_stripped.split(':', 1)[1].strip()
+                    try:
+                        if re.search(pattern, name, re.IGNORECASE):
+                            click.echo(f"      ✓ Совпадение по regex: {kw[:50]}...")
+                            break
+                    except re.error:
+                        continue
+                elif kw_stripped.lower() in name.lower():
+                    click.echo(f"      ✓ Совпадение по ключевому слову: {kw}")
+                    break
     else:
         click.echo("🏷️  Категория: не определена")
         click.echo("🔧 Нет подходящих промптов")
@@ -296,5 +348,7 @@ def models(api):
 
         except Exception as e:
             click.echo(f"   ❌ Ошибка подключения: {e}", err=True)
+
+
 if __name__ == '__main__':
     cli()

@@ -32,18 +32,15 @@ nomenclature-processor/
 │   ├── __init__.py
 │   ├── registry.py          # Реестр промптов
 │   └── templates/           # Файлы промптов (.txt)
-│       ├── krepezh_v1.txt
-│       ├── krepezh_v2.txt
-│       ├── eri_v1.txt
-│       ├── materials_v1.txt
-│       └── purchased_v1.txt
+│       ├── hardware.txt
+│       ├── rolledmetal.txt
+│       └── ....txt
 ├── utils/
 │   ├── __init__.py
 │   ├── excel_loader.py      # Загрузка Excel
 │   └── json_export.py       # Экспорт результатов
 ├── cli.py                   # CLI интерфейс
 ├── requirements.txt
-├── .env.example
 └── README.md
 ```
 
@@ -86,10 +83,9 @@ DATABASE_PATH=results.db
 ### 3. Подготовка промптов
 
 Поместите файлы промптов в директорию `prompts/templates/`:
-- `krepezh_v1.txt` - для крепежных изделий
-- `eri_v1.txt` - для электрорадиоизделий
-- `materials_v1.txt` - для материалов
-- `purchased_v1.txt` - для покупных изделий
+- `hardware.txt` - для крепежных изделий и метизов
+- `rolledmetal.txt` - для проката
+
 
 Настройте `config/prompts.yaml` для регистрации промптов.
 
@@ -137,7 +133,7 @@ python cli.py process data/nomenclature.xlsx --auto
 python cli.py process data.xlsx -p hardware
 
 # Несколько промптов
-python cli.py process data.xlsx -p krepezh_v1 -p eri_v1
+python cli.py process data.xlsx -p hardware -p rolledmetal
 
 # С указанием API (проверяет соответствие сервиса в промпте)
 python cli.py process data.xlsx -p hardware --api mws
@@ -255,8 +251,8 @@ python cli.py models --api mws
     "article": "001",
     "name": "Болт М12х50 ГОСТ 7798-70",
     "guid": "guid-1",
-    "prompt_id": "krepezh_v1",
-    "category": "krepezh",
+    "prompt_id": "hardware",
+    "category": "hardware",
     "status": "completed",
     "display_name": "Болт М12х50 ГОСТ 7798-70",
     "params": [
@@ -310,7 +306,7 @@ prompts:
   krepezh_v1:
     name: "Крепеж - полный разбор ГОСТ"
     file: "prompts/templates/krepezh_v1.txt"
-    category: "krepezh"
+    category: "hardware"
     keywords: ["болт", "гайка", "шуруп", "винт", "шайба", "заклепка"]
     model: "qwen-30b"
     temperature: 0.1
