@@ -79,5 +79,8 @@ class APIConfigModel(BaseModel):
     base_url: str
     api_key_file: Optional[str] = None
     api_key: Optional[str] = None
+    password_file: Optional[str] = None
+    password: Optional[str] = None
+    scope: Optional[str] = None
     timeout: int = 120
     default_model: Optional[str] = None
