@@ -8,7 +8,7 @@
 - Автоматической классификации номенклатуры по категориям (крепеж, ЭРИ, материалы, покупные изделия)
 - Извлечения структурированных технических параметров из неструктурированных наименований
 - Пакетной обработки больших объемов данных (десятки тысяч позиций)
-- Интеграции с локальными LLM (OpenWebUI) и облачными API (MWS Cloud GPT)
+- Интеграции с локальными LLM (OpenWebUI), облачными API (MWS Cloud GPT, GigaChat)
 
 ## 🏗️ Архитектура
 
@@ -16,30 +16,30 @@
 nomenclature-processor/
 ├── config/
 │   ├── __init__.py
-│   ├── settings.py          # Конфигурация API и путей
-│   └── prompts.yaml         # Реестр промптов по категориям
+│   ├── settings.py              # Конфигурация API и путей
+│   ├── config.yaml              # Основная конфигурация API и БД
+│   └── prompts.yaml             # Реестр промптов по категориям
 ├── core/
 │   ├── __init__.py
-│   ├── models.py            # Pydantic модели данных
-│   ├── database.py          # SQLite manager с upsert
-│   └── processor.py         # Основной движок обработки
+│   ├── models.py                # Pydantic модели данных
+│   ├── database.py              # SQLite manager с upsert
+│   ├── processor.py             # Основной движок обработки
+│   └── registry.py              # Реестр промптов
 ├── api_clients/
 │   ├── __init__.py
-│   ├── base.py              # Абстрактный класс клиента
-│   ├── openwebui.py         # Клиент для OpenWebUI
-│   └── mws_gpt.py           # Клиент для MWS Cloud GPT
-├── prompts/
-│   ├── __init__.py
-│   ├── registry.py          # Реестр промптов
-│   └── templates/           # Файлы промптов (.txt)
-│       ├── hardware.txt
-│       ├── rolledmetal.txt
-│       └── ....txt
+│   ├── base.py                  # Абстрактный класс клиента
+│   ├── openwebui.py             # Клиент для OpenWebUI API
+│   ├── mws_gpt.py               # Клиент для MWS Cloud GPT API
+│   └── gigachat.py              # Клиенты для GigaChat API (Enterprise + Cloud)
 ├── utils/
 │   ├── __init__.py
-│   ├── excel_loader.py      # Загрузка Excel
-│   └── json_export.py       # Экспорт результатов
-├── cli.py                   # CLI интерфейс
+│   ├── excel_loader.py          # Загрузка Excel через pandas/openpyxl
+│   └── excel_loader_simple.py   # Загрузка Excel только через openpyxl
+├── secrets/                     # Учетные данные (не в git)
+├── prompts/templates/           # Файлы промптов (.txt)
+├── logs/                        # Директория для логов
+├── cli.py                       # CLI интерфейс (точка входа)
+├── results.db                   # SQLite база данных (создается автоматически)
 ├── requirements.txt
 └── README.md
 ```
@@ -57,102 +57,123 @@ cd nomenclature-processor
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # или
-.venv\Scripts\activate  # Windows
+venv\Scripts\activate     # Windows
 
 # Установка зависимостей
 pip install -r requirements.txt
 ```
 
-### 2. Конфигурация
+### 2. Конфигурация API
 
-Создайте файл `.env` в корне проекта:
+Создайте директорию `secrets/` и файлы с учетными данными:
 
-```env
-# OpenWebUI (локальные модели)
-OPENWEBUI_URL=http://localhost:3000
-OPENWEBUI_API_KEY=your_openwebui_key
-
-# MWS Cloud GPT (облачный API)
-MWS_URL=https://mws.ru/api/v1
-MWS_API_KEY=your_mws_api_key
-
-# База данных
-DATABASE_PATH=results.db
+**OpenWebUI:**
+```bash
+echo "your_openwebui_key" > secrets/openwebui_key.txt
 ```
 
-### 3. Подготовка промптов
+**MWS Cloud GPT:**
+```bash
+echo "your_mws_api_key" > secrets/mws_key.txt
+```
 
-Поместите файлы промптов в директорию `prompts/templates/`:
-- `hardware.txt` - для крепежных изделий и метизов
-- `rolledmetal.txt` - для проката
+**GigaChat Cloud (giga.chat):**
+```bash
+echo "your_authorization_key" > secrets/gigachat_credentials.txt
+```
 
+### 3. Настройка config.yaml
 
-Настройте `config/prompts.yaml` для регистрации промптов.
+Основная конфигурация в `config/config.yaml`:
 
-### 4. Подготовка данных
+```yaml
+api:
+  openwebui:
+    base_url: "https://webui.game73.ru/api"
+    api_key_file: "secrets/openwebui_key.txt"
+    timeout: 120
+    default_model: "qwen3-30b"
+
+  mws:
+    base_url: "https://api.gpt.mws.ru/"
+    api_key_file: "secrets/mws_key.txt"
+    timeout: 120
+    default_model: "qwen2.5-72b-instruct"
+
+  gigachat:
+    base_url: "https://gigachat.devices.sberbank.ru/api/v1"
+    api_key_file: "secrets/gigachat_credentials.txt"     # Authorization Key
+    scope: "GIGACHAT_API_PERS"  # GIGACHAT_API_PERS, GIGACHAT_API_B2B или GIGACHAT_API_CORP
+    timeout: 120
+    default_model: "GigaChat"
+```
+
+### 4. Подготовка промптов
+
+Поместите файлы промптов в `prompts/templates/` и настройте `config/prompts.yaml`:
+
+```yaml
+prompts:
+  krepezh_v1:
+    name: "Крепеж - полный разбор ГОСТ"
+    file: "prompts/templates/krepezh_v1.txt"
+    category: "hardware"
+    keywords: ["болт", "гайка", "шуруп", "винт", "шайба", "заклепка"]
+    service: "mws"  # или "openwebui","gigachat"
+    model: "gigachat-pro"
+    temperature: 0.1
+```
+
+### 5. Подготовка данных
 
 Excel файл должен содержать колонки:
-- `артикул` - уникальный код изделия
-- `Краткое наименование` - наименование для анализа
-- `GUID` - внутренний идентификатор
+- `артикул` — уникальный код изделия
+- `Краткое наименование` — наименование для анализа
+- `GUID` — внутренний идентификатор
 
 ## 🚀 Использование
 
 ### CLI команды
 
-#### Основные команды
+| Команда | Описание | Пример                                          |
+|---------|----------|-------------------------------------------------|
+| `prompts` | Список доступных промптов | `python cli.py prompts`                         |
+| `process` | Обработка Excel файла | `python cli.py process data.xlsx -p krepezh_v1` |
+| `export` | Экспорт результатов в JSON | `python cli.py export -o results.json`          |
+| `stats` | Статистика обработки | `python cli.py stats`                           |
+| `errors` | Просмотр ошибок | `python cli.py errors -l 20`                    |
+| `detect` | Определить категорию | `python cli.py detect "Болт М12х50"`            |
+| `models` | Список доступных моделей | `python cli.py models --api wms`                |
 
-| Команда | Описание                         | Пример |
-|---------|----------------------------------|--------|
-| `prompts` | Список доступных промптов        | `python cli.py prompts` |
-| `process` | Обработка Excel файла            | `python cli.py process data.xlsx -p hardware` |
-| `export` | Экспорт результатов в JSON       | `python cli.py export -o results.json` |
-| `stats` | Статистика обработки             | `python cli.py stats` |
-| `errors` | Просмотр ошибок                  | `python cli.py errors -l 20` |
-| `detect` | Определить категорию             | `python cli.py detect "Болт М12х50"` |
-| `models` | Вывести список доступных моделей | `python cli.py models` |
+### Примеры использования
 
-#### Подробное описание
-
-##### `prompts` — Список промптов
+#### Список промптов
 ```bash
 python cli.py prompts
 ```
-Выводит список всех настроенных промптов с указанием:
-- Название и категория
-- Используемый сервис API (openwebui/mws)
-- Модель LLM
-- Ключевые слова для автоопределения
 
-##### `process` — Обработка Excel
+#### Обработка Excel
 ```bash
-# Автоопределение промптов
+# Автоопределение промптов по ключевым словам
 python cli.py process data/nomenclature.xlsx --auto
 
 # Конкретный промпт
-python cli.py process data.xlsx -p hardware
+python cli.py process data.xlsx -p krepezh_v1
 
 # Несколько промптов
-python cli.py process data.xlsx -p hardware -p rolledmetal
+python cli.py process data.xlsx -p krepezh_v1 -p eri_v1
 
 # С указанием API (проверяет соответствие сервиса в промпте)
-python cli.py process data.xlsx -p hardware --api mws
+python cli.py process data.xlsx -p krepezh_v1 --api gigachat 
 
-# Параллельная обработка (4 workers)
+# Параллельная обработка
 python cli.py process data.xlsx --auto -w 4
 
 # Перезапись существующих результатов
-python cli.py process data.xlsx -p hardware -f
+python cli.py process data.xlsx -p krepezh_v1 -f
 ```
 
-**Опции:**
-- `-p, --prompt` — ID промпта (можно несколько)
-- `-a, --auto` — Автоопределение подходящих промптов по ключевым словам
-- `--api` — Принудительный выбор API (openwebui/mws)
-- `-w, --workers` — Количество параллельных workers
-- `-f, --force` — Перезаписать существующие результаты
-
-##### `errors` — Просмотр ошибок
+#### Просмотр ошибок
 ```bash
 # Последние 10 ошибок
 python cli.py errors
@@ -161,69 +182,22 @@ python cli.py errors
 python cli.py errors -l 20
 
 # Ошибки конкретного промпта
-python cli.py errors -p hardware
+python cli.py errors -p krepezh_v1
 ```
 
-Выводит детали ошибок:
-- Артикул и наименование
-- Промпт и сервис API
-- Текст ошибки
-- Первые 300 символов ответа API (если есть)
-
-##### `export` — Экспорт результатов
+#### Экспорт результатов
 ```bash
-# Плоская структура (список)
+# Плоская структура
 python cli.py export -o results.json --structure flat
 
 # Группировка по артикулам
-python cli.py export -o results_by_code.json --structure by_code
+python cli.py export -o results.json --structure by_code
 
 # Группировка по категориям
 python cli.py export -o results.json --structure by_category
-
-# Группировка по промптам
-python cli.py export -o results.json --structure by_prompt
 ```
 
-##### `stats` — Статистика
-```bash
-python cli.py stats
-```
-Показывает:
-- Общее количество записей
-- Распределение по статусам (completed/ignored/error)
-- Распределение по категориям
-- Распределение по сервисам API
-
-##### `detect` — Определение категории
-```bash
-python cli.py detect "Болт М12х50 ГОСТ 7798-70"
-```
-Проверяет, какие промпты подходят для указанного наименования по ключевым словам.
-
-#### Обработка ошибок
-
-При несоответствии сервиса API:
-```bash
-$ python cli.py process data.xlsx -p hardware --api openwebui
-❌ Несоответствие сервиса API:
-   Промпт 'hardware' использует сервис 'mws', но выбран 'openwebui'
-
-💡 Варианты:
-   1. Используйте --api mws
-   2. Или не указывайте --api для использования всех промптов
-```
-
-После обработки с ошибками:
-```bash
-$ python cli.py process data.xlsx -p hardware
-...
-❌ Ошибок: 5
-💡 Просмотр ошибок: python cli.py errors
-```
-#### Список доступных моделей
-
-Запрос списка моделей
+#### Список моделей API
 ```bash
 # Все сервисы
 python cli.py models
@@ -231,6 +205,7 @@ python cli.py models
 # Конкретный сервис
 python cli.py models --api openwebui
 python cli.py models --api mws
+python cli.py models --api gigachat
 ```
 
 ## 📊 Форматы данных
@@ -251,7 +226,7 @@ python cli.py models --api mws
     "article": "001",
     "name": "Болт М12х50 ГОСТ 7798-70",
     "guid": "guid-1",
-    "prompt_id": "hardware",
+    "prompt_id": "krepezh_v1",
     "category": "hardware",
     "status": "completed",
     "display_name": "Болт М12х50 ГОСТ 7798-70",
@@ -270,98 +245,75 @@ python cli.py models --api mws
       }
     ],
     "processed_at": "2024-01-15T10:30:00",
-    "model_used": "qwen-30b",
-    "api_source": "OpenWebUIClient"
+    "model_used": "gigachat-pro",
+    "api_source": "gigachat"
   }
 ]
 ```
 
-### Выходной JSON (by_code)
-
-```json
-{
-  "001": {
-    "article": "001",
-    "name": "Болт М12х50 ГОСТ 7798-70",
-    "guid": "guid-1",
-    "prompts": {
-      "krepezh_v1": {
-        "status": "completed",
-        "category": "krepezh",
-        "display_name": "Болт М12х50 ГОСТ 7798-70",
-        "params": [...],
-        "processed_at": "2024-01-15T10:30:00"
-      }
-    }
-  }
-}
-```
-
 ## 🔧 Конфигурация промптов
-
-Файл `config/prompts.yaml`:
-
-```yaml
-prompts:
-  krepezh_v1:
-    name: "Крепеж - полный разбор ГОСТ"
-    file: "prompts/templates/krepezh_v1.txt"
-    category: "hardware"
-    keywords: ["болт", "гайка", "шуруп", "винт", "шайба", "заклепка"]
-    model: "qwen-30b"
-    temperature: 0.1
-
-  eri_v1:
-    name: "Электрорадиоизделия"
-    file: "prompts/templates/eri_v1.txt"
-    category: "eri"
-    keywords: ["резистор", "конденсатор", "транзистор", "диод", "микросхема"]
-    model: "qwen-30b"
-    temperature: 0.1
-```
 
 ### Правила автоопределения категории
 
-Система автоматически определяет категорию по ключевым словам в наименовании:
-- **Крепеж**: болт, гайка, шуруп, винт, шайба, заклепка, шпилька, гвоздь
-- **ЭРИ**: резистор, конденсатор, транзистор, диод, микросхема, чип
-- **Материалы**: сталь, алюминий, медь, латунь, пластик, резина, лента
-- **Покупные**: подшипник, сальник, ремень, цепь, шланг, клапан
+Система поддерживает три типа ключевых слов:
 
-## 🔄 Upsert семантика
+1. **Обычные строки** — подстроковое совпадение
+   ```yaml
+   keywords: ["болт", "гайка"]
+   ```
 
-База данных SQLite гарантирует уникальность записей по составному ключу `(article, prompt_id)`:
-- Если запись существует - она обновляется
-- Если записи нет - она создается
-- Это позволяет безопасно перезапускать обработку
+2. **Glob-шаблоны** — с wildcards `*` и `?`
+   ```yaml
+   keywords: ["винт*м", "шайба???"]
+   ```
 
-## 🛡️ Обработка ошибок
-
-Система обрабатывает следующие сценарии:
-- **IGNORED**: Номенклатура не соответствует категории промпта
-- **COMPLETED**: Успешная обработка
-- **ERROR**: Ошибка API или парсинга ответа
-
-## 📈 Производительность
-
-- **Параллельная обработка**: Настраиваемое количество workers (параметр `-w`)
-- **Кэширование**: SQLite база для хранения промежуточных результатов
-- **Прогресс-бар**: Визуализация процесса обработки
-- **Рекомендации**: 
-  - Для OpenWebUI (локальные модели): 4-8 workers
-  - Для MWS Cloud GPT: 2-4 workers (лимиты API)
+3. **Регулярные выражения** — префикс `regex:` или `re:`
+   ```yaml
+   keywords: ["regex:болт.*гост", "re:гайка.*м\\d+"]
+   ```
 
 ## 🔌 API Интеграции
 
 ### OpenWebUI
-- Поддержка локальных моделей (Qwen, Llama, etc.)
-- Конфигурация через переменные окружения
-- Автоматический парсинг JSON из markdown
+- Локальные модели через OpenWebUI API
+- Поддержка моделей Qwen, Llama и др.
+- Автоматический парсинг JSON из markdown code blocks
 
 ### MWS Cloud GPT
 - Облачный API от MWS
-- Модели GPT-4 и аналоги
-- Требуется API ключ от MWS
+- Модели: qwen2.5-72b-instruct, gpt-oss-120b и др.
+- Стандартная авторизация по API ключу
+
+
+### GigaChat Cloud (giga.chat)
+- Облачный API Сбера для физических лиц и B2B
+- **Авторизация:** OAuth2 с Authorization Key (credentials)
+- **Scope:** GIGACHAT_API_PERS, GIGACHAT_API_B2B или GIGACHAT_API_CORP
+- Модели: GigaChat, GigaChat-Pro, GigaChat-Max
+
+## 🔄 Upsert семантика
+
+База данных SQLite гарантирует уникальность записей по составному ключу `(article, prompt_id)`:
+- Если запись существует — она обновляется
+- Если записи нет — она создается
+- Повторный запуск безопасен и не создает дубликатов
+
+## 🛡️ Обработка ошибок
+
+| Статус | Описание | Действие при повторном запуске |
+|--------|----------|-------------------------------|
+| **COMPLETED** | Успешная обработка | Берется из кэша (если `cache_completed_only: true`) |
+| **IGNORED** | Номенклатура не соответствует категории | Перепроверяется (если `retry_ignored: true`) |
+| **ERROR** | Ошибка API или парсинга | Перепроверяется (если `retry_errors: true`) |
+
+## 📈 Производительность
+
+- **Параллельная обработка:** настраиваемое количество workers
+- **Кэширование:** SQLite с UPSERT для промежуточных результатов
+- **Рекомендации:**
+  - OpenWebUI (локальные модели): 4-8 workers
+  - MWS Cloud GPT: 2-4 workers
+  - GigaChat API: 2-4 workers (лимиты API)
 
 ## 🧪 Тестирование
 
@@ -369,47 +321,51 @@ prompts:
 # Тест определения категории
 python cli.py detect "Болт М12х1.25-6gx100.58 ГОСТ 7795-70"
 
+# Проверка доступности API
+python cli.py models --api gigachat 
+
 # Тест с небольшой выборкой
 python cli.py process test_sample.xlsx --auto -w 2
 
-# Проверка статистики после теста
+# Проверка статистики
 python cli.py stats
 ```
 
 ## 📝 Логирование
 
-Логи выводятся в консоль с уровнем INFO:
-- Загрузка данных
-- Прогресс обработки
-- Ошибки API
-- Результаты сохранения
+Логи сохраняются в `logs/processor.log` и выводятся в консоль:
+- Уровень логирования настраивается в `config.yaml` (`logging.level`)
+- Ротация логов: 5 файлов по 10MB каждый
 
 ## 🤝 Разработка
+
+### Добавление нового API клиента
+
+1. Создать класс в `api_clients/`, наследующий `BaseLLMClient`
+2. Реализовать методы: `complete()`, `health_check()`, `get_models()`
+3. Добавить инициализацию в `core/processor.py::_init_api_clients()`
+4. Добавить в CLI в `cli.py` (команда `models`)
+5. Обновить `config/config.yaml` с настройками нового API
 
 ### Добавление новой категории
 
 1. Создать файл промпта в `prompts/templates/`
 2. Добавить запись в `config/prompts.yaml`
 3. Указать ключевые слова для автоопределения
-
-### Добавление нового API клиента
-
-1. Создать класс в `api_clients/`, наследующий `BaseLLMClient`
-2. Реализовать методы `complete()` и `health_check()`
-3. Добавить выбор в CLI
+4. Выбрать подходящий сервис API и модель
 
 ## 📋 Требования
 
 - Python 3.9+
-- Доступ к API (OpenWebUI или MWS)
+- Зависимости: `requests`, `pyyaml`, `pydantic`, `click`, `tqdm`, `openpyxl`, `pandas` (опционально)
+- Доступ к хотя бы одному API (OpenWebUI, MWS, GigaChat)
 - Excel файл с номенклатурой
-
 
 ## 🆘 Поддержка
 
 При возникновении проблем:
-1. Проверьте доступность API: `python cli.py stats`
-2. Проверьте конфигурацию в `.env`
-3. Проверьте формат Excel файла
-4. Обратитесь к документации API провайдера
-
+1. Проверьте доступность API: `python cli.py models --api <name>`
+2. Проверьте файлы учетных данных в `secrets/`
+3. Проверьте формат Excel файла (колонки: артикул, Краткое наименование, GUID)
+4. Просмотрите логи: `logs/processor.log`
+5. Проверьте ошибки: `python cli.py errors`

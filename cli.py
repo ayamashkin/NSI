@@ -87,7 +87,7 @@ def _check_category_match(name: str, prompt_cfg) -> bool:
 @click.argument('excel_path', type=click.Path(exists=True))
 @click.option('--prompt', '-p', multiple=True, help='ID промпта (можно несколько)')
 @click.option('--auto', '-a', is_flag=True, help='Автоопределение промптов')
-@click.option('--api', type=click.Choice(['openwebui', 'mws']), default=None)
+@click.option('--api', type=click.Choice(['openwebui', 'mws', 'gigachat']), default=None)
 @click.option('--workers', '-w', default=None, type=int)
 @click.option('--force', '-f', is_flag=True)
 def process(excel_path, prompt, auto, api, workers, force):
@@ -298,8 +298,9 @@ def detect(name):
 
 
 @cli.command()
-@click.option('--api', type=click.Choice(['openwebui', 'mws', 'all']), default='all',
+@click.option('--api', type=click.Choice(['openwebui', 'mws', 'gigachat', 'all']), default='all',
               help='Сервис для запроса моделей')
+
 def models(api):
     """Список доступных моделей у сервисов API"""
     settings = get_settings()
@@ -331,6 +332,15 @@ def models(api):
                 client = MWSGPTClient(
                     base_url=api_config.base_url,
                     api_key=api_config.api_key
+                )
+            elif service_name == "gigachat":
+                from api_clients.gigachat import GigaChatClient
+                client = GigaChatClient(
+                    base_url=api_config.base_url,
+                    api_key=api_config.api_key,
+                    scope=api_config.scope,
+                    timeout=api_config.timeout,
+                    verify_ssl=False
                 )
             else:
                 continue

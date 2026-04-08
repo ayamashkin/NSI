@@ -17,6 +17,13 @@ api:
     timeout: 120
     default_model: "qwen2.5-72b-instruct" #gpt-oss-120b
 
+  gigachat:
+    base_url: "https://gigachat.devices.sberbank.ru/api/v1"
+    api_key_file: "secrets/gigachat_credentials.txt"
+    scope: "GIGACHAT_API_PERS"
+    timeout: 120
+    default_model: "GigaChat"
+
 # =============================================================================
 # Database Configuration
 # =============================================================================

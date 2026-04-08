@@ -22,8 +22,8 @@ prompts:
       - "хомут"
       - "анкер"
       - "саморез"
-    service: "mws"           # ← БЫЛО: указано
-    model: "qwen2.5-72b-instruct" #gpt-oss-120b или QWEN 2.5 72B INSTRUCT
+    service: "mws"
+    model: "qwen2.5-72b-instruct"
     temperature: 0.1
 
   rolledMetal:
@@ -48,6 +48,6 @@ prompts:
       - "прутки"
         # Регулярное выражение
       - 'regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\.|ст\.сорт\.|ст\.констр\.|ст\.КАЧ\.'
-    service: "mws"           # ← БЫЛО: указано
-    model: "qwen2.5-72b-instruct" #gpt-oss-120b или QWEN 2.5 72B INSTRUCT
+    service: "mws"
+    model: "qwen2.5-72b-instruct"
     temperature: 0.1

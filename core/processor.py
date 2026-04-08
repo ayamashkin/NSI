@@ -51,20 +51,36 @@ class NomenclatureProcessor:
         self.clients = {}
 
         for service_name, api_config in self.settings.api.items():
-            logger.info(f"Initializing API client: {service_name} -> {api_config.base_url}")  # ← Добавить лог
+            logger.info(f"Initializing API client: {service_name}")
 
             if service_name == "openwebui":
                 from api_clients.openwebui import OpenWebUIClient
                 self.clients[service_name] = OpenWebUIClient(
                     base_url=api_config.base_url,
-                    api_key=api_config.api_key
+                    api_key=api_config.api_key,
+                    timeout=api_config.timeout
                 )
+
             elif service_name == "mws":
                 from api_clients.mws_gpt import MWSGPTClient
                 self.clients[service_name] = MWSGPTClient(
                     base_url=api_config.base_url,
-                    api_key=api_config.api_key
+                    api_key=api_config.api_key,
+                    timeout=api_config.timeout
                 )
+
+            elif service_name == "gigachat":
+                from api_clients.gigachat import GigaChatClient
+                self.clients[service_name] = GigaChatClient(
+                    base_url=api_config.base_url,
+                    api_key=api_config.api_key,
+                    scope=api_config.scope or "GIGACHAT_API_PERS",
+                    timeout=api_config.timeout,
+                    verify_ssl=False  # True если установлены сертификаты НУЦ
+                )
+                auth_type = "password" if api_config.password else "credentials"
+                logger.info(f"GigaChat client initialized ({auth_type} auth)")
+
             else:
                 logger.warning(f"Unknown API service: {service_name}")
 

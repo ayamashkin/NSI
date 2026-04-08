@@ -14,26 +14,42 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class APIConfig:
-    """Конфигурация API."""
     base_url: str
     api_key_file: Optional[str] = None
-    api_key: Optional[str] = None  # Загружается из файла
+    api_key: Optional[str] = None
+    password_file: Optional[str] = None
+    password: Optional[str] = None
+    auth_url: Optional[str] = None
+    scope: Optional[str] = None
     timeout: int = 120
     default_model: Optional[str] = None
 
     def load_key(self) -> Optional[str]:
-        """Загружает ключ из указанного файла."""
+        """Загружает ключ/логин из указанного файла и пароль если есть."""
+        # Загружаем ключ (или логин для GigaChat Enterprise / credentials для giga.chat)
         if self.api_key_file:
             key_path = Path(self.api_key_file)
             if key_path.exists():
                 try:
                     self.api_key = key_path.read_text(encoding='utf-8').strip()
                     logger.debug(f"Loaded API key from {self.api_key_file}")
-                    return self.api_key
                 except Exception as e:
                     logger.error(f"Failed to load key from {self.api_key_file}: {e}")
             else:
                 logger.warning(f"Key file not found: {self.api_key_file}")
+
+        # Загружаем пароль для GigaChat Enterprise
+        if self.password_file:
+            pwd_path = Path(self.password_file)
+            if pwd_path.exists():
+                try:
+                    self.password = pwd_path.read_text(encoding='utf-8').strip()
+                    logger.debug(f"Loaded password from {self.password_file}")
+                except Exception as e:
+                    logger.error(f"Failed to load password from {self.password_file}: {e}")
+            else:
+                logger.warning(f"Password file not found: {self.password_file}")
+
         return self.api_key
 
 
@@ -57,6 +73,7 @@ class ProcessingConfig:
     retry_errors: bool = True
     retry_ignored: bool = True
 
+
 @dataclass
 class PromptConfig:
     """Конфигурация промпта."""
@@ -65,7 +82,7 @@ class PromptConfig:
     file: str  # Путь к файлу промпта (как в YAML)
     category: str
     keywords: List[str]
-    service: str  # "openwebui" или "mws"
+    service: str  # "openwebui", "mws", "gigaenterprise", "gigachat"
     model: str
     temperature: float = 0.1
 
@@ -92,7 +109,7 @@ class Settings:
     prompts: Dict[str, PromptConfig] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, config_path: str = "config/config.yaml", 
+    def load(cls, config_path: str = "config/config.yaml",
              prompts_path: str = "config/prompts.yaml") -> 'Settings':
         """
         Загрузка настроек из YAML файлов.
@@ -114,7 +131,7 @@ class Settings:
         api_configs = {}
         for name, cfg in config_data.get('api', {}).items():
             api_cfg = APIConfig(**cfg)
-            api_cfg.load_key()  # Загружаем ключ из файла
+            api_cfg.load_key()  # Загружаем ключ и пароль из файлов
             api_configs[name] = api_cfg
 
         # Парсинг промптов
@@ -145,6 +162,18 @@ class Settings:
         """Получает ключ API по имени сервиса."""
         if service_name in self.api:
             return self.api[service_name].api_key
+        return None
+
+    def get_api_password(self, service_name: str) -> Optional[str]:
+        """Получает пароль API по имени сервиса (для GigaEnterprise)."""
+        if service_name in self.api:
+            return self.api[service_name].password
+        return None
+
+    def get_api_scope(self, service_name: str) -> Optional[str]:
+        """Получает OAuth scope по имени сервиса (для GigaChat)."""
+        if service_name in self.api:
+            return self.api[service_name].scope
         return None
 
     def get_prompt(self, prompt_id: str) -> Optional[PromptConfig]:
