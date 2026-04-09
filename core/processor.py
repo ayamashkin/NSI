@@ -123,6 +123,12 @@ class NomenclatureProcessor:
                 item, prompt_id, f"Prompt {prompt_id} not found"
             )
 
+        # Загружаем текст промпта
+        try:
+            prompt_text = self._load_prompt_text(prompt_cfg.file_path, item.name)
+        except Exception as e:
+            return self._create_error_result(item, prompt_id, f"Failed to load prompt: {e}")
+
         # Проверяем соответствие категории по ключевым словам
         if not self._check_category_match(item.name, prompt_cfg):
             return {
@@ -134,16 +140,12 @@ class NomenclatureProcessor:
                 "status": "ignored",
                 "display_name": item.name,
                 "params": [],
+                "prompt_text": prompt_text,  # ← Сохраняем промпт даже для ignored
                 "processed_at": datetime.utcnow().isoformat(),
                 "model_used": None,
                 "api_source": prompt_cfg.service
             }
 
-        # Загружаем текст промпта
-        try:
-            prompt_text = self._load_prompt_text(prompt_cfg.file_path, item.name)
-        except Exception as e:
-            return self._create_error_result(item, prompt_id, f"Failed to load prompt: {e}")
 
         # Получаем клиент API для сервиса из промпта
         try:
@@ -151,19 +153,21 @@ class NomenclatureProcessor:
         except ValueError as e:
             return self._create_error_result(item, prompt_id, str(e))
 
-        # Отправляем запрос к API
+        # Отправляем запрос к API с системным промптом из конфигурации
         try:
             response = client.complete(
                 prompt=prompt_text,
                 model=prompt_cfg.model,
-                temperature=prompt_cfg.temperature
+                temperature=prompt_cfg.temperature,
+                system_prompt=prompt_cfg.system_prompt
             )
         except Exception as e:
             return self._create_error_result(item, prompt_id, f"API error: {e}")
 
         # Парсим ответ
         result = self._parse_response(item, prompt_id, prompt_cfg, response)
-
+        result['prompt_text'] = prompt_text  # ← НОВОЕ
+        
         # Сохраняем в БД (upsert)
         self.db.upsert_result(result)
 

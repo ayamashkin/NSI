@@ -72,6 +72,7 @@ class PromptConfigModel(BaseModel):
     service: str
     model: str
     temperature: float = 0.1
+    system_prompt: Optional[str] = None  # Системный промпт для модели
 
 
 class APIConfigModel(BaseModel):

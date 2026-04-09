@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 class OpenWebUIClient(BaseLLMClient):
     """Клиент для OpenWebUI API."""
 
-    def complete(self, prompt: str, model: str, temperature: float = 0.1) -> Dict[str, Any]:
+    def complete(self, prompt: str, model: str, temperature: float = 0.1,
+                 system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """Отправка запроса на генерацию через OpenWebUI."""
         url = f"{self.base_url}/chat/completions"
 
@@ -24,10 +25,13 @@ class OpenWebUIClient(BaseLLMClient):
             "Authorization": f"Bearer {self.api_key}" if self.api_key else ""
         }
 
+        # Используем переданный system_prompt или значение по умолчанию
+        system_content = system_prompt if system_prompt else "Вы - эксперт по техническим стандартам ГОСТ."
+
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "Вы - эксперт по техническим стандартам ГОСТ."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt}
             ],
             "temperature": temperature,

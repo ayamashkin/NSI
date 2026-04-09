@@ -82,9 +82,10 @@ class PromptConfig:
     file: str  # Путь к файлу промпта (как в YAML)
     category: str
     keywords: List[str]
-    service: str  # "openwebui", "mws", "gigaenterprise", "gigachat"
+    service: str  # "openwebui", "mws", "gigachat"
     model: str
     temperature: float = 0.1
+    system_prompt: Optional[str] = None  # Системный промпт для модели
 
     @property
     def file_path(self) -> str:
@@ -165,7 +166,6 @@ class Settings:
         return None
 
     def get_api_password(self, service_name: str) -> Optional[str]:
-        """Получает пароль API по имени сервиса (для GigaEnterprise)."""
         if service_name in self.api:
             return self.api[service_name].password
         return None

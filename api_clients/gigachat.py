@@ -85,62 +85,67 @@ class GigaChatClient(BaseLLMClient):
 
         return creds
 
-    def complete(self, prompt: str, model: str, temperature: float = 0.1) -> Dict[str, Any]:
-        """Отправка запроса на генерацию."""
-        try:
-            response = self.client.chat({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "Вы - эксперт по техническим стандартам ГОСТ."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": temperature,
-                "stream": False
-            })
+    def complete(self, prompt: str, model: str, temperature: float = 0.1,
+                 system_prompt: Optional[str] = None, max_retries: int = 3) -> Dict[str, Any]:
+        """Отправка запроса на генерацию с retry при rate limiting."""
+        import time
 
-            content = response.choices[0].message.content
-            parsed = self._extract_json_from_response(content)
+        # Используем переданный system_prompt или значение по умолчанию
+        system_content = system_prompt if system_prompt else "Вы - эксперт по техническим стандартам ГОСТ."
 
-            return {
-                "success": parsed is not None,
-                "content": parsed,
-                "raw": content,
-                "model": model,
-                "error": None if parsed else "JSON parse error",
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                    "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                    "total_tokens": response.usage.total_tokens if response.usage else 0
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat({
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": temperature,
+                    "stream": False
+                })
+
+                content = response.choices[0].message.content
+                parsed = self._extract_json_from_response(content)
+
+                return {
+                    "success": parsed is not None,
+                    "content": parsed,
+                    "raw": content,
+                    "model": model,
+                    "error": None if parsed else "JSON parse error",
+                    "usage": {
+                        "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                        "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+                        "total_tokens": response.usage.total_tokens if response.usage else 0
+                    }
                 }
-            }
 
-        except AuthenticationError as e:
-            logger.error(f"GigaChat authentication failed: {e}")
-            return {
-                "success": False,
-                "content": None,
-                "raw": None,
-                "error": f"Authentication error: {e}",
-                "model": model
-            }
-        except ResponseError as e:
-            logger.error(f"GigaChat API error: {e}")
-            return {
-                "success": False,
-                "content": None,
-                "raw": None,
-                "error": f"API error: {e}",
-                "model": model
-            }
-        except Exception as e:
-            logger.error(f"GigaChat request failed: {e}")
-            return {
-                "success": False,
-                "content": None,
-                "raw": None,
-                "error": str(e),
-                "model": model
-            }
+            except ResponseError as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # 2, 4, 6 секунд
+                    logger.warning(
+                        f"Rate limited (429), retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"GigaChat API error: {e}")
+                    return {
+                        "success": False,
+                        "content": None,
+                        "raw": None,
+                        "error": f"API error: {e}",
+                        "model": model
+                    }
+            except Exception as e:
+                logger.error(f"GigaChat request failed: {e}")
+                return {
+                    "success": False,
+                    "content": None,
+                    "raw": None,
+                    "error": str(e),
+                    "model": model
+                }
 
     def health_check(self) -> bool:
         """Проверка доступности API."""

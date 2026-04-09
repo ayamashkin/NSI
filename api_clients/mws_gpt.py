@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 class MWSGPTClient(BaseLLMClient):
     """Клиент для MWS Cloud GPT API."""
 
-    def complete(self, prompt: str, model: str, temperature: float = 0.1) -> Dict[str, Any]:
+    def complete(self, prompt: str, model: str, temperature: float = 0.1,
+                 system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """Отправка запроса на генерацию через MWS GPT."""
         url = f"{self.base_url}/chat/completions"
 
@@ -24,11 +25,15 @@ class MWSGPTClient(BaseLLMClient):
             "Authorization": f"Bearer {self.api_key}"
         }
 
+        # Формируем сообщения
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         payload = {
             "model": model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "temperature": temperature
         }
 

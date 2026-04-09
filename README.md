@@ -114,9 +114,9 @@ api:
 
 ```yaml
 prompts:
-  krepezh_v1:
+  hardware:
     name: "Крепеж - полный разбор ГОСТ"
-    file: "prompts/templates/krepezh_v1.txt"
+    file: "prompts/templates/hardware.txt"
     category: "hardware"
     keywords: ["болт", "гайка", "шуруп", "винт", "шайба", "заклепка"]
     service: "mws"  # или "openwebui","gigachat"
@@ -138,7 +138,7 @@ Excel файл должен содержать колонки:
 | Команда | Описание | Пример                                          |
 |---------|----------|-------------------------------------------------|
 | `prompts` | Список доступных промптов | `python cli.py prompts`                         |
-| `process` | Обработка Excel файла | `python cli.py process data.xlsx -p krepezh_v1` |
+| `process` | Обработка Excel файла | `python cli.py process data.xlsx -p hardware` |
 | `export` | Экспорт результатов в JSON | `python cli.py export -o results.json`          |
 | `stats` | Статистика обработки | `python cli.py stats`                           |
 | `errors` | Просмотр ошибок | `python cli.py errors -l 20`                    |
@@ -158,19 +158,19 @@ python cli.py prompts
 python cli.py process data/nomenclature.xlsx --auto
 
 # Конкретный промпт
-python cli.py process data.xlsx -p krepezh_v1
+python cli.py process data.xlsx -p hardware
 
 # Несколько промптов
-python cli.py process data.xlsx -p krepezh_v1 -p eri_v1
+python cli.py process data.xlsx -p hardware -p eri_v1
 
 # С указанием API (проверяет соответствие сервиса в промпте)
-python cli.py process data.xlsx -p krepezh_v1 --api gigachat 
+python cli.py process data.xlsx -p hardware --api gigachat 
 
 # Параллельная обработка
 python cli.py process data.xlsx --auto -w 4
 
 # Перезапись существующих результатов
-python cli.py process data.xlsx -p krepezh_v1 -f
+python cli.py process data.xlsx -p hardware -f
 ```
 
 #### Просмотр ошибок
@@ -182,7 +182,7 @@ python cli.py errors
 python cli.py errors -l 20
 
 # Ошибки конкретного промпта
-python cli.py errors -p krepezh_v1
+python cli.py errors -p hardware
 ```
 
 #### Экспорт результатов
@@ -195,6 +195,21 @@ python cli.py export -o results.json --structure by_code
 
 # Группировка по категориям
 python cli.py export -o results.json --structure by_category
+
+# Экспорт только результатов по конкретному промпту
+python cli.py export -o krepezh_results.json --prompt krepezh_v1
+
+# Экспорт только успешных результатов по промпту
+python cli.py export -o completed.json --prompt krepezh_v1 --status completed
+
+# Экспорт с группировкой по промптам
+python cli.py export -o by_prompt.json --structure by_prompt
+
+# Экспорт с текстом промпта
+python cli.py export -o krepezh_results.json --prompt hardware_washer --include-prompt
+
+# Экспорт с текстом промпта и raw_response
+python cli.py export -o krepezh_results.json --prompt hardware_washer --include-prompt --include-raw
 ```
 
 #### Список моделей API
@@ -226,7 +241,7 @@ python cli.py models --api gigachat
     "article": "001",
     "name": "Болт М12х50 ГОСТ 7798-70",
     "guid": "guid-1",
-    "prompt_id": "krepezh_v1",
+    "prompt_id": "hardware",
     "category": "hardware",
     "status": "completed",
     "display_name": "Болт М12х50 ГОСТ 7798-70",

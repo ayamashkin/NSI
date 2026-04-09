@@ -36,7 +36,7 @@ database:
 # Processing Configuration
 # =============================================================================
 processing:
-  default_workers: 4
+  default_workers: 1
   default_timeout: 120
   batch_size: 100
   retry_attempts: 3

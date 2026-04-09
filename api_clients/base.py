@@ -18,7 +18,8 @@ class BaseLLMClient(ABC):
         self.timeout = timeout
 
     @abstractmethod
-    def complete(self, prompt: str, model: str, temperature: float = 0.1) -> Dict[str, Any]:
+    def complete(self, prompt: str, model: str, temperature: float = 0.1,
+                 system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """Отправка запроса на генерацию."""
         pass
 
