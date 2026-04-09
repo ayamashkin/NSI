@@ -199,11 +199,39 @@ def process(excel_path, prompt, auto, api, workers, force):
 @click.option('--output', '-o', default='results.json', help='Путь для сохранения')
 @click.option('--structure', '-s', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
               default='flat', help='Структура JSON')
-def export(output, structure):
-    """Экспорт результатов в JSON"""
+@click.option('--prompt', '-p', default=None, help='Фильтр по ID промпта (только этот промпт)')
+@click.option('--status', type=click.Choice(['completed', 'ignored', 'error', 'all']),
+              default='all', help='Фильтр по статусу')
+@click.option('--include-prompt', is_flag=True, help='Включить текст промпта в экспорт')
+@click.option('--include-raw', is_flag=True, help='Включить raw_response в экспорт')
+def export(output, structure, prompt, status, include_prompt, include_raw):
+    """Экспорт результатов в JSON с фильтрацией по промпту и статусу"""
     db = DatabaseManager()
-    path = db.export_to_json(output, structure)
+
+    # Получаем результаты с фильтрацией
+    results = db.get_filtered_results(
+        prompt_id=prompt,
+        status=status if status != 'all' else None
+    )
+
+    # Экспортируем с учетом флагов
+    path = db.export_filtered_to_json(
+        output,
+        results,
+        structure,
+        include_raw=include_raw,
+        include_prompt=include_prompt
+    )
+
     click.echo(f"💾 Экспортировано в: {path}")
+    if prompt:
+        click.echo(f"   Фильтр по промпту: {prompt}")
+    if status != 'all':
+        click.echo(f"   Фильтр по статусу: {status}")
+    if include_prompt:
+        click.echo(f"   ✓ Включен текст промпта")
+    if include_raw:
+        click.echo(f"   ✓ Включен raw_response")
 
 
 @cli.command()
@@ -256,7 +284,7 @@ def errors(limit, prompt):
 
         if r.get('raw_response'):
             raw = r['raw_response']
-            click.echo(f"Ответ API (первые 300 симв.): {raw[:300]}...")
+            click.echo(f"Ответ API (первые 1000 симв.): {raw[:1000]}...")
         click.echo("-" * 60)
 
 
@@ -300,7 +328,6 @@ def detect(name):
 @cli.command()
 @click.option('--api', type=click.Choice(['openwebui', 'mws', 'gigachat', 'all']), default='all',
               help='Сервис для запроса моделей')
-
 def models(api):
     """Список доступных моделей у сервисов API"""
     settings = get_settings()

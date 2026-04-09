@@ -56,27 +56,37 @@ class DatabaseManager:
     def _init_db(self):
         """Инициализация схемы базы данных."""
         with self._get_connection() as conn:
-            # Основная таблица результатов
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    article TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    guid TEXT NOT NULL,
-                    prompt_id TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    display_name TEXT,
-                    params TEXT,  -- JSON array of parameters
-                    raw_response TEXT,
-                    error_message TEXT,
-                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    model_used TEXT,
-                    api_source TEXT,
-                    -- Уникальный индекс для UPSERT семантики
-                    UNIQUE(article, prompt_id) ON CONFLICT REPLACE
-                )
-            """)
+            # Проверяем, существует ли таблица и нужна ли миграция
+            cursor = conn.execute("PRAGMA table_info(results)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+
+            # Если таблица не существует — создаем с нуля
+            if not existing_columns:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        article TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        guid TEXT NOT NULL,
+                        prompt_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        display_name TEXT,
+                        params TEXT,
+                        raw_response TEXT,
+                        error_message TEXT,
+                        prompt_text TEXT,
+                        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        model_used TEXT,
+                        api_source TEXT,
+                        UNIQUE(article, prompt_id) ON CONFLICT REPLACE
+                    )
+                """)
+            else:
+                # Миграция: добавляем колонку prompt_text если её нет
+                if 'prompt_text' not in existing_columns:
+                    conn.execute("ALTER TABLE results ADD COLUMN prompt_text TEXT")
+                    logger.info("Migrated database: added prompt_text column")
 
             # Индексы для быстрого поиска
             conn.execute("""
@@ -104,30 +114,20 @@ class DatabaseManager:
     def upsert_result(self, result: Dict[str, Any]) -> bool:
         """
         Сохранение или обновление результата обработки.
-
-        UPSERT логика:
-        - Если запись с (article, prompt_id) существует - обновляет
-        - Если не существует - создает новую
-
-        Args:
-            result: Словарь с данными результата обработки
-
-        Returns:
-            True при успехе, False при ошибке
         """
         try:
             with self._get_connection() as conn:
                 params_json = json.dumps(
-                    result.get('params', []), 
+                    result.get('params', []),
                     ensure_ascii=False
                 ) if result.get('params') else None
 
                 conn.execute("""
                     INSERT INTO results 
                     (article, name, guid, prompt_id, category, status, 
-                     display_name, params, raw_response, error_message,
+                     display_name, params, raw_response, error_message, prompt_text,
                      processed_at, model_used, api_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(article, prompt_id) DO UPDATE SET
                         name = excluded.name,
                         guid = excluded.guid,
@@ -137,6 +137,7 @@ class DatabaseManager:
                         params = excluded.params,
                         raw_response = excluded.raw_response,
                         error_message = excluded.error_message,
+                        prompt_text = excluded.prompt_text,
                         processed_at = excluded.processed_at,
                         model_used = excluded.model_used,
                         api_source = excluded.api_source
@@ -151,6 +152,7 @@ class DatabaseManager:
                     params_json,
                     result.get('raw_response'),
                     result.get('error_message'),
+                    result.get('prompt_text'),
                     result.get('processed_at', datetime.utcnow().isoformat()),
                     result.get('model_used'),
                     result.get('api_source')
@@ -161,16 +163,7 @@ class DatabaseManager:
             return False
 
     def get_result(self, article: str, prompt_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Получение результата по артикулу и ID промпта.
-
-        Args:
-            article: Артикул изделия
-            prompt_id: Идентификатор промпта
-
-        Returns:
-            Словарь с данными результата или None
-        """
+        """Получение результата по артикулу и ID промпта."""
         with self._get_connection() as conn:
             row = conn.execute(
                 """SELECT * FROM results 
@@ -183,15 +176,7 @@ class DatabaseManager:
         return None
 
     def get_results_by_article(self, article: str) -> List[Dict[str, Any]]:
-        """
-        Получение всех результатов для конкретного артикула.
-
-        Args:
-            article: Артикул изделия
-
-        Returns:
-            Список результатов обработки разными промптами
-        """
+        """Получение всех результатов для конкретного артикула."""
         with self._get_connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM results WHERE article = ?",
@@ -200,24 +185,13 @@ class DatabaseManager:
             return [self._row_to_dict(row) for row in rows]
 
     def get_all_results(
-        self, 
+        self,
         category: Optional[str] = None,
         status: Optional[str] = None,
         prompt_id: Optional[str] = None,
         limit: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Получение результатов с фильтрацией.
-
-        Args:
-            category: Фильтр по категории
-            status: Фильтр по статусу (completed, ignored, error)
-            prompt_id: Фильтр по промпту
-            limit: Ограничение количества записей
-
-        Returns:
-            Список результатов
-        """
+        """Получение результатов с фильтрацией."""
         query = "SELECT * FROM results WHERE 1=1"
         params = []
 
@@ -243,20 +217,19 @@ class DatabaseManager:
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Конвертация строки БД в словарь."""
         result = dict(row)
-        if result.get('params'):
-            try:
-                result['params'] = json.loads(result['params'])
-            except json.JSONDecodeError:
-                result['params'] = []
+
+        # Парсим JSON-поля
+        for field in ['params']:
+            if result.get(field) and isinstance(result[field], str):
+                try:
+                    result[field] = json.loads(result[field])
+                except json.JSONDecodeError:
+                    result[field] = []
+
         return result
 
     def get_statistics(self) -> Dict[str, Any]:
-        """
-        Получение статистики по обработке.
-
-        Returns:
-            Словарь с агрегированной статистикой
-        """
+        """Получение статистики по обработке."""
         with self._get_connection() as conn:
             stats = {
                 'total': conn.execute("SELECT COUNT(*) FROM results").fetchone()[0],
@@ -266,44 +239,23 @@ class DatabaseManager:
                 'by_api': {}
             }
 
-            # По статусам
-            for row in conn.execute(
-                "SELECT status, COUNT(*) FROM results GROUP BY status"
-            ):
+            for row in conn.execute("SELECT status, COUNT(*) FROM results GROUP BY status"):
                 stats['by_status'][row[0]] = row[1]
 
-            # По категориям
-            for row in conn.execute(
-                "SELECT category, COUNT(*) FROM results GROUP BY category"
-            ):
+            for row in conn.execute("SELECT category, COUNT(*) FROM results GROUP BY category"):
                 stats['by_category'][row[0]] = row[1]
 
-            # По промптам
-            for row in conn.execute(
-                "SELECT prompt_id, COUNT(*) FROM results GROUP BY prompt_id"
-            ):
+            for row in conn.execute("SELECT prompt_id, COUNT(*) FROM results GROUP BY prompt_id"):
                 stats['by_prompt'][row[0]] = row[1]
 
-            # По API источникам
-            for row in conn.execute(
-                "SELECT api_source, COUNT(*) FROM results GROUP BY api_source"
-            ):
+            for row in conn.execute("SELECT api_source, COUNT(*) FROM results GROUP BY api_source"):
                 if row[0]:
                     stats['by_api'][row[0]] = row[1]
 
             return stats
 
     def delete_result(self, article: str, prompt_id: str) -> bool:
-        """
-        Удаление конкретного результата.
-
-        Args:
-            article: Артикул изделия
-            prompt_id: Идентификатор промпта
-
-        Returns:
-            True если запись была удалена
-        """
+        """Удаление конкретного результата."""
         with self._get_connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM results WHERE article = ? AND prompt_id = ?",
@@ -312,15 +264,7 @@ class DatabaseManager:
             return cursor.rowcount > 0
 
     def clear_all(self, confirm: bool = False) -> int:
-        """
-        Очистка всех результатов (опасная операция).
-
-        Args:
-            confirm: Подтверждение очистки
-
-        Returns:
-            Количество удаленных записей
-        """
+        """Очистка всех результатов."""
         if not confirm:
             logger.warning("Clear all cancelled - confirmation required")
             return 0
@@ -331,79 +275,51 @@ class DatabaseManager:
             logger.info(f"Cleared {count} records from database")
             return count
 
-    def export_to_json(
-        self,
-        output_path: str,
-        structure: str = "flat",
-        include_raw: bool = False  # ← Добавить параметр
+    def export_filtered_to_json(
+            self,
+            output_path: str,
+            results: List[Dict],
+            structure: str = 'flat',
+            include_raw: bool = False,
+            include_prompt: bool = False
     ) -> str:
-        """
-         Экспорт результатов в JSON файл.
+        """Экспорт отфильтрованных результатов в JSON с десериализацией полей."""
+        # Преобразуем JSON-строки в объекты и обрабатываем prompt_text
+        serialized_results = [self._serialize_row(r) for r in results]
 
-         Args:
-             output_path: Путь для сохранения файла
-             structure: Формат структуры ('flat' или 'by_code')
-             include_raw: Включать ли raw_response в вывод (по умолчанию False)
-
-         Returns:
-             Путь к созданному файлу
-         """
-        results = self.get_all_results()
-
-        # Очищаем результаты от raw_response если не нужен
-        if not include_raw:
-            for r in results:
+        # Очищаем результаты согласно флагам
+        for r in serialized_results:
+            if not include_raw:
                 r.pop('raw_response', None)
-                r.pop('error_message', None)  # ← Опционально: убрать и ошибки
+                r.pop('error_message', None)
+            if not include_prompt:
+                r.pop('prompt_text', None)
 
-        if structure == "by_code":
-            # Группировка по артикулам
-            data = {}
-            for r in results:
-                article = r['article']
-                if article not in data:
-                    data[article] = {
-                        "article": article,
-                        "name": r['name'],
-                        "guid": r['guid'],
-                        "prompts": {}
-                    }
-                data[article]["prompts"][r['prompt_id']] = {
-                    "status": r['status'],
-                    "category": r['category'],
-                    "display_name": r['display_name'],
-                    "params": r.get('params', []),
-                    "processed_at": r['processed_at']
-                    # raw_response убран
-                }
+        if structure == 'by_code':
+            data = self._structure_by_code(serialized_results)
+        elif structure == 'by_category':
+            data = self._structure_by_category(serialized_results)
+        elif structure == 'by_prompt':
+            data = self._structure_by_prompt(serialized_results)
         else:
-            # Плоский список
-            data = results
+            data = serialized_results
 
-        output_path = Path(output_path)
+        # Записываем с правильной кодировкой и форматированием
+        # Используем ensure_ascii=False и не экранируем переносы строк
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,  # Не экранировать Unicode (русские буквы)
+                indent=2,  # Красивое форматирование
+                separators=(',', ': ')  # Пробел после двоеточия для читаемости
+            )
 
-        logger.info(f"Exported {len(results)} records to {output_path}")
-        return str(output_path)
+        return output_path
 
-    def get_pending_items(
-        self, 
-        all_articles: List[str], 
-        prompt_id: str
-    ) -> List[str]:
-        """
-        Получение списка артикулов, которые еще не обработаны конкретным промптом.
-
-        Args:
-            all_articles: Полный список артикулов для обработки
-            prompt_id: ID промпта
-
-        Returns:
-            Список артикулов без готовых результатов
-        """
+    def get_pending_items(self, all_articles: List[str], prompt_id: str) -> List[str]:
+        """Получение списка артикулов, которые еще не обработаны."""
         with self._get_connection() as conn:
-            # Получаем уже обработанные
             placeholders = ','.join(['?' for _ in all_articles])
             query = f"""
                 SELECT article FROM results 
@@ -414,6 +330,121 @@ class DatabaseManager:
             processed = set(
                 row[0] for row in conn.execute(query, [prompt_id] + all_articles)
             )
-
-            # Возвращаем не обработанные
             return [a for a in all_articles if a not in processed]
+
+    def get_filtered_results(self, prompt_id: str = None, status: str = None, limit: int = None) -> List[Dict]:
+        """Получение результатов с фильтрацией."""
+        query = "SELECT * FROM results WHERE 1=1"
+        params = []
+
+        if prompt_id:
+            query += " AND prompt_id = ?"
+            params.append(prompt_id)
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY processed_at DESC"
+
+        if limit:
+            query += f" LIMIT {limit}"
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def _structure_by_code(self, results: List[Dict]) -> Dict:
+        """Группировка результатов по артикулам."""
+        data = {}
+        for r in results:
+            article = r.get('article', 'unknown')
+            if article not in data:
+                data[article] = {
+                    "article": article,
+                    "name": r.get('name', ''),
+                    "guid": r.get('guid', ''),
+                    "prompts": {}
+                }
+            data[article]["prompts"][r.get('prompt_id', 'unknown')] = {
+                "status": r.get('status'),
+                "category": r.get('category'),
+                "display_name": r.get('display_name'),
+                "params": r.get('params', []),
+                "processed_at": r.get('processed_at')
+            }
+        return data
+
+    def _structure_by_category(self, results: List[Dict]) -> Dict:
+        """Группировка результатов по категориям."""
+        grouped = {}
+        for r in results:
+            cat = r.get('category', 'unknown')
+            if cat not in grouped:
+                grouped[cat] = []
+            grouped[cat].append(r)
+        return grouped
+
+    def _structure_by_prompt(self, results: List[Dict]) -> Dict:
+        """Группировка результатов по промптам."""
+        grouped = {}
+        for r in results:
+            pid = r.get('prompt_id', 'unknown')
+            if pid not in grouped:
+                grouped[pid] = []
+            grouped[pid].append(r)
+        return grouped
+
+    def _serialize_row(self, row: Dict) -> Dict:
+        """Преобразует строку БД в корректный формат для экспорта."""
+        result = dict(row)
+
+        # Поля, которые нужно распарсить из JSON-строк
+        json_fields = ['params', 'raw_response', 'usage']
+
+        for field in json_fields:
+            if field in result and result[field] is not None:
+                if isinstance(result[field], str):
+                    try:
+                        result[field] = json.loads(result[field])
+                    except json.JSONDecodeError:
+                        pass
+
+        # Обрабатываем prompt_text - исправляем кодировку и escape-последовательности
+        if 'prompt_text' in result and isinstance(result['prompt_text'], str):
+            text = result['prompt_text']
+
+            # Шаг 1: Исправляем mojibake (Latin-1 -> UTF-8)
+            # Проверяем, есть ли типичные признаки mojibake (кириллица в Latin-1)
+            if text and any(ord(c) > 127 for c in text[:100] if c.isalpha()):
+                try:
+                    text = text.encode('latin-1').decode('utf-8')
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    pass  # Если не получилось, оставляем как есть
+
+            # Шаг 2: Декодируем escape-последовательности
+            # ВАЖНО: заменяем \n (два символа) на реальный перенос строки (один символ)
+            # Сначала обрабатываем двойное экранирование
+            text = text.replace('\\\\n', '\\x00')  # временный маркер
+            text = text.replace('\\\\t', '\\x01')  # временный маркер
+            text = text.replace('\\\\r', '\\x02')  # временный маркер
+
+            # Затем одинарное экранирование
+            text = text.replace('\\n', '\n')
+            text = text.replace('\\t', '\t')
+            text = text.replace('\\r', '\r')
+
+            # Возвращаем временные маркеры
+            text = text.replace('\\x00', '\\n')
+            text = text.replace('\\x01', '\\t')
+            text = text.replace('\\x02', '\\r')
+
+            # Убираем экранирование кавычек
+            text = text.replace('\\"', '"')
+            text = text.replace("\\'", "'")
+            text = text.replace('\\\\', '\\')
+
+            result['prompt_text'] = text
+
+        return result
