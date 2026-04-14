@@ -7,9 +7,16 @@
 api:
   openwebui:
     base_url: "https://webui.game73.ru/api"
-    api_key_file: "secrets/openwebui_key.txt"  # Путь к файлу с ключом
-    timeout: 120
-    default_model: "qwen3-30b"
+
+    # Вариант 1: API Key (как раньше)
+    #api_key_file: "secrets/openwebui_key.txt"
+
+    # Вариант 2: JWT аутентификация (новое)
+    username: "default7@yandex.ru"  # ← Ваш email/логин
+    password_file: "secrets/openwebui_password.txt"  # ← Файл с паролем
+
+    timeout: 180
+    default_model: "qwen3:30b"
 
   mws:
     base_url: "https://api.gpt.mws.ru/"

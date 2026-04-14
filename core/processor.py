@@ -10,7 +10,7 @@ from typing import List, Optional, Dict, Any, Callable
 from tqdm import tqdm
 
 from config.settings import get_settings, PromptConfig
-from utils.excel_loader import NomenclatureItem
+from utils.excel_loader import  NomenclatureItem
 from core.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -55,11 +55,31 @@ class NomenclatureProcessor:
 
             if service_name == "openwebui":
                 from api_clients.openwebui import OpenWebUIClient
-                self.clients[service_name] = OpenWebUIClient(
-                    base_url=api_config.base_url,
-                    api_key=api_config.api_key,
-                    timeout=api_config.timeout
-                )
+
+                # Проверяем тип аутентификации
+                if api_config.api_key:
+                    # API Key аутентификация
+                    logger.info("OpenWebUI using API key auth")
+                    self.clients[service_name] = OpenWebUIClient(
+                        base_url=api_config.base_url,
+                        api_key=api_config.api_key,
+                        timeout=api_config.timeout
+                    )
+                elif api_config.username and api_config.password:
+                    # JWT аутентификация (login/password)
+                    logger.info(f"OpenWebUI using JWT auth (user: {api_config.username})")
+                    self.clients[service_name] = OpenWebUIClient(
+                        base_url=api_config.base_url,
+                        username=api_config.username,
+                        password=api_config.password,
+                        timeout=api_config.timeout
+                    )
+                else:
+                    logger.warning(f"No credentials provided for OpenWebUI!")
+                    logger.warning(f"  username: {api_config.username}")
+                    logger.warning(f"  password present: {bool(api_config.password)}")
+                    logger.warning(f"  api_key present: {bool(api_config.api_key)}")
+                    continue
 
             elif service_name == "mws":
                 from api_clients.mws_gpt import MWSGPTClient
@@ -76,7 +96,7 @@ class NomenclatureProcessor:
                     api_key=api_config.api_key,
                     scope=api_config.scope or "GIGACHAT_API_PERS",
                     timeout=api_config.timeout,
-                    verify_ssl=False  # True если установлены сертификаты НУЦ
+                    verify_ssl=False
                 )
                 auth_type = "password" if api_config.password else "credentials"
                 logger.info(f"GigaChat client initialized ({auth_type} auth)")
@@ -89,6 +109,66 @@ class NomenclatureProcessor:
         if service_name not in self.clients:
             raise ValueError(f"API client not initialized: {service_name}")
         return self.clients[service_name]
+
+    def _build_full_request(
+            self,
+            prompt_text: str,
+            prompt_cfg: PromptConfig,
+            item: NomenclatureItem
+    ) -> Dict[str, Any]:
+        """
+        Создание полного объекта запроса к модели.
+
+        Args:
+            prompt_text: Текст пользовательского промпта
+            prompt_cfg: Конфигурация промпта
+            item: Элемент номенклатуры
+
+        Returns:
+            Полный объект запроса со всеми параметрами
+        """
+        # Формируем messages массив
+        messages = []
+
+        # Добавляем system сообщение если есть
+        system_content = prompt_cfg.system_prompt or "Вы - эксперт по техническим стандартам ГОСТ."
+        if system_content:
+            messages.append({
+                "role": "system",
+                "content": system_content
+            })
+
+        # Добавляем user сообщение с промптом
+        messages.append({
+            "role": "user",
+            "content": prompt_text
+        })
+
+        # Формируем полный объект запроса
+        full_request = {
+            # Основные параметры
+            "model": prompt_cfg.model,
+            "messages": messages,
+            "temperature": prompt_cfg.temperature,
+
+            # Дополнительные параметры (можно расширить через конфиг)
+            "useTemperature": True,
+            "useSystem": bool(prompt_cfg.system_prompt),
+            "system": system_content if prompt_cfg.system_prompt else "",
+
+            # Метаданные запроса
+            "_meta": {
+                "nomenclature_article": item.article,
+                "nomenclature_name": item.name,
+                "nomenclature_guid": item.guid,
+                "prompt_id": prompt_cfg.id if hasattr(prompt_cfg, 'id') else None,
+                "prompt_name": prompt_cfg.name if hasattr(prompt_cfg, 'name') else None,
+                "category": prompt_cfg.category,
+                "service": prompt_cfg.service
+            }
+        }
+
+        return full_request
 
     def process_item(
             self,
@@ -129,6 +209,9 @@ class NomenclatureProcessor:
         except Exception as e:
             return self._create_error_result(item, prompt_id, f"Failed to load prompt: {e}")
 
+        # Создаем полный объект запроса
+        full_request = self._build_full_request(prompt_text, prompt_cfg, item)
+
         # Проверяем соответствие категории по ключевым словам
         if not self._check_category_match(item.name, prompt_cfg):
             return {
@@ -140,7 +223,7 @@ class NomenclatureProcessor:
                 "status": "ignored",
                 "display_name": item.name,
                 "params": [],
-                "prompt_text": prompt_text,  # ← Сохраняем промпт даже для ignored
+                "full_request": full_request,  # ← Сохраняем полный запрос даже для ignored
                 "processed_at": datetime.utcnow().isoformat(),
                 "model_used": None,
                 "api_source": prompt_cfg.service
@@ -151,7 +234,7 @@ class NomenclatureProcessor:
         try:
             client = self._get_client(prompt_cfg.service)
         except ValueError as e:
-            return self._create_error_result(item, prompt_id, str(e))
+            return self._create_error_result(item, prompt_id, str(e), full_request=full_request)
 
         # Отправляем запрос к API с системным промптом из конфигурации
         try:
@@ -162,12 +245,14 @@ class NomenclatureProcessor:
                 system_prompt=prompt_cfg.system_prompt
             )
         except Exception as e:
-            return self._create_error_result(item, prompt_id, f"API error: {e}")
+            return self._create_error_result(
+                item, prompt_id, f"API error: {e}",
+                full_request=full_request
+            )
 
-        # Парсим ответ
-        result = self._parse_response(item, prompt_id, prompt_cfg, response)
-        result['prompt_text'] = prompt_text  # ← НОВОЕ
-        
+        # Парсим ответ, передаем full_request для сохранения
+        result = self._parse_response(item, prompt_id, prompt_cfg, response, full_request)
+
         # Сохраняем в БД (upsert)
         self.db.upsert_result(result)
 
@@ -222,21 +307,25 @@ class NomenclatureProcessor:
                     return True
 
         return False
+
     def _parse_response(
             self,
             item: NomenclatureItem,
             prompt_id: str,
             prompt_cfg: PromptConfig,
-            response: Dict[str, Any]
+            response: Dict[str, Any],
+            full_request: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Парсинг ответа от API."""
 
         if not response.get('success'):
-            return self._create_error_result(
+            result = self._create_error_result(
                 item, prompt_id,
                 response.get('error', 'Unknown API error'),
-                response.get('raw')
+                response.get('raw'),
+                full_request=full_request
             )
+            return result
 
         content = response.get('content')
 
@@ -259,6 +348,7 @@ class NomenclatureProcessor:
                 "display_name": result_data.get('display_name', item.name),
                 "params": result_data.get('params', []),
                 "raw_response": response.get('raw'),
+                "full_request": full_request,  # ← Полный запрос к модели
                 "processed_at": datetime.utcnow().isoformat(),
                 "model_used": response.get('model', prompt_cfg.model),
                 "api_source": prompt_cfg.service
@@ -266,7 +356,9 @@ class NomenclatureProcessor:
 
         except Exception as e:
             return self._create_error_result(
-                item, prompt_id, f"Parse error: {e}", response.get('raw')
+                item, prompt_id, f"Parse error: {e}",
+                response.get('raw'),
+                full_request=full_request
             )
 
     def _create_error_result(
@@ -274,7 +366,8 @@ class NomenclatureProcessor:
             item: NomenclatureItem,
             prompt_id: str,
             error_message: str,
-            raw_response: Optional[str] = None
+            raw_response: Optional[str] = None,
+            full_request: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Создание результата с ошибкой."""
         return {
@@ -288,6 +381,7 @@ class NomenclatureProcessor:
             "params": [],
             "error_message": error_message,
             "raw_response": raw_response,
+            "full_request": full_request,  # ← Полный запрос даже при ошибке
             "processed_at": datetime.utcnow().isoformat()
         }
 
@@ -396,6 +490,7 @@ class NomenclatureProcessor:
 
         return results
 
+
 def load_excel_items(excel_path: str):
     """Загрузка Excel с fallback на openpyxl-only."""
     # Пробуем pandas
@@ -415,6 +510,7 @@ def load_excel_items(excel_path: str):
         from utils.excel_loader_simple import ExcelLoader
         loader = ExcelLoader(excel_path)
         return loader.load()
+
 
 from datetime import datetime
 from pathlib import Path

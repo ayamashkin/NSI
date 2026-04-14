@@ -75,7 +75,7 @@ class DatabaseManager:
                         params TEXT,
                         raw_response TEXT,
                         error_message TEXT,
-                        prompt_text TEXT,
+                        full_request TEXT,  -- JSON с полным запросом к модели
                         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         model_used TEXT,
                         api_source TEXT,
@@ -83,10 +83,16 @@ class DatabaseManager:
                     )
                 """)
             else:
-                # Миграция: добавляем колонку prompt_text если её нет
-                if 'prompt_text' not in existing_columns:
-                    conn.execute("ALTER TABLE results ADD COLUMN prompt_text TEXT")
-                    logger.info("Migrated database: added prompt_text column")
+                # Миграция: добавляем колонку full_request если её нет
+                if 'full_request' not in existing_columns:
+                    conn.execute("ALTER TABLE results ADD COLUMN full_request TEXT")
+                    logger.info("Migrated database: added full_request column")
+
+                # Удаляем старую колонку prompt_text если она есть (данные будут потеряны)
+                # или можно оставить для обратной совместимости
+                if 'prompt_text' in existing_columns:
+                    # Колонка остается для обратной совместимости, но не используется
+                    logger.info("Legacy column 'prompt_text' detected - keeping for compatibility")
 
             # Индексы для быстрого поиска
             conn.execute("""
@@ -122,10 +128,16 @@ class DatabaseManager:
                     ensure_ascii=False
                 ) if result.get('params') else None
 
+                # Сериализуем full_request в JSON
+                full_request_json = json.dumps(
+                    result.get('full_request'),
+                    ensure_ascii=False
+                ) if result.get('full_request') else None
+
                 conn.execute("""
                     INSERT INTO results 
                     (article, name, guid, prompt_id, category, status, 
-                     display_name, params, raw_response, error_message, prompt_text,
+                     display_name, params, raw_response, error_message, full_request,
                      processed_at, model_used, api_source)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(article, prompt_id) DO UPDATE SET
@@ -137,7 +149,7 @@ class DatabaseManager:
                         params = excluded.params,
                         raw_response = excluded.raw_response,
                         error_message = excluded.error_message,
-                        prompt_text = excluded.prompt_text,
+                        full_request = excluded.full_request,
                         processed_at = excluded.processed_at,
                         model_used = excluded.model_used,
                         api_source = excluded.api_source
@@ -152,7 +164,7 @@ class DatabaseManager:
                     params_json,
                     result.get('raw_response'),
                     result.get('error_message'),
-                    result.get('prompt_text'),
+                    full_request_json,
                     result.get('processed_at', datetime.utcnow().isoformat()),
                     result.get('model_used'),
                     result.get('api_source')
@@ -219,12 +231,12 @@ class DatabaseManager:
         result = dict(row)
 
         # Парсим JSON-поля
-        for field in ['params']:
+        for field in ['params', 'full_request']:
             if result.get(field) and isinstance(result[field], str):
                 try:
                     result[field] = json.loads(result[field])
                 except json.JSONDecodeError:
-                    result[field] = []
+                    result[field] = [] if field == 'params' else None
 
         return result
 
@@ -281,10 +293,10 @@ class DatabaseManager:
             results: List[Dict],
             structure: str = 'flat',
             include_raw: bool = False,
-            include_prompt: bool = False
+            include_full_request: bool = False
     ) -> str:
         """Экспорт отфильтрованных результатов в JSON с десериализацией полей."""
-        # Преобразуем JSON-строки в объекты и обрабатываем prompt_text
+        # Преобразуем JSON-строки в объекты и обрабатываем full_request
         serialized_results = [self._serialize_row(r) for r in results]
 
         # Очищаем результаты согласно флагам
@@ -292,8 +304,8 @@ class DatabaseManager:
             if not include_raw:
                 r.pop('raw_response', None)
                 r.pop('error_message', None)
-            if not include_prompt:
-                r.pop('prompt_text', None)
+            if not include_full_request:
+                r.pop('full_request', None)
 
         if structure == 'by_code':
             data = self._structure_by_code(serialized_results)
@@ -401,7 +413,7 @@ class DatabaseManager:
         result = dict(row)
 
         # Поля, которые нужно распарсить из JSON-строк
-        json_fields = ['params', 'raw_response', 'usage']
+        json_fields = ['params', 'raw_response', 'usage', 'full_request']
 
         for field in json_fields:
             if field in result and result[field] is not None:
@@ -410,41 +422,5 @@ class DatabaseManager:
                         result[field] = json.loads(result[field])
                     except json.JSONDecodeError:
                         pass
-
-        # Обрабатываем prompt_text - исправляем кодировку и escape-последовательности
-        if 'prompt_text' in result and isinstance(result['prompt_text'], str):
-            text = result['prompt_text']
-
-            # Шаг 1: Исправляем mojibake (Latin-1 -> UTF-8)
-            # Проверяем, есть ли типичные признаки mojibake (кириллица в Latin-1)
-            if text and any(ord(c) > 127 for c in text[:100] if c.isalpha()):
-                try:
-                    text = text.encode('latin-1').decode('utf-8')
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    pass  # Если не получилось, оставляем как есть
-
-            # Шаг 2: Декодируем escape-последовательности
-            # ВАЖНО: заменяем \n (два символа) на реальный перенос строки (один символ)
-            # Сначала обрабатываем двойное экранирование
-            text = text.replace('\\\\n', '\\x00')  # временный маркер
-            text = text.replace('\\\\t', '\\x01')  # временный маркер
-            text = text.replace('\\\\r', '\\x02')  # временный маркер
-
-            # Затем одинарное экранирование
-            text = text.replace('\\n', '\n')
-            text = text.replace('\\t', '\t')
-            text = text.replace('\\r', '\r')
-
-            # Возвращаем временные маркеры
-            text = text.replace('\\x00', '\\n')
-            text = text.replace('\\x01', '\\t')
-            text = text.replace('\\x02', '\\r')
-
-            # Убираем экранирование кавычек
-            text = text.replace('\\"', '"')
-            text = text.replace("\\'", "'")
-            text = text.replace('\\\\', '\\')
-
-            result['prompt_text'] = text
 
         return result

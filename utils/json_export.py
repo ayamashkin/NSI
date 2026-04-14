@@ -33,10 +33,11 @@ class JSONExporter:
         self.results = results
 
     def export(
-        self, 
-        output_path: str, 
+        self,
+        output_path: str,
         structure: str = "flat",
-        include_raw: bool = False
+        include_raw: bool = False,
+        include_full_request: bool = False
     ) -> str:
         """
         Экспорт результатов в JSON файл.
@@ -45,12 +46,13 @@ class JSONExporter:
             output_path: Путь для сохранения
             structure: Формат структуры (flat, by_code, by_category, by_prompt)
             include_raw: Включать ли raw_response в вывод
+            include_full_request: Включать ли full_request в вывод
 
         Returns:
             Путь к созданному файлу
         """
         # Фильтрация полей
-        data = self._prepare_data(structure, include_raw)
+        data = self._prepare_data(structure, include_raw, include_full_request)
 
         # Сохранение
         output_path = Path(output_path)
@@ -63,9 +65,10 @@ class JSONExporter:
         return str(output_path)
 
     def _prepare_data(
-        self, 
-        structure: str, 
-        include_raw: bool
+        self,
+        structure: str,
+        include_raw: bool,
+        include_full_request: bool
     ) -> Any:
         """Подготовка данных в нужной структуре."""
 
@@ -89,6 +92,9 @@ class JSONExporter:
             if include_raw:
                 item['raw_response'] = r.get('raw_response')
                 item['error_message'] = r.get('error_message')
+
+            if include_full_request:
+                item['full_request'] = r.get('full_request')
 
             cleaned.append(item)
 
@@ -184,7 +190,8 @@ class JSONExporter:
 def export_results(
     results: List[Dict[str, Any]],
     output_path: str,
-    structure: str = "flat"
+    structure: str = "flat",
+    include_full_request: bool = False
 ) -> str:
     """
     Упрощенная функция экспорта.
@@ -193,9 +200,10 @@ def export_results(
         results: Список результатов
         output_path: Путь для сохранения
         structure: Формат структуры
+        include_full_request: Включать ли full_request в вывод
 
     Returns:
         Путь к созданному файлу
     """
     exporter = JSONExporter(results)
-    return exporter.export(output_path, structure)
+    return exporter.export(output_path, structure, include_full_request=include_full_request)

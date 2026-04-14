@@ -24,7 +24,7 @@ prompts:
       - "саморез"
       - "шайба"
     service: "openwebui"
-    model: "qwen3-30b"
+    model: "qwen3:30b"
     temperature: 0.1
 
   # ==========================================================================
@@ -38,7 +38,7 @@ prompts:
     keywords:
       - "шайбы"
     service: "openwebui"
-    model: "qwen3-30b"
+    model: "qwen3:30b"
     temperature: 0.1
   # ==========================================================================
   # Металлы и прокат

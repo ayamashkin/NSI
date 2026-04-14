@@ -220,7 +220,7 @@ def export(output, structure, prompt, status, include_prompt, include_raw):
         results,
         structure,
         include_raw=include_raw,
-        include_prompt=include_prompt
+        include_full_request=include_prompt
     )
 
     click.echo(f"💾 Экспортировано в: {path}")
@@ -350,10 +350,23 @@ def models(api):
         try:
             if service_name == "openwebui":
                 from api_clients.openwebui import OpenWebUIClient
-                client = OpenWebUIClient(
-                    base_url=api_config.base_url,
-                    api_key=api_config.api_key
-                )
+
+                # Определяем метод аутентификации
+                if api_config.api_key:
+                    client = OpenWebUIClient(
+                        base_url=api_config.base_url,
+                        api_key=api_config.api_key
+                    )
+                elif api_config.username and api_config.password:
+                    client = OpenWebUIClient(
+                        base_url=api_config.base_url,
+                        username=api_config.username,
+                        password=api_config.password
+                    )
+                else:
+                    print("❌ Ошибка: не указаны credentials для OpenWebUI")
+                    print("   Укажите api_key_file или username + password_file в config.yaml")
+                    return
             elif service_name == "mws":
                 from api_clients.mws_gpt import MWSGPTClient
                 client = MWSGPTClient(

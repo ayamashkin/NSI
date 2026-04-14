@@ -57,7 +57,7 @@ cd nomenclature-processor
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # или
-venv\Scripts\activate     # Windows
+.venv\Scripts\activate     # Windows
 
 # Установка зависимостей
 pip install -r requirements.txt
@@ -156,7 +156,7 @@ python cli.py prompts
 ```bash
 # Автоопределение промптов по ключевым словам
 python cli.py process data/nomenclature.xlsx --auto
-
+python cli.py process data/nomenclature.xlsx -p hardware
 # Конкретный промпт
 python cli.py process data.xlsx -p hardware
 

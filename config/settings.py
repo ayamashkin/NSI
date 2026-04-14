@@ -17,39 +17,51 @@ class APIConfig:
     base_url: str
     api_key_file: Optional[str] = None
     api_key: Optional[str] = None
-    password_file: Optional[str] = None
-    password: Optional[str] = None
+    username: Optional[str] = None  # ← ДОБАВЛЕНО! Для JWT аутентификации OpenWebUI
+    password: Optional[str] = None  # Для JWT аутентификации OpenWebUI
+    password_file: Optional[str] = None  # Файл с паролем
     auth_url: Optional[str] = None
     scope: Optional[str] = None
     timeout: int = 120
     default_model: Optional[str] = None
 
-    def load_key(self) -> Optional[str]:
-        """Загружает ключ/логин из указанного файла и пароль если есть."""
-        # Загружаем ключ (или логин для GigaChat Enterprise / credentials для giga.chat)
+    def load_credentials(self) -> None:
+        """Загружает ключи, пароли и учетные данные из указанных файлов."""
+        logger.debug(f"Loading credentials for {self.base_url}")
+        logger.debug(f"  username: {self.username}")
+        logger.debug(f"  api_key_file: {self.api_key_file}")
+        logger.debug(f"  password_file: {self.password_file}")
+
+        # Загружаем API key из файла
         if self.api_key_file:
             key_path = Path(self.api_key_file)
             if key_path.exists():
                 try:
                     self.api_key = key_path.read_text(encoding='utf-8').strip()
-                    logger.debug(f"Loaded API key from {self.api_key_file}")
+                    logger.info(f"Loaded API key from {self.api_key_file}")
                 except Exception as e:
                     logger.error(f"Failed to load key from {self.api_key_file}: {e}")
             else:
                 logger.warning(f"Key file not found: {self.api_key_file}")
 
-        # Загружаем пароль для GigaChat Enterprise
+        # Загружаем пароль из файла (для JWT аутентификации OpenWebUI)
         if self.password_file:
             pwd_path = Path(self.password_file)
             if pwd_path.exists():
                 try:
                     self.password = pwd_path.read_text(encoding='utf-8').strip()
-                    logger.debug(f"Loaded password from {self.password_file}")
+                    logger.info(f"Loaded password from {self.password_file}")
                 except Exception as e:
                     logger.error(f"Failed to load password from {self.password_file}: {e}")
             else:
                 logger.warning(f"Password file not found: {self.password_file}")
 
+        logger.debug(f"After loading - api_key present: {bool(self.api_key)}, password present: {bool(self.password)}")
+
+    # Обратная совместимость - старый метод load_key
+    def load_key(self) -> Optional[str]:
+        """Загружает ключ/логин из указанного файла и пароль если есть."""
+        self.load_credentials()
         return self.api_key
 
 
@@ -124,6 +136,7 @@ class Settings:
         """
         # Загрузка основного конфига
         config_data = cls._load_yaml(config_path)
+        logger.debug(f"Loaded config data: {config_data}")
 
         # Загрузка реестра промптов
         prompts_data = cls._load_yaml(prompts_path)
@@ -131,9 +144,19 @@ class Settings:
         # Парсинг API конфигураций
         api_configs = {}
         for name, cfg in config_data.get('api', {}).items():
+            logger.info(f"Parsing API config for: {name}")
+            logger.debug(f"Raw config: {cfg}")
+
+            # Создаем APIConfig из YAML
             api_cfg = APIConfig(**cfg)
-            api_cfg.load_key()  # Загружаем ключ и пароль из файлов
+            logger.debug(f"APIConfig created - username: {api_cfg.username}, has api_key: {bool(api_cfg.api_key)}")
+
+            # Загружаем ключи из файлов
+            api_cfg.load_credentials()
+
             api_configs[name] = api_cfg
+            auth_type = 'api_key' if api_cfg.api_key else 'jwt' if (api_cfg.username and api_cfg.password) else 'none'
+            logger.info(f"API config loaded for {name} - auth: {auth_type}")
 
         # Парсинг промптов
         prompt_configs = {}
@@ -157,7 +180,9 @@ class Settings:
             return {}
 
         with open(file_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f) or {}
+            logger.debug(f"YAML loaded from {path}: {data}")
+            return data
 
     def get_api_key(self, service_name: str) -> Optional[str]:
         """Получает ключ API по имени сервиса."""
@@ -166,8 +191,15 @@ class Settings:
         return None
 
     def get_api_password(self, service_name: str) -> Optional[str]:
+        """Получает пароль API по имени сервиса."""
         if service_name in self.api:
             return self.api[service_name].password
+        return None
+
+    def get_api_username(self, service_name: str) -> Optional[str]:
+        """Получает username API по имени сервиса."""
+        if service_name in self.api:
+            return self.api[service_name].username
         return None
 
     def get_api_scope(self, service_name: str) -> Optional[str]:
@@ -187,8 +219,8 @@ class Settings:
     def reload_keys(self):
         """Перезагрузка API ключей из файлов."""
         for config in self.api.values():
-            config.load_key()
-        logger.info("API keys reloaded")
+            config.load_credentials()
+        logger.info("API keys and credentials reloaded")
 
 
 # Глобальный singleton

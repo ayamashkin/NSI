@@ -12,10 +12,19 @@ class BaseLLMClient(ABC):
     Абстрактный базовый класс для клиентов LLM API.
     """
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None, timeout: int = 120):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: Optional[str] = None,
+        timeout: int = 120,
+        username: Optional[str] = None,
+        password: Optional[str] = None
+    ):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.timeout = timeout
+        self.username = username
+        self.password = password
 
     @abstractmethod
     def complete(self, prompt: str, model: str, temperature: float = 0.1,
