@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
 Nomenclature Processor CLI
-Управление обработкой номенклатуры через командную строку.
+Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
 """
 
-import re
 import click
 import logging
+import yaml
+import json
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-
-# Только базовые импорты без pandas
-from config.settings import get_settings, reload_settings
-from core.database import DatabaseManager
-from core.processor import NomenclatureProcessor
+from typing import Optional, List
+from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,247 +20,165 @@ logger = logging.getLogger(__name__)
 
 
 @click.group()
-def cli():
-    """Nomenclature Processor - система обработки номенклатуры с помощью LLM"""
-    pass
+@click.option('--config', '-c', default='config/config.yaml', help='Путь к конфигу')
+@click.pass_context
+def cli(ctx, config):
+    """Nomenclature Processor - система обработки номенклатуры"""
+    ctx.ensure_object(dict)
+    config_path = Path(config)
+    if config_path.exists():
+        with open(config_path, 'r', encoding='utf-8') as f:
+            ctx.obj['config'] = yaml.safe_load(f)
+    else:
+        logger.warning(f"Config not found: {config}")
+        ctx.obj['config'] = {}
 
+
+# =============================================================================
+# LEGACY COMMANDS (LLM Mode)
+# =============================================================================
 
 @cli.command()
 def prompts():
-    """Список доступных промптов (не требует pandas/numpy)"""
+    """Список доступных промптов"""
+    from config.settings import get_settings
     settings = get_settings()
 
-    click.echo("📚 Доступные промпты:")
+    click.echo("📋 Доступные промпты:")
     for pid, cfg in settings.prompts.items():
-        click.echo(f"\n  {pid}:")
-        click.echo(f"    Название: {cfg.name}")
-        click.echo(f"    Категория: {cfg.category}")
-        click.echo(f"    Сервис: {cfg.service}")
-        click.echo(f"    Модель: {cfg.model}")
-        click.echo(f"    Ключевые слова: {', '.join(cfg.keywords)}")
-
-
-def _check_category_match(name: str, prompt_cfg) -> bool:
-    """
-    Проверка соответствия категории по ключевым словам.
-    Поддерживает обычные строки, регулярные выражения и glob-шаблоны.
-    (Копия метода из processor.py для использования в CLI)
-    """
-    name_lower = name.lower()
-
-    for keyword in prompt_cfg.keywords:
-        keyword = keyword.strip()
-
-        # Проверяем, является ли keyword регулярным выражением
-        if keyword.startswith('regex:') or keyword.startswith('re:'):
-            # Извлекаем паттерн
-            pattern = keyword.split(':', 1)[1].strip()
-            try:
-                if re.search(pattern, name, re.IGNORECASE):
-                    return True
-            except re.error as e:
-                logger.warning(f"Invalid regex pattern '{pattern}': {e}")
-                continue
-
-        # Проверяем как glob-шаблон (с поддержкой wildcard * и ?)
-        elif '*' in keyword or '?' in keyword:
-            # Конвертируем glob в regex
-            pattern = keyword.replace('.', r'\.').replace('*', '.*').replace('?', '.')
-            try:
-                if re.search(pattern, name_lower):
-                    return True
-            except re.error:
-                continue
-
-        # Простое вхождение подстроки
-        else:
-            if keyword.lower() in name_lower:
-                return True
-
-    return False
+        click.echo(f"\n🔹 {pid}")
+        click.echo(f"   Название: {cfg.name}")
+        click.echo(f"   Категория: {cfg.category}")
+        click.echo(f"   Сервис: {cfg.service}")
+        click.echo(f"   Модель: {cfg.model}")
+        click.echo(f"   Ключевые слова: {', '.join(cfg.keywords[:5])}...")
 
 
 @cli.command()
-@click.argument('excel_path', type=click.Path(exists=True))
+@click.argument('input_file', type=click.Path(exists=True))
 @click.option('--prompt', '-p', multiple=True, help='ID промпта (можно несколько)')
-@click.option('--auto', '-a', is_flag=True, help='Автоопределение промптов')
-@click.option('--api', type=click.Choice(['openwebui', 'mws', 'gigachat']), default=None)
-@click.option('--workers', '-w', default=None, type=int)
-@click.option('--force', '-f', is_flag=True)
-def process(excel_path, prompt, auto, api, workers, force):
-    """Обработка Excel файла"""
-    # ЛЕНИВЫЙ ИМПОРТ pandas и ExcelLoader
-    try:
-        import pandas as pd
-        from utils.excel_loader import ExcelLoader, NomenclatureItem
-    except ImportError as e:
-        click.echo(f"❌ Ошибка импорта pandas: {e}", err=True)
-        click.echo("💡 Установите: pip install pandas openpyxl", err=True)
-        return
+@click.option('--auto', is_flag=True, help='Автоопределение промптов по ключевым словам')
+@click.option('--workers', '-w', default=None, type=int, help='Количество workers')
+@click.option('--force', '-f', is_flag=True, help='Перезапись существующих')
+@click.pass_context
+def process(ctx, input_file, prompt, auto, workers, force):
+    """Обработка номенклатуры через LLM (legacy mode)"""
+    from config.settings import get_settings
+    from core.database import DatabaseManager
+    from core.processor import NomenclatureProcessor, load_excel_items
+    from utils.excel_loader import ExcelLoader
 
     settings = get_settings()
 
-    # Проверка API клиентов
-    if api:
-        if api not in settings.api:
-            click.echo(f"❌ API '{api}' не настроен в config.yaml", err=True)
-            return
-
-        # Фильтруем промпты по указанному API
-        available_prompts = {
-            pid: cfg for pid, cfg in settings.prompts.items()
-            if cfg.service == api
-        }
-
-        # Проверяем, есть ли запрошенные промпты с другим сервисом
-        if prompt:
-            mismatched = []
-            for pid in prompt:
-                if pid in settings.prompts and settings.prompts[pid].service != api:
-                    mismatched.append((pid, settings.prompts[pid].service))
-
-            if mismatched:
-                click.echo("❌ Несоответствие сервиса API:", err=True)
-                for pid, svc in mismatched:
-                    click.echo(f"   Промпт '{pid}' использует сервис '{svc}', но выбран '{api}'", err=True)
-                click.echo(f"\n💡 Варианты:", err=True)
-                click.echo(f"   1. Используйте --api {mismatched[0][1]}", err=True)
-                click.echo(f"   2. Или не указывайте --api для использования всех промптов", err=True)
-                return
-
-        if not available_prompts:
-            all_services = set(cfg.service for cfg in settings.prompts.values())
-            click.echo(f"❌ Нет промптов для сервиса '{api}'", err=True)
-            click.echo(f"💡 Доступные сервисы в промптах: {', '.join(all_services)}", err=True)
-            return
-    else:
-        available_prompts = settings.prompts
-
-    if not available_prompts:
-        click.echo("❌ Нет доступных промптов", err=True)
-        return
-
-    click.echo(f"📊 Загрузка данных из {excel_path}...")
-
+    # Загружаем Excel
+    click.echo(f"📊 Загрузка {input_file}...")
     try:
-        df = pd.read_excel(excel_path)
-        items = [
-            NomenclatureItem(
-                article=str(row['артикул']),
-                name=str(row['Краткое наименование']),
-                guid=str(row['GUID'])
-            )
-            for _, row in df.iterrows()
-        ]
-    except KeyError as e:
-        click.echo(f"❌ Отсутствует колонка в Excel: {e}", err=True)
-        click.echo("💡 Ожидаемые колонки: артикул, Краткое наименование, GUID", err=True)
-        return
-    except Exception as e:
-        click.echo(f"❌ Ошибка загрузки Excel: {e}", err=True)
-        return
+        items = load_excel_items(input_file)
+    except:
+        loader = ExcelLoader(input_file)
+        items = loader.load()
 
-    click.echo(f"✅ Загружено {len(items)} позиций")
+    click.echo(f"✅ Загружено {len(items)} записей")
 
-    # Инициализация и обработка
-    db = DatabaseManager()
+    # Инициализация
+    db = DatabaseManager(settings.database.path)
     processor = NomenclatureProcessor(db, max_workers=workers)
 
+    # Определяем промпты
+    prompt_ids = list(prompt) if prompt else []
     if auto:
+        click.echo("🔍 Автоопределение промптов...")
+        # Обработаем с автоопределением
         results = processor.auto_process(items, force_reprocess=force)
     else:
-        prompt_ids = list(prompt) if prompt else list(available_prompts.keys())
-        # Проверяем существование промптов
-        invalid = set(prompt_ids) - set(available_prompts.keys())
-        if invalid:
-            click.echo(f"❌ Неизвестные промпты: {', '.join(invalid)}", err=True)
+        if not prompt_ids:
+            click.echo("❌ Укажите --auto или --prompt", err=True)
             return
-
         results = processor.process_batch(items, prompt_ids, force_reprocess=force)
 
+    click.echo(f"\n✅ Обработка завершена: {len(results)} результатов")
+
     # Статистика
-    stats = {'completed': 0, 'ignored': 0, 'error': 0}
-    for r in results:
-        status = r.get('status', 'unknown')
-        stats[status] = stats.get(status, 0) + 1
-
-    click.echo(f"\n✅ Завершено: {stats.get('completed', 0)}")
-    click.echo(f"⏭️  Пропущено: {stats.get('ignored', 0)}")
-    click.echo(f"❌ Ошибок: {stats.get('error', 0)}")
-
-    if stats.get('error', 0) > 0:
-        click.echo(f"\n💡 Просмотр ошибок: python cli.py errors")
+    stats = db.get_statistics()
+    click.echo(f"📈 Всего в БД: {stats.get('total', 0)}")
 
 
 @cli.command()
-@click.option('--output', '-o', default='results.json', help='Путь для сохранения')
-@click.option('--structure', '-s', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
-              default='flat', help='Структура JSON')
-@click.option('--prompt', '-p', default=None, help='Фильтр по ID промпта (только этот промпт)')
-@click.option('--status', type=click.Choice(['completed', 'ignored', 'error', 'all']),
-              default='all', help='Фильтр по статусу')
-@click.option('--include-prompt', is_flag=True, help='Включить текст промпта в экспорт')
-@click.option('--include-raw', is_flag=True, help='Включить raw_response в экспорт')
-def export(output, structure, prompt, status, include_prompt, include_raw):
-    """Экспорт результатов в JSON с фильтрацией по промпту и статусу"""
-    db = DatabaseManager()
+@click.option('--output', '-o', default='results.json', help='Файл для экспорта')
+@click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']), 
+              default='flat', help='Структура вывода')
+@click.option('--prompt', '-p', help='Фильтр по ID промпта')
+@click.option('--status', '-s', help='Фильтр по статусу (completed, error, ignored)')
+@click.option('--include-raw', is_flag=True, help='Включить raw_response')
+@click.option('--include-full-request', is_flag=True, help='Включить full_request')
+def export(output, structure, prompt, status, include_raw, include_full_request):
+    """Экспорт результатов обработки в JSON"""
+    from config.settings import get_settings
+    from core.database import DatabaseManager
 
-    # Получаем результаты с фильтрацией
-    results = db.get_filtered_results(
+    settings = get_settings()
+    db = DatabaseManager(settings.database.path)
+
+    click.echo("📤 Экспорт результатов...")
+
+    results = db.get_all_results(
+        category=None,
+        status=status,
         prompt_id=prompt,
-        status=status if status != 'all' else None
+        limit=None
     )
 
-    # Экспортируем с учетом флагов
-    path = db.export_filtered_to_json(
-        output,
-        results,
-        structure,
+    if not results:
+        click.echo("⚠️  Нет данных для экспорта")
+        return
+
+    # Форматируем результаты
+    export_data = db.export_filtered_to_json(
+        output_path=output,
+        results=results,
+        structure=structure,
         include_raw=include_raw,
-        include_full_request=include_prompt
+        include_full_request=include_full_request
     )
 
-    click.echo(f"💾 Экспортировано в: {path}")
-    if prompt:
-        click.echo(f"   Фильтр по промпту: {prompt}")
-    if status != 'all':
-        click.echo(f"   Фильтр по статусу: {status}")
-    if include_prompt:
-        click.echo(f"   ✓ Включен текст промпта")
-    if include_raw:
-        click.echo(f"   ✓ Включен raw_response")
+    click.echo(f"✅ Экспортировано: {len(results)} записей → {output}")
 
 
 @cli.command()
 def stats():
-    """Статистика обработки"""
-    db = DatabaseManager()
-    statistics = db.get_statistics()
+    """Статистика по результатам в БД"""
+    from config.settings import get_settings
+    from core.database import DatabaseManager
 
-    click.echo("📈 Статистика обработки:")
-    click.echo(f"  Всего записей: {statistics.get('total', 0)}")
+    settings = get_settings()
+    db = DatabaseManager(settings.database.path)
 
-    click.echo("\n  По статусам:")
-    for status, count in statistics.get('by_status', {}).items():
-        click.echo(f"    {status}: {count}")
+    stats = db.get_statistics()
 
-    click.echo("\n  По категориям:")
-    for cat, count in statistics.get('by_category', {}).items():
-        click.echo(f"    {cat}: {count}")
-
-    click.echo("\n  По сервисам API:")
-    for svc, count in statistics.get('by_api', {}).items():
-        click.echo(f"    {svc}: {count}")
+    click.echo("📊 Статистика результатов:")
+    click.echo(f"   Всего записей: {stats.get('total', 0)}")
+    click.echo(f"   По статусам:")
+    for status, count in stats.get('by_status', {}).items():
+        click.echo(f"      {status}: {count}")
+    click.echo(f"   По категориям:")
+    for cat, count in stats.get('by_category', {}).items():
+        click.echo(f"      {cat}: {count}")
+    click.echo(f"   По API:")
+    for api, count in stats.get('by_api', {}).items():
+        click.echo(f"      {api}: {count}")
 
 
 @cli.command()
-@click.option('--limit', '-l', default=10, help='Количество ошибок для показа')
-@click.option('--prompt', '-p', default=None, help='Фильтр по ID промпта')
+@click.option('--limit', '-l', default=10, help='Количество ошибок')
+@click.option('--prompt', '-p', help='Фильтр по ID промпта')
 def errors(limit, prompt):
-    """Показать последние ошибки обработки"""
-    db = DatabaseManager()
+    """Просмотр ошибок обработки"""
+    from config.settings import get_settings
+    from core.database import DatabaseManager
 
-    # Получаем ошибки из БД
+    settings = get_settings()
+    db = DatabaseManager(settings.database.path)
+
     error_results = db.get_all_results(status='error', prompt_id=prompt, limit=limit)
 
     if not error_results:
@@ -272,132 +187,426 @@ def errors(limit, prompt):
 
     click.echo(f"❌ Последние {len(error_results)} ошибок:\n")
 
-    for r in error_results:
-        click.echo(f"Артикул: {r['article']}")
-        click.echo(f"Наименование: {r['name']}")
-        click.echo(f"Промпт: {r['prompt_id']}")
-        click.echo(f"Сервис: {r.get('api_source', 'N/A')}")
-        click.echo(f"Модель: {r.get('model_used', 'N/A')}")
-
-        error_msg = r.get('error_message', 'Неизвестная ошибка')
-        click.echo(f"Ошибка: {error_msg}")
-
-        if r.get('raw_response'):
-            raw = r['raw_response']
-            click.echo(f"Ответ API (первые 1000 симв.): {raw[:1000]}...")
-        click.echo("-" * 60)
+    for i, result in enumerate(error_results, 1):
+        click.echo(f"{i}. {result.get('article', 'N/A')}: {result.get('name', 'N/A')[:50]}...")
+        click.echo(f"   Промпт: {result.get('prompt_id', 'N/A')}")
+        click.echo(f"   Ошибка: {result.get('error_message', 'N/A')[:100]}...")
+        click.echo()
 
 
 @cli.command()
-@click.argument('name')
-def detect(name):
-    """Определить категорию для наименования"""
+@click.argument('text')
+def detect(text):
+    """Определить категорию номенклатуры"""
+    from config.settings import get_settings
+
     settings = get_settings()
 
-    click.echo(f"📋 Наименование: {name}")
+    click.echo(f"🔍 Анализ: {text}")
 
-    # Проверяем все промпты на совпадение (с полной поддержкой regex и glob)
-    matched = []
+    # Проверяем каждый промпт
     for pid, cfg in settings.prompts.items():
-        if _check_category_match(name, cfg):
-            matched.append((pid, cfg))
+        # Импортируем логику проверки
+        from core.processor import NomenclatureProcessor
 
-    if matched:
-        click.echo(f"🏷️  Найдено {len(matched)} подходящих промптов:")
-        for pid, cfg in matched:
-            click.echo(f"    - {pid} ({cfg.category}, сервис: {cfg.service})")
-            # Показываем какое ключевое слово сработало
-            for kw in cfg.keywords:
-                kw_stripped = kw.strip()
-                if kw_stripped.startswith('regex:') or kw_stripped.startswith('re:'):
-                    pattern = kw_stripped.split(':', 1)[1].strip()
-                    try:
-                        if re.search(pattern, name, re.IGNORECASE):
-                            click.echo(f"      ✓ Совпадение по regex: {kw[:50]}...")
-                            break
-                    except re.error:
-                        continue
-                elif kw_stripped.lower() in name.lower():
-                    click.echo(f"      ✓ Совпадение по ключевому слову: {kw}")
-                    break
-    else:
-        click.echo("🏷️  Категория: не определена")
-        click.echo("🔧 Нет подходящих промптов")
+        # Создаем фейковый процессор для проверки
+        class FakeItem:
+            def __init__(self, name):
+                self.name = name
+                self.article = "test"
+                self.guid = "test"
+
+        processor = NomenclatureProcessor.__new__(NomenclatureProcessor)
+        processor.settings = settings
+
+        from config.settings import PromptConfig
+        matches = processor._check_category_match(text, cfg)
+
+        if matches:
+            click.echo(f"✅ Совпадение: {pid} ({cfg.category})")
+            click.echo(f"   Сервис: {cfg.service}, Модель: {cfg.model}")
+            return
+
+    click.echo("❌ Категория не определена")
 
 
 @cli.command()
-@click.option('--api', type=click.Choice(['openwebui', 'mws', 'gigachat', 'all']), default='all',
-              help='Сервис для запроса моделей')
-def models(api):
-    """Список доступных моделей у сервисов API"""
+@click.option('--api', 'api_name', help='Проверить конкретный API (openwebui, mws, gigachat)')
+def models(api_name):
+    """Список доступных моделей API"""
+    from config.settings import get_settings
+
     settings = get_settings()
 
-    services_to_check = []
-    if api == 'all':
-        services_to_check = list(settings.api.keys())
-    else:
-        if api not in settings.api:
-            click.echo(f"❌ API '{api}' не настроен в config.yaml", err=True)
-            return
-        services_to_check = [api]
+    services = [api_name] if api_name else list(settings.api.keys())
 
-    for service_name in services_to_check:
-        api_config = settings.api[service_name]
-        click.echo(f"\n🔌 Сервис: {service_name}")
-        click.echo(f"   URL: {api_config.base_url}")
-        click.echo(f"   Модель по умолчанию: {api_config.default_model or 'N/A'}")
+    for service in services:
+        cfg = settings.api.get(service)
+        if not cfg:
+            click.echo(f"❌ {service}: не настроен")
+            continue
+
+        click.echo(f"\n🔌 {service.upper()}:")
+        click.echo(f"   URL: {cfg.base_url}")
 
         try:
-            if service_name == "openwebui":
+            if service == 'openwebui':
                 from api_clients.openwebui import OpenWebUIClient
-
-                # Определяем метод аутентификации
-                if api_config.api_key:
-                    client = OpenWebUIClient(
-                        base_url=api_config.base_url,
-                        api_key=api_config.api_key
-                    )
-                elif api_config.username and api_config.password:
-                    client = OpenWebUIClient(
-                        base_url=api_config.base_url,
-                        username=api_config.username,
-                        password=api_config.password
-                    )
-                else:
-                    print("❌ Ошибка: не указаны credentials для OpenWebUI")
-                    print("   Укажите api_key_file или username + password_file в config.yaml")
-                    return
-            elif service_name == "mws":
+                client = OpenWebUIClient(
+                    base_url=cfg.base_url,
+                    api_key=cfg.api_key,
+                    username=cfg.username,
+                    password=cfg.password
+                )
+            elif service == 'mws':
                 from api_clients.mws_gpt import MWSGPTClient
                 client = MWSGPTClient(
-                    base_url=api_config.base_url,
-                    api_key=api_config.api_key
-                )
-            elif service_name == "gigachat":
-                from api_clients.gigachat import GigaChatClient
-                client = GigaChatClient(
-                    base_url=api_config.base_url,
-                    api_key=api_config.api_key,
-                    scope=api_config.scope,
-                    timeout=api_config.timeout,
-                    verify_ssl=False
+                    base_url=cfg.base_url,
+                    api_key=cfg.api_key
                 )
             else:
                 continue
 
-            available_models = client.get_models()
-
-            if available_models:
-                click.echo(f"   Доступные модели ({len(available_models)}):")
-                for model in available_models[:20]:
-                    click.echo(f"      • {model}")
-                if len(available_models) > 20:
-                    click.echo(f"      ... и ещё {len(available_models) - 20} моделей")
+            model_list = client.get_models()
+            if model_list:
+                click.echo(f"   Модели ({len(model_list)}):")
+                for m in model_list[:10]:
+                    click.echo(f"      - {m}")
+                if len(model_list) > 10:
+                    click.echo(f"      ... и еще {len(model_list)-10}")
             else:
-                click.echo("   ⚠️ Не удалось получить список моделей")
+                click.echo("   ⚠️  Нет доступных моделей")
 
         except Exception as e:
-            click.echo(f"   ❌ Ошибка подключения: {e}", err=True)
+            click.echo(f"   ❌ Ошибка: {e}")
+
+
+# =============================================================================
+# PARAMETRIC COMMANDS (New)
+# =============================================================================
+
+@cli.command()
+@click.argument('text')
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
+@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
+@click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
+def process_parametric(text, db, ens_index, llm):
+    """Обработка одной строки с параметрическим поиском"""
+    from core.mask_database import MaskDatabase
+    from core.automated_processor import AutomatedParametricProcessor
+    from config.settings import get_settings
+
+    # Инициализация LLM
+    llm_clients = {}
+    if llm:
+        settings = get_settings()
+        for service_name in ['openwebui', 'mws']:
+            if service_name in settings.api:
+                try:
+                    if service_name == 'openwebui':
+                        from api_clients.openwebui import OpenWebUIClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = OpenWebUIClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            username=cfg.username,
+                            password=cfg.password
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to init {service_name}: {e}")
+
+    mask_db = MaskDatabase(db_path=db)
+    processor = AutomatedParametricProcessor(
+        mask_db=mask_db,
+        llm_clients=llm_clients if llm else None,
+        ens_index_path=ens_index,
+        use_llm_generation=llm
+    )
+
+    result = processor.process(text)
+
+    click.echo(f"📋 Текст: {result.text}")
+    click.echo(f"🔹 Уровень: {result.level.value}")
+    click.echo(f"✅ Успех: {result.success}")
+    click.echo(f"📊 Уверенность: {result.confidence:.2f}")
+    click.echo(f"⏱️  Время: {result.processing_time_ms:.2f} мс")
+
+    if result.params:
+        click.echo(f"📌 Параметры:")
+        for key, value in result.params.items():
+            if not key.startswith('_'):
+                click.echo(f"   {key}: {value}")
+
+    if result.ens_match:
+        click.echo(f"🔗 ЕСН совпадение:")
+        click.echo(f"   Код: {result.ens_match.get('code')}")
+
+
+@cli.command()
+@click.argument('input_file', type=click.Path(exists=True))
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
+@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
+@click.option('--output', '-o', default='results.json', help='Выходной файл')
+@click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию')
+@click.option('--validate/--no-validate', default=True, help='Проверять валидность')
+def batch(input_file, db, ens_index, output, llm, validate):
+    """Пакетная обработка с параметрическим поиском"""
+    import pandas as pd
+    from tqdm import tqdm
+    from core.mask_database import MaskDatabase
+    from core.automated_processor import AutomatedParametricProcessor
+    from config.settings import get_settings
+
+    click.echo(f"📊 Загрузка {input_file}...")
+    df = pd.read_excel(input_file)
+
+    name_col = 'Краткое наименование'
+    if name_col not in df.columns:
+        name_cols = [c for c in df.columns if 'наименование' in str(c).lower()]
+        if name_cols:
+            name_col = name_cols[0]
+        else:
+            click.echo("❌ Колонка с наименованием не найдена", err=True)
+            return
+
+    texts = df[name_col].astype(str).tolist()
+    click.echo(f"✅ Загружено {len(texts)} записей")
+
+    # LLM клиенты
+    llm_clients = {}
+    if llm:
+        settings = get_settings()
+        for service_name in ['openwebui', 'mws']:
+            if service_name in settings.api:
+                try:
+                    if service_name == 'openwebui':
+                        from api_clients.openwebui import OpenWebUIClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = OpenWebUIClient(
+                            base_url=cfg.base_url,
+                            username=cfg.username,
+                            password=cfg.password,
+                            api_key=cfg.api_key
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to init {service_name}: {e}")
+
+    mask_db = MaskDatabase(db_path=db)
+    processor = AutomatedParametricProcessor(
+        mask_db=mask_db,
+        llm_clients=llm_clients if llm else None,
+        ens_index_path=ens_index,
+        use_llm_generation=llm
+    )
+
+    click.echo("🚀 Начало обработки...")
+    results = []
+    stats = {'success': 0, 'failed': 0}
+
+    for text in tqdm(texts, desc="Обработка"):
+        result = processor.process(text)
+        if validate and not result.success:
+            stats['failed'] += 1
+        else:
+            stats['success'] += 1
+
+        results.append({
+            'text': result.text,
+            'level': result.level.value,
+            'success': result.success,
+            'params': result.params,
+            'ens_code': result.ens_match.get('code') if result.ens_match else None,
+            'confidence': result.confidence,
+            'processing_time_ms': result.processing_time_ms
+        })
+
+    with open(output, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    click.echo(f"\n💾 Результаты: {output}")
+    click.echo(f"📈 Успешно: {stats['success']}/{len(results)}")
+
+
+@cli.group()
+def ens():
+    """Команды для работы с ЕСН"""
+    pass
+
+
+@ens.command()
+@click.argument('excel_file', type=click.Path(exists=True))
+@click.option('--output', '-o', required=True, help='Путь для сохранения (.pkl)')
+@click.option('--category', '-c', type=click.Choice(['hardware', 'washer', 'rolledmetal']))
+def build_index(excel_file, output, category):
+    """Построить индекс ЕСН из Excel"""
+    from core.integration import build_ens_index
+
+    click.echo(f"📚 Построение индекса из {excel_file}...")
+    result_path = build_ens_index(excel_file, output, category)
+    click.echo(f"✅ Индекс сохранен: {result_path}")
+
+    # Метаданные
+    import json
+    meta_path = Path(result_path).with_suffix('.meta.json')
+    if meta_path.exists():
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        click.echo(f"📊 Записей: {meta.get('item_count', 0)}")
+        click.echo(f"📊 Категория: {meta.get('category', 'unknown')}")
+
+
+@ens.command()
+@click.argument('query')
+@click.option('--index', '-i', required=True, help='Путь к индексу')
+@click.option('--top-k', '-k', default=5, help='Количество результатов')
+def search(query, index, top_k):
+    """Поиск по индексу ЕСН"""
+    from ens.indexer import ENSIndex
+
+    if not Path(index).exists():
+        click.echo(f"❌ Индекс не найден", err=True)
+        return
+
+    ens_index = ENSIndex.load(index)
+    results = ens_index.search(query, k=top_k)
+
+    for i, item in enumerate(results, 1):
+        score = item.get('_similarity_score', 0)
+        name = item.get('полное_наименование') or item.get('наименование', 'N/A')
+        click.echo(f"{i}. [{score:.2f}] {name[:60]}...")
+
+
+@ens.command()
+@click.argument('excel_file', type=click.Path(exists=True))
+@click.option('--index', '-i', required=True, help='Путь к индексу')
+@click.option('--sample', '-s', default=100, help='Размер выборки')
+def analyze(excel_file, index, sample):
+    """Анализ покрытия файла индексом"""
+    from core.integration import analyze_nomenclature
+
+    stats = analyze_nomenclature(excel_file, index, sample_size=sample)
+
+    click.echo(f"📊 Анализ (выборка {sample}):")
+    click.echo(f"   Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0)/sample*100:.1f}%)")
+    click.echo(f"   Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0)/sample*100:.1f}%)")
+
+    if 'estimated_regex_parsed' in stats:
+        total = stats.get('total', 0)
+        click.echo(f"\n📊 Экстраполяция на {total} записей:")
+        click.echo(f"   Ожидается regex: ~{stats['estimated_regex_parsed']}")
+
+
+@cli.command()
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
+@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
+@click.option('--min-score', '-s', default=0.85, help='Порог активации')
+@click.option('--llm', '-l', is_flag=True, help='Использовать LLM')
+def generate_masks(db, ens_index, min_score, llm):
+    """Генерация масок для всех стандартов из индекса"""
+    from core.mask_database import MaskDatabase, MaskRecord
+    from core.auto_validator import AutoValidator
+    from core.llm_mask_generator import LLMMaskGenerator
+    from config.settings import get_settings
+    from pathlib import Path
+    import pickle
+
+    if not Path(ens_index).exists():
+        click.echo("❌ Индекс не найден", err=True)
+        return
+
+    with open(ens_index, 'rb') as f:
+        data = pickle.load(f)
+    items = data.get('items', [])
+
+    # Группировка по стандартам
+    standards = {}
+    for item in items:
+        std = item.get('стандарт') or item.get('нтд', 'UNKNOWN')
+        item_type = item.get('тип', 'unknown')
+        key = (std, item_type)
+        if key not in standards:
+            standards[key] = []
+        standards[key].append(item)
+
+    click.echo(f"🔍 Найдено {len(standards)} уникальных стандартов")
+
+    mask_db = MaskDatabase(db_path=db)
+    validator = AutoValidator(ens_index_path=ens_index, activation_threshold=min_score)
+
+    # LLM клиенты
+    llm_clients = {}
+    if llm:
+        settings = get_settings()
+        for service_name in ['openwebui', 'mws']:
+            if service_name in settings.api:
+                try:
+                    if service_name == 'openwebui':
+                        from api_clients.openwebui import OpenWebUIClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = OpenWebUIClient(
+                            base_url=cfg.base_url,
+                            username=cfg.username,
+                            password=cfg.password,
+                            api_key=cfg.api_key
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to init {service_name}: {e}")
+
+        if not llm_clients:
+            click.echo("❌ LLM requested but no clients available", err=True)
+            return
+        click.echo("🤖 LLM генерация включена")
+
+    generator = LLMMaskGenerator(llm_clients, max_retries=3) if llm else None
+
+    stats = {'existing': 0, 'generated': 0, 'activated': 0}
+
+    with click.progressbar(standards.items(), label='Генерация') as bar:
+        for (std, item_type), examples in bar:
+            existing = mask_db.get_mask(std, item_type)
+            if existing and existing.is_active:
+                stats['existing'] += 1
+                continue
+
+            if len(examples) < 10:
+                continue
+
+            if generator:
+                mask, _ = generator.generate_mask(std, item_type, examples)
+                if mask:
+                    temp_mask = MaskRecord(
+                        standard=std, item_type=item_type,
+                        pattern=mask['pattern'], params=mask['params'],
+                        required=mask['required'], auto_score=0.0,
+                        is_active=False, source='llm'
+                    )
+                    val_result = validator.validate_mask(
+                        temp_mask.pattern, temp_mask.params, temp_mask.required,
+                        std, item_type, examples
+                    )
+                    temp_mask.auto_score = val_result.score
+                    temp_mask.is_active = val_result.passed
+                    mask_db.save_mask(temp_mask, auto_activate=True)
+                    stats['generated'] += 1
+                    if val_result.passed:
+                        stats['activated'] += 1
+
+    click.echo(f"\n📊 Результат:")
+    click.echo(f"   Уже активных: {stats['existing']}")
+    click.echo(f"   Сгенерировано: {stats['generated']}")
+    click.echo(f"   Активировано: {stats['activated']}")
+
+
+@cli.command()
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД')
+@click.option('--threshold', '-t', default=0.5, help='Порог удаления')
+def cleanup(db, threshold):
+    """Очистка низкокачественных масок"""
+    from core.mask_database import MaskDatabase
+
+    mask_db = MaskDatabase(db_path=db)
+    deleted = mask_db.cleanup_low_score_masks(threshold)
+    click.echo(f"🗑️  Удалено {deleted} масок с score < {threshold}")
 
 
 if __name__ == '__main__':

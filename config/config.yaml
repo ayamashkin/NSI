@@ -15,7 +15,7 @@ api:
     username: "default7@yandex.ru"  # ← Ваш email/логин
     password_file: "secrets/openwebui_password.txt"  # ← Файл с паролем
 
-    timeout: 180
+
     default_model: "qwen3:30b"
 
   mws:

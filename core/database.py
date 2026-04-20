@@ -26,7 +26,7 @@ class DatabaseManager:
     - Потокобезопасные операции
     """
 
-    def __init__(self, db_path: str = "results.db"):
+    def __init__(self, db_path: str = "cache/results.db"):
         """
         Инициализация менеджера базы данных.
 

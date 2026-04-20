@@ -1,0 +1,354 @@
+"""
+Main Processor Module
+Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator -> 
+AutoValidator -> ParametricMatch -> TF-IDF Fallback
+"""
+
+import logging
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class ProcessingLevel(Enum):
+    """Уровни обработки."""
+    LEVEL_0_EXTRACT = "standard_extraction"      # Извлечение стандарта
+    LEVEL_1_MASK_LOOKUP = "mask_lookup"          # Проверка MaskDatabase
+    LEVEL_2_LLM_GENERATE = "llm_generation"      # Генерация маски
+    LEVEL_3_VALIDATE = "auto_validation"         # Авто-валидация
+    LEVEL_5_SAVE = "save_mask"                   # Сохранение маски
+    LEVEL_6_PARAMETRIC_MATCH = "parametric_match"  # Параметрическое сопоставление
+    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"    # TF-IDF fallback
+    LEVEL_8_LLM_DIRECT = "llm_direct"            # Прямой LLM вызов
+
+
+@dataclass
+class ProcessingResult:
+    """Результат обработки."""
+    text: str
+    level: ProcessingLevel
+    success: bool
+    params: Dict[str, Any]
+    ens_match: Optional[Dict[str, Any]]
+    confidence: float
+    processing_time_ms: float
+    details: Dict[str, Any]
+
+
+class AutomatedParametricProcessor:
+    """
+    Основной процессор автоматизированного параметрического поиска.
+
+    Архитектура (согласно ROADMAP.md):
+    Level 0: Regex Extractor (standard from text)
+    Level 1: MaskDatabase (check existing validated masks)
+    Level 2: AutoMaskGenerator (LLM local/cloud)
+    Level 3: AutoValidator (test on ENS samples, score >= 0.85)
+    Level 5: Save to MaskDatabase (auto-approved)
+    Level 6: ParametricMatching (extract params, compare)
+    Level 7: ENSIndex (TF-IDF fallback)
+    Level 8: LLM Direct (few-shot with ENS examples)
+    """
+
+    def __init__(
+        self,
+        mask_db,
+        llm_clients: Optional[Dict[str, Any]] = None,
+        ens_index_path: Optional[str] = None,
+        min_mask_score: float = 0.85,
+        max_llm_retries: int = 3,
+        use_llm_generation: bool = True
+    ):
+        """
+        Инициализация процессора.
+
+        Args:
+            mask_db: Экземпляр MaskDatabase
+            llm_clients: Словарь LLM клиентов {provider: client}
+            ens_index_path: Путь к индексу ЕСН
+            min_mask_score: Минимальный score для активации маски
+            max_llm_retries: Максимум попыток LLM генерации
+            use_llm_generation: Разрешить LLM генерацию масок
+        """
+        self.mask_db = mask_db
+        self.llm_clients = llm_clients or {}
+        self.ens_index_path = ens_index_path
+        self.min_mask_score = min_mask_score
+        self.max_llm_retries = max_llm_retries
+        self.use_llm_generation = use_llm_generation
+
+        # Инициализация компонентов
+        self._init_components()
+
+    def _init_components(self):
+        """Инициализация внутренних компонентов."""
+        # StandardExtractor
+        from parsers.standard_extractor import get_standard_extractor
+        self.standard_extractor = get_standard_extractor()
+
+        # AutoValidator
+        from core.auto_validator import AutoValidator
+        self.validator = AutoValidator(
+            ens_index_path=self.ens_index_path,
+            activation_threshold=self.min_mask_score
+        )
+
+        # LLM Generator
+        if self.use_llm_generation and self.llm_clients:
+            from core.llm_mask_generator import LLMMaskGenerator
+            self.llm_generator = LLMMaskGenerator(
+                clients=self.llm_clients,
+                max_retries=self.max_llm_retries
+            )
+        else:
+            self.llm_generator = None
+
+        # Parametric Client
+        from core.parametric_client import ParametricENSClient
+        self.parametric_client = ParametricENSClient(
+            mask_db=self.mask_db,
+            ens_index_path=self.ens_index_path
+        )
+
+        logger.info("AutomatedParametricProcessor initialized")
+
+    def process(self, text: str) -> ProcessingResult:
+        """
+        Обработка одной строки номенклатуры.
+
+        Args:
+            text: Строка номенклатуры
+
+        Returns:
+            ProcessingResult
+        """
+        import time
+        start_time = time.time()
+
+        logger.info(f"Processing: {text[:50]}...")
+
+        # Level 0: Извлечение стандарта
+        extracted = self.standard_extractor.extract_all(text)
+        standard_info = extracted.get('standard_info')
+        item_type = extracted.get('item_type')
+
+        if not standard_info or not item_type:
+            # Не удалось извлечь базовую информацию -> Level 8: LLM Direct
+            return self._llm_direct_process(text, start_time)
+
+        standard = standard_info.normalized
+
+        # Level 1: Проверка MaskDatabase
+        mask = self.mask_db.get_mask(standard, item_type)
+
+        if mask and mask.is_active:
+            # Активная маска найдена -> Level 6: ParametricMatch
+            return self._parametric_match(text, mask, extracted, start_time)
+
+        # Level 2: LLM Generation (если разрешено)
+        if self.use_llm_generation and self.llm_generator:
+            generated_mask = self._generate_mask(standard, item_type)
+
+            if generated_mask:
+                # Level 3: AutoValidation
+                validation_result = self._validate_mask(
+                    generated_mask, standard, item_type
+                )
+
+                if validation_result.passed:
+                    # Level 5: Save mask
+                    mask_record = self._save_mask(generated_mask, validation_result)
+
+                    if mask_record:
+                        # Level 6: ParametricMatch с новой маской
+                        return self._parametric_match(
+                            text, mask_record, extracted, start_time
+                        )
+                else:
+                    logger.warning(
+                        f"Generated mask failed validation: {validation_result.score:.2f}"
+                    )
+
+        # Level 7: TF-IDF Fallback
+        return self._tfidf_fallback(text, extracted, start_time)
+
+    def _generate_mask(self, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
+        """Генерация маски через LLM."""
+        if not self.llm_generator:
+            return None
+
+        # Получаем примеры из ЕСН
+        examples = self.validator._get_ens_examples(standard, item_type)
+
+        if len(examples) < 10:
+            logger.warning(f"Not enough examples for {standard}/{item_type}")
+            return None
+
+        mask, attempts = self.llm_generator.generate_mask(
+            standard=standard,
+            item_type=item_type,
+            examples=examples
+        )
+
+        if mask:
+            logger.info(f"Generated mask for {standard}/{item_type}")
+            return mask
+
+        return None
+
+    def _validate_mask(
+        self,
+        mask: Dict[str, Any],
+        standard: str,
+        item_type: str
+    ) -> Any:
+        """Валидация сгенерированной маски."""
+        from core.mask_database import MaskRecord
+
+        # Создаем временную запись для валидации
+        temp_mask = MaskRecord(
+            standard=standard,
+            item_type=item_type,
+            pattern=mask['pattern'],
+            params=mask['params'],
+            required=mask['required']
+        )
+
+        # Валидируем
+        result = self.validator.validate_mask(
+            pattern=temp_mask.pattern,
+            params=temp_mask.params,
+            required=temp_mask.required,
+            standard=standard,
+            item_type=item_type
+        )
+
+        return result
+
+    def _save_mask(self, mask: Dict[str, Any], validation: Any) -> Optional[Any]:
+        """Сохранение валидированной маски в БД."""
+        from core.mask_database import MaskRecord
+
+        mask_record = MaskRecord(
+            standard=mask['standard'],
+            item_type=mask['item_type'],
+            pattern=mask['pattern'],
+            params=mask['params'],
+            required=mask['required'],
+            auto_score=validation.score,
+            is_active=validation.passed,
+            source='llm',
+            test_examples=validation.details[:5]  # Сохраняем первые 5 тестов
+        )
+
+        mask_id = self.mask_db.save_mask(mask_record, auto_activate=True)
+
+        if mask_id:
+            mask_record.id = mask_id
+            logger.info(f"Saved mask with ID: {mask_id}")
+            return mask_record
+
+        return None
+
+    def _parametric_match(
+        self,
+        text: str,
+        mask,
+        extracted: Dict[str, Any],
+        start_time: float
+    ) -> ProcessingResult:
+        """Параметрическое сопоставление."""
+        import time
+
+        match_result = self.parametric_client.match(
+            text=text,
+            standard=mask.standard,
+            item_type=mask.item_type
+        )
+
+        processing_time = (time.time() - start_time) * 1000
+
+        return ProcessingResult(
+            text=text,
+            level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
+            success=match_result.score > 0.5,
+            params=match_result.matched_params,
+            ens_match={
+                'code': match_result.ens_code,
+                'mdm_key': match_result.mdm_key,
+                'score': match_result.score,
+                'type': match_result.match_type
+            } if match_result.ens_code else None,
+            confidence=match_result.confidence,
+            processing_time_ms=processing_time,
+            details={
+                'mask_id': mask.id,
+                'mask_pattern': mask.pattern,
+                'extracted_standard': extracted.get('standard_info'),
+                'extracted_type': extracted.get('item_type')
+            }
+        )
+
+    def _tfidf_fallback(
+        self,
+        text: str,
+        extracted: Dict[str, Any],
+        start_time: float
+    ) -> ProcessingResult:
+        """TF-IDF fallback."""
+        import time
+
+        match_result = self.parametric_client._tfidf_fallback(text)
+        processing_time = (time.time() - start_time) * 1000
+
+        return ProcessingResult(
+            text=text,
+            level=ProcessingLevel.LEVEL_7_TFIDF_FALLBACK,
+            success=match_result.score > 0.3,
+            params={},
+            ens_match={
+                'code': match_result.ens_code,
+                'mdm_key': match_result.mdm_key,
+                'score': match_result.score,
+                'type': match_result.match_type
+            } if match_result.ens_code else None,
+            confidence=match_result.confidence,
+            processing_time_ms=processing_time,
+            details={'fallback': True, 'extracted': extracted}
+        )
+
+    def _llm_direct_process(self, text: str, start_time: float) -> ProcessingResult:
+        """Прямая обработка через LLM (без маски)."""
+        import time
+
+        # Здесь можно добавить прямой вызов LLM
+        # Пока возвращаем failed result
+        processing_time = (time.time() - start_time) * 1000
+
+        return ProcessingResult(
+            text=text,
+            level=ProcessingLevel.LEVEL_0_EXTRACT,
+            success=False,
+            params={},
+            ens_match=None,
+            confidence=0.0,
+            processing_time_ms=processing_time,
+            details={'error': 'Could not extract standard or type'}
+        )
+
+    def batch_process(self, texts: List[str]) -> List[ProcessingResult]:
+        """Пакетная обработка."""
+        return [self.process(text) for text in texts]
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Статистика процессора."""
+        return {
+            'mask_db_stats': self.mask_db.get_statistics(),
+            'parametric_client_stats': self.parametric_client.get_stats(),
+            'llm_generation_enabled': self.use_llm_generation,
+            'min_mask_score': self.min_mask_score,
+            'max_llm_retries': self.max_llm_retries
+        }

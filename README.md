@@ -1,53 +1,67 @@
-# Nomenclature Processor
+# Nomenclature Processor + Automated Parametric Search
 
-Система автоматической обработки номенклатуры с использованием LLM (Large Language Models) для извлечения технических параметров изделий.
-
-## 🎯 Назначение
-
-Система предназначена для:
-- Автоматической классификации номенклатуры по категориям (крепеж, ЭРИ, материалы, покупные изделия)
-- Извлечения структурированных технических параметров из неструктурированных наименований
-- Пакетной обработки больших объемов данных (десятки тысяч позиций)
-- Интеграции с локальными LLM (OpenWebUI), облачными API (MWS Cloud GPT, GigaChat)
+Система обработки номенклатуры с двумя режимами работы:
+1. **LLM Mode** — извлечение параметров через LLM (legacy)
+2. **Parametric Mode** — каскадный парсинг regex → ENS → LLM с авто-генерацией масок
 
 ## 🏗️ Архитектура
 
 ```
+Level 0: StandardExtractor (regex) — извлечение стандарта
+    ↓
+Level 1: MaskDatabase (SQLite) — проверка существующих масок
+    ↓ если нет маски
+Level 2: LLMMaskGenerator — генерация regex через LLM
+    ↓
+Level 3: AutoValidator — валидация на примерах из ЕСН (score ≥ 0.85)
+    ↓
+Level 5: Save to MaskDatabase (auto-approved)
+    ↓
+Level 6: ParametricMatching — извлечение параметров
+    ↓ если не совпало
+Level 7: TF-IDF Fallback — нечеткий поиск по ЕСН
+```
+
+## 📁 Структура проекта
+
+```
 nomenclature-processor/
 ├── config/
-│   ├── __init__.py
-│   ├── settings.py              # Конфигурация API и путей
-│   ├── config.yaml              # Основная конфигурация API и БД
-│   └── prompts.yaml             # Реестр промптов по категориям
+│   ├── settings.py              # Настройки Pydantic
+│   ├── config.yaml              # API ключи, таймауты
+│   └── prompts.yaml             # Реестр промптов и категорий
 ├── core/
-│   ├── __init__.py
-│   ├── models.py                # Pydantic модели данных
-│   ├── database.py              # SQLite manager с upsert
-│   ├── processor.py             # Основной движок обработки
-│   └── registry.py              # Реестр промптов
+│   ├── database.py              # SQLite для результатов (results.db)
+│   ├── processor.py             # LLM процессор (legacy)
+│   ├── integration.py           # Утилиты ENS
+│   ├── automated_processor.py   # Параметрический процессор (Level 0-8)
+│   ├── parametric_client.py     # Параметрическое сопоставление
+│   ├── mask_database.py         # MaskDatabase (SQLite + pool)
+│   ├── llm_mask_generator.py    # Генерация regex через LLM
+│   └── auto_validator.py        # Авто-валидация масок
 ├── api_clients/
-│   ├── __init__.py
-│   ├── base.py                  # Абстрактный класс клиента
-│   ├── openwebui.py             # Клиент для OpenWebUI API
-│   ├── mws_gpt.py               # Клиент для MWS Cloud GPT API
-│   └── gigachat.py              # Клиенты для GigaChat API (Enterprise + Cloud)
+│   ├── base.py                  # Базовый класс
+│   ├── openwebui.py             # OpenWebUI клиент (JWT/API key)
+│   ├── mws_gpt.py               # MWS Cloud GPT
+│   └── gigachat.py              # GigaChat (Enterprise + Cloud)
+├── parsers/
+│   ├── cascade.py               # RegexFastenerParser + CascadeParser
+│   ├── standard_extractor.py    # Level 0: ГОСТ/ОСТ extraction
+│   └── ner_adapter.py           # (legacy, не используется)
+├── ens/
+│   ├── loader.py                # ENSLoader (Excel → объекты)
+│   └── indexer.py               # ENSIndex (TF-IDF)
 ├── utils/
-│   ├── __init__.py
-│   ├── excel_loader.py          # Загрузка Excel через pandas/openpyxl
-│   └── excel_loader_simple.py   # Загрузка Excel только через openpyxl
-├── secrets/                     # Учетные данные (не в git)
-├── prompts/templates/           # Файлы промптов (.txt)
-├── logs/                        # Директория для логов
-├── cli.py                       # CLI интерфейс (точка входа)
-├── results.db                   # SQLite база данных (создается автоматически)
-├── requirements.txt
-└── README.md
+│   ├── excel_loader.py          # Загрузка nomenclature.xlsx
+│   └── json_export.py           # Экспорт в JSON
+├── cli.py                       # CLI интерфейс (все команды)
+├── seed_default_masks.py        # Заполнение БД дефолтными масками
+└── requirements.txt
 ```
 
 ## ⚡ Быстрый старт
 
 ### 1. Установка
-
 ```bash
 # Клонирование репозитория
 git clone <repository-url>
@@ -63,324 +77,211 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### 2. Конфигурация API
+### 2. Конфигурация
 
-Создайте директорию `secrets/` и файлы с учетными данными:
-
-**OpenWebUI:**
-```bash
-echo "your_openwebui_key" > secrets/openwebui_key.txt
-```
-
-**MWS Cloud GPT:**
-```bash
-echo "your_mws_api_key" > secrets/mws_key.txt
-```
-
-**GigaChat Cloud (giga.chat):**
-```bash
-echo "your_authorization_key" > secrets/gigachat_credentials.txt
-```
-
-### 3. Настройка config.yaml
-
-Основная конфигурация в `config/config.yaml`:
+Создайте `config/config.yaml`:
 
 ```yaml
 api:
   openwebui:
     base_url: "https://webui.game73.ru/api"
-    api_key_file: "secrets/openwebui_key.txt"
-    timeout: 120
-    default_model: "qwen3-30b"
-
+    username: "user@example.com"
+    password_file: "secrets/openwebui_password.txt"
+    timeout: 180
+    default_model: "qwen3:30b"
   mws:
     base_url: "https://api.gpt.mws.ru/"
     api_key_file: "secrets/mws_key.txt"
     timeout: 120
-    default_model: "qwen2.5-72b-instruct"
-
   gigachat:
     base_url: "https://gigachat.devices.sberbank.ru/api/v1"
-    api_key_file: "secrets/gigachat_credentials.txt"     # Authorization Key
-    scope: "GIGACHAT_API_PERS"  # GIGACHAT_API_PERS, GIGACHAT_API_B2B или GIGACHAT_API_CORP
+    api_key_file: "secrets/gigachat_credentials.txt"
+    scope: "GIGACHAT_API_PERS"
     timeout: 120
-    default_model: "GigaChat"
+
+database:
+  path: "cache/results.db"
+
+processing:
+  default_workers: 4
 ```
 
-### 4. Подготовка промптов
+### 3. Режим 1: Параметрический поиск (новый, рекомендуется)
 
-Поместите файлы промптов в `prompts/templates/` и настройте `config/prompts.yaml`:
-
-```yaml
-prompts:
-  hardware:
-    name: "Крепеж - полный разбор ГОСТ"
-    file: "prompts/templates/hardware.txt"
-    category: "hardware"
-    keywords: ["болт", "гайка", "шуруп", "винт", "шайба", "заклепка"]
-    service: "mws"  # или "openwebui","gigachat"
-    model: "gigachat-pro"
-    temperature: 0.1
-```
-
-### 5. Подготовка данных
-
-Excel файл должен содержать колонки:
-- `артикул` — уникальный код изделия
-- `Краткое наименование` — наименование для анализа
-- `GUID` — внутренний идентификатор
-
-## 🚀 Использование
-
-### CLI команды
-
-| Команда | Описание | Пример                                          |
-|---------|----------|-------------------------------------------------|
-| `prompts` | Список доступных промптов | `python cli.py prompts`                         |
-| `process` | Обработка Excel файла | `python cli.py process data.xlsx -p hardware` |
-| `export` | Экспорт результатов в JSON | `python cli.py export -o results.json`          |
-| `stats` | Статистика обработки | `python cli.py stats`                           |
-| `errors` | Просмотр ошибок | `python cli.py errors -l 20`                    |
-| `detect` | Определить категорию | `python cli.py detect "Болт М12х50"`            |
-| `models` | Список доступных моделей | `python cli.py models --api wms`                |
-
-### Примеры использования
-
-#### Список промптов
 ```bash
-python cli.py prompts
+# Шаг 1: Построить индекс ЕСН
+python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" \
+    -o models/hardware/ens_hardware.pkl
+
+# Шаг 2: Заполнить БД дефолтными масками (быстро) ИЛИ сгенерировать через LLM
+python seed_default_masks.py cache/masks.db
+# ИЛИ
+python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
+
+# Шаг 3: Обработать файл
+python cli.py batch data/nomenclature.xlsx \
+    -d cache/masks.db \
+    -i models/hardware/ens_hardware.pkl \
+    -o results.json
 ```
 
-#### Обработка Excel
+### 4. Режим 2: LLM обработка (legacy)
+
 ```bash
-# Автоопределение промптов по ключевым словам
 python cli.py process data/nomenclature.xlsx --auto
-python cli.py process data/nomenclature.xlsx -p hardware
-# Конкретный промпт
-python cli.py process data.xlsx -p hardware
-
-# Несколько промптов
-python cli.py process data.xlsx -p hardware -p eri_v1
-
-# С указанием API (проверяет соответствие сервиса в промпте)
-python cli.py process data.xlsx -p hardware --api gigachat 
-
-# Параллельная обработка
-python cli.py process data.xlsx --auto -w 4
-
-# Перезапись существующих результатов
-python cli.py process data.xlsx -p hardware -f
 ```
 
-#### Просмотр ошибок
-```bash
-# Последние 10 ошибок
-python cli.py errors
+## 🚀 CLI Команды
 
-# Последние 20 ошибок
-python cli.py errors -l 20
+### ENS и Маски (Новое)
 
-# Ошибки конкретного промпта
-python cli.py errors -p hardware
-```
+| Команда | Описание | Пример |
+|---------|----------|--------|
+| `ens build-index` | Построить TF-IDF индекс из Excel ЕСН | `python cli.py ens build-index ENS.xlsx -o ens.pkl` |
+| `ens search` | Поиск похожих записей в индексе | `python cli.py ens search "Болт М12" -i ens.pkl` |
+| `ens analyze` | Анализ покрытия файла индексом | `python cli.py ens analyze input.xlsx -i ens.pkl` |
+| `generate-masks` | Авто-генерация масок для всех стандартов | `python cli.py generate-masks -d masks.db -i ens.pkl --llm` |
+| `cleanup` | Удаление масок с низким score | `python cli.py cleanup -d masks.db -t 0.5` |
 
-#### Экспорт результатов
-```bash
-# Плоская структура
-python cli.py export -o results.json --structure flat
+### Обработка номенклатуры
 
-# Группировка по артикулам
-python cli.py export -o results.json --structure by_code
-
-# Группировка по категориям
-python cli.py export -o results.json --structure by_category
-
-# Экспорт только результатов по конкретному промпту
-python cli.py export -o krepezh_results.json --prompt krepezh_v1
-
-# Экспорт только успешных результатов по промпту
-python cli.py export -o completed.json --prompt krepezh_v1 --status completed
-
-# Экспорт с группировкой по промптам
-python cli.py export -o by_prompt.json --structure by_prompt
-
-# Экспорт с текстом промпта
-python cli.py export -o krepezh_results.json --prompt hardware_washer --include-prompt
-
-# Экспорт с текстом промпта и raw_response
-python cli.py export -o krepezh_results.json --prompt hardware_washer --include-prompt --include-raw
-```
-
-#### Список моделей API
-```bash
-# Все сервисы
-python cli.py models
-
-# Конкретный сервис
-python cli.py models --api openwebui
-python cli.py models --api mws
-python cli.py models --api gigachat
-```
+| Команда | Описание | Пример |
+|---------|----------|--------|
+| `batch` | Пакетная обработка с масками | `python cli.py batch input.xlsx -d masks.db -i ens.pkl` |
+| `process` | LLM обработка (legacy) | `python cli.py process input.xlsx --auto` |
+| `stats` | Статистика масок или результатов | `python cli.py stats -d masks.db` |
+| `export` | Экспорт результатов в JSON | `python cli.py export -o results.json --structure by_code` |
+| `errors` | Просмотр ошибок | `python cli.py errors -l 20` |
+| `detect` | Определить категорию | `python cli.py detect "Болт М12"` |
+| `models` | Список моделей API | `python cli.py models --api openwebui` |
+| `prompts` | Список доступных промптов | `python cli.py prompts` |
 
 ## 📊 Форматы данных
 
-### Входной Excel
+### Входной Excel (номенклатура)
 
 | артикул | Краткое наименование | GUID |
 |---------|---------------------|------|
-| 001 | Болт М12х50 ГОСТ 7798-70 | guid-1 |
-| 002 | Резистор С2-29В 100 Ом | guid-2 |
-| 003 | Лист стальной 2 мм | guid-3 |
+| 001 | Болт (2)-8-32-Кд-ОСТ 1 31133-80, | guid-1 |
+| 002 | Винт (3)-6-46-Кд-ОСТ 1 31502-80, | guid-2 |
 
-### Выходной JSON (flat)
+### Выходной JSON (batch)
 
 ```json
 [
   {
-    "article": "001",
-    "name": "Болт М12х50 ГОСТ 7798-70",
-    "guid": "guid-1",
-    "prompt_id": "hardware",
-    "category": "hardware",
-    "status": "completed",
-    "display_name": "Болт М12х50 ГОСТ 7798-70",
-    "params": [
-      {
-        "name": "Номинальный диаметр резьбы",
-        "value": "12",
-        "default": "",
-        "um": "мм"
-      },
-      {
-        "name": "Длина",
-        "value": "50",
-        "default": "",
-        "um": "мм"
-      }
-    ],
-    "processed_at": "2024-01-15T10:30:00",
-    "model_used": "gigachat-pro",
-    "api_source": "gigachat"
+    "text": "Болт (2)-8-32-Кд-ОСТ 1 31133-80,",
+    "level": "parametric_match",
+    "success": true,
+    "params": {
+      "исполнение": "2",
+      "диаметр": 8,
+      "длина": 32,
+      "покрытие": "Кадмирование",
+      "стандарт": "ОСТ 1 31133-80"
+    },
+    "ens_code": "1000613872",
+    "confidence": 0.95,
+    "processing_time_ms": 45.2
   }
 ]
 ```
 
-## 🔧 Конфигурация промптов
+## 🔧 Примеры использования
 
-### Правила автоопределения категории
+### Генерация масок для нового стандарта
 
-Система поддерживает три типа ключевых слов:
+```bash
+# Если в файле nomenclature встречаются неизвестные стандарты:
+python cli.py generate-masks \
+    -d cache/masks.db \
+    -i models/hardware/ens_hardware.pkl \
+    --llm \
+    --min-score 0.85
+```
 
-1. **Обычные строки** — подстроковое совпадение
-   ```yaml
-   keywords: ["болт", "гайка"]
-   ```
+### Проверка покрытия перед обработкой
 
-2. **Glob-шаблоны** — с wildcards `*` и `?`
-   ```yaml
-   keywords: ["винт*м", "шайба???"]
-   ```
+```bash
+python cli.py ens analyze data/nomenclature.xlsx \
+    -i models/hardware/ens_hardware.pkl \
+    -s 200
+# Вывод: 85% разбирается regex, 15% требует LLM
+```
 
-3. **Регулярные выражения** — префикс `regex:` или `re:`
-   ```yaml
-   keywords: ["regex:болт.*гост", "re:гайка.*м\\d+"]
-   ```
+### Экспорт с фильтрацией
+
+```bash
+python cli.py export \
+    -o results.json \
+    --structure by_code \
+    --include-raw \
+    --status completed
+```
+
+## 🎯 Производительность
+
+| Режим | Скорость | Точность | Стоимость |
+|-------|----------|----------|-----------|
+| Regex + БД | ~10,000/сек | 90% | $0 |
+| С LLM генерацией | ~50/сек | 95% | ~$0.01/запись |
+| TF-IDF fallback | ~500/сек | 70% | $0 |
+
+## 🛡️ Обработка ошибок
+
+| Level | Условие | Действие |
+|-------|---------|----------|
+| 0 | Не найден стандарт | TF-IDF fallback |
+| 1 | Нет маски в БД | Переход к генерации (если --llm) |
+| 2 | LLM не отвечает | Retry с другой температурой |
+| 3 | Score < 0.50 | Отклонение маски |
+| 6 | Параметры не совпали | TF-IDF fallback |
+
+## 📝 Требования
+
+- Python 3.9+
+- SQLite 3.35+ (WAL mode)
+- Зависимости: pandas, openpyxl, scikit-learn, pyyaml, pydantic, click, tqdm
+- API ключи (опционально для generate-masks)
 
 ## 🔌 API Интеграции
 
 ### OpenWebUI
-- Локальные модели через OpenWebUI API
-- Поддержка моделей Qwen, Llama и др.
-- Автоматический парсинг JSON из markdown code blocks
+- Поддержка JWT (username/password) и API key
+- Автоматический retry при 401
+- Модели: qwen3:30b, qwen2.5:72b и др.
 
 ### MWS Cloud GPT
-- Облачный API от MWS
-- Модели: qwen2.5-72b-instruct, gpt-oss-120b и др.
-- Стандартная авторизация по API ключу
+- Модели: qwen2.5-72b-instruct, gpt-oss-120b
+- Стандартная авторизация по ключу
 
-
-### GigaChat Cloud (giga.chat)
-- Облачный API Сбера для физических лиц и B2B
-- **Авторизация:** OAuth2 с Authorization Key (credentials)
-- **Scope:** GIGACHAT_API_PERS, GIGACHAT_API_B2B или GIGACHAT_API_CORP
+### GigaChat
+- Enterprise: demo.gigaenterprise.ai (логин/пароль)
+- Cloud: giga.chat (OAuth2)
 - Модели: GigaChat, GigaChat-Pro, GigaChat-Max
 
-## 🔄 Upsert семантика
+## 🆘 Troubleshooting
 
-База данных SQLite гарантирует уникальность записей по составному ключу `(article, prompt_id)`:
-- Если запись существует — она обновляется
-- Если записи нет — она создается
-- Повторный запуск безопасен и не создает дубликатов
-
-## 🛡️ Обработка ошибок
-
-| Статус | Описание | Действие при повторном запуске |
-|--------|----------|-------------------------------|
-| **COMPLETED** | Успешная обработка | Берется из кэша (если `cache_completed_only: true`) |
-| **IGNORED** | Номенклатура не соответствует категории | Перепроверяется (если `retry_ignored: true`) |
-| **ERROR** | Ошибка API или парсинга | Перепроверяется (если `retry_errors: true`) |
-
-## 📈 Производительность
-
-- **Параллельная обработка:** настраиваемое количество workers
-- **Кэширование:** SQLite с UPSERT для промежуточных результатов
-- **Рекомендации:**
-  - OpenWebUI (локальные модели): 4-8 workers
-  - MWS Cloud GPT: 2-4 workers
-  - GigaChat API: 2-4 workers (лимиты API)
-
-## 🧪 Тестирование
-
+### "Model not found" в OpenWebUI
 ```bash
-# Тест определения категории
-python cli.py detect "Болт М12х1.25-6gx100.58 ГОСТ 7795-70"
+# Проверить доступные модели
+python cli.py models --api openwebui
 
-# Проверка доступности API
-python cli.py models --api gigachat 
-
-# Тест с небольшой выборкой
-python cli.py process test_sample.xlsx --auto -w 2
-
-# Проверка статистики
-python cli.py stats
+# Исправить config.yaml
+default_model: "qwen2.5:7b"  # вместо qwen3:30b
 ```
 
-## 📝 Логирование
+### Пустые params в результатах
+```bash
+# БД масок пуста — заполнить
+python seed_default_masks.py cache/masks.db
+```
 
-Логи сохраняются в `logs/processor.log` и выводятся в консоль:
-- Уровень логирования настраивается в `config.yaml` (`logging.level`)
-- Ротация логов: 5 файлов по 10MB каждый
+### Долгая генерация масок
+```bash
+# Использовать только hardcoded маски (без LLM)
+python seed_default_masks.py cache/masks.db
 
-## 🤝 Разработка
-
-### Добавление нового API клиента
-
-1. Создать класс в `api_clients/`, наследующий `BaseLLMClient`
-2. Реализовать методы: `complete()`, `health_check()`, `get_models()`
-3. Добавить инициализацию в `core/processor.py::_init_api_clients()`
-4. Добавить в CLI в `cli.py` (команда `models`)
-5. Обновить `config/config.yaml` с настройками нового API
-
-### Добавление новой категории
-
-1. Создать файл промпта в `prompts/templates/`
-2. Добавить запись в `config/prompts.yaml`
-3. Указать ключевые слова для автоопределения
-4. Выбрать подходящий сервис API и модель
-
-## 📋 Требования
-
-- Python 3.9+
-- Зависимости: `requests`, `pyyaml`, `pydantic`, `click`, `tqdm`, `openpyxl`, `pandas` (опционально)
-- Доступ к хотя бы одному API (OpenWebUI, MWS, GigaChat)
-- Excel файл с номенклатурой
-
-## 🆘 Поддержка
-
-При возникновении проблем:
-1. Проверьте доступность API: `python cli.py models --api <name>`
-2. Проверьте файлы учетных данных в `secrets/`
-3. Проверьте формат Excel файла (колонки: артикул, Краткое наименование, GUID)
-4. Просмотрите логи: `logs/processor.log`
-5. Проверьте ошибки: `python cli.py errors`
+# Или проверить доступность API
+python cli.py models --api openwebui
+```

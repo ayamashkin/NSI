@@ -68,7 +68,7 @@ class APIConfig:
 @dataclass
 class DatabaseConfig:
     """Конфигурация базы данных."""
-    path: str = "results.db"
+    path: str = "cache/results.db"
     backup_enabled: bool = True
     backup_interval: int = 1000
 
