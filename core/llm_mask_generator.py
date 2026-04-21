@@ -3,7 +3,7 @@ LLM Mask Generator Module
 Level 2: Автоматическая генерация regex масок с помощью LLM.
 Модель/температура/system_prompt определяются автоматически по keywords из prompts.yaml.
 """
-
+from pathlib import Path
 import re
 import json
 import logging
