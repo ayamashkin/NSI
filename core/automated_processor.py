@@ -153,7 +153,8 @@ class AutomatedParametricProcessor:
 
         # Level 2: LLM Generation (если разрешено)
         if self.use_llm_generation and self.llm_generator:
-            generated_mask = self._generate_mask(standard, item_type, text)
+            standard_info = extracted.get('standard_info')
+            generated_mask = self._generate_mask(standard, item_type, text, standard_info)
 
             if generated_mask:
                 # Level 3: AutoValidation
@@ -178,8 +179,14 @@ class AutomatedParametricProcessor:
         # Level 7: TF-IDF Fallback
         return self._tfidf_fallback(text, extracted, start_time)
 
-    def _generate_mask(self, standard: str, item_type: str, text: str = "") -> Optional[Dict[str, Any]]:
-        """Генерация маски через LLM."""
+    def _generate_mask(
+        self,
+        standard: str,
+        item_type: str,
+        text: str = "",
+        standard_info: Optional[Any] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Генерация маски через LLM с каскадным keyword resolution."""
         if not self.llm_generator:
             return None
 
@@ -190,11 +197,24 @@ class AutomatedParametricProcessor:
             logger.warning(f"Not enough examples for {standard}/{item_type}")
             return None
 
+        # Берем точный тип из ЕСН (тип_изделия = 'Наименование типа')
+        ens_item_type = item_type
+        if examples:
+            first_example = examples[0]
+            type_from_ens = first_example.get('тип_изделия')
+            if type_from_ens and type_from_ens.strip():
+                ens_item_type = type_from_ens.strip().lower()
+                logger.info(
+                    f"[AutoProcessor] Тип из ЕСН: '{ens_item_type}' "
+                    f"(был: '{item_type}')"
+                )
+
         mask, attempts = self.llm_generator.generate_mask(
             standard=standard,
-            item_type=item_type,
+            item_type=ens_item_type,
             examples=examples,
-            name=text
+            name=text,
+            standard_info=standard_info
         )
 
         if mask:

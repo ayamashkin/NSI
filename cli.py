@@ -298,9 +298,9 @@ def process_parametric(text, db, ens_index, llm):
 
     # Инициализация LLM
     llm_clients = {}
+    settings = get_settings()
     if llm:
-        settings = get_settings()
-        for service_name in ['openwebui', 'mws']:
+        for service_name in ['openwebui', 'mws', 'gigachat']:
             if service_name in settings.api:
                 try:
                     if service_name == 'openwebui':
@@ -312,10 +312,27 @@ def process_parametric(text, db, ens_index, llm):
                             username=cfg.username,
                             password=cfg.password
                         )
+                    elif service_name == 'mws':
+                        from api_clients.mws_gpt import MWSGPTClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = MWSGPTClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            timeout=cfg.timeout
+                        )
+                    elif service_name == 'gigachat':
+                        from api_clients.gigachat import GigaChatClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = GigaChatClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
+                            timeout=cfg.timeout,
+                            verify_ssl=False
+                        )
                 except Exception as e:
                     logger.warning(f"Failed to init {service_name}: {e}")
 
-    settings = get_settings()
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
@@ -376,9 +393,9 @@ def batch(input_file, db, ens_index, output, llm, validate):
 
     # LLM клиенты
     llm_clients = {}
+    settings = get_settings()
     if llm:
-        settings = get_settings()
-        for service_name in ['openwebui', 'mws']:
+        for service_name in ['openwebui', 'mws', 'gigachat']:
             if service_name in settings.api:
                 try:
                     if service_name == 'openwebui':
@@ -390,10 +407,27 @@ def batch(input_file, db, ens_index, output, llm, validate):
                             password=cfg.password,
                             api_key=cfg.api_key
                         )
+                    elif service_name == 'mws':
+                        from api_clients.mws_gpt import MWSGPTClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = MWSGPTClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            timeout=cfg.timeout
+                        )
+                    elif service_name == 'gigachat':
+                        from api_clients.gigachat import GigaChatClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = GigaChatClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
+                            timeout=cfg.timeout,
+                            verify_ssl=False
+                        )
                 except Exception as e:
                     logger.warning(f"Failed to init {service_name}: {e}")
 
-    settings = get_settings()
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
@@ -505,7 +539,8 @@ def analyze(excel_file, index, sample):
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
 @click.option('--min-score', '-s', default=0.85, help='Порог активации')
 @click.option('--llm', '-l', is_flag=True, help='Использовать LLM')
-def generate_masks(db, ens_index, min_score, llm):
+@click.option('--limit', '-n', default=0, help='Ограничить число стандартов (0 = все, для отладки)')
+def generate_masks(db, ens_index, min_score, llm, limit):
     """Генерация масок для всех стандартов из индекса"""
     from core.mask_database import MaskDatabase, MaskRecord
     from core.auto_validator import AutoValidator
@@ -539,9 +574,9 @@ def generate_masks(db, ens_index, min_score, llm):
 
     # LLM клиенты
     llm_clients = {}
+    settings = get_settings()
     if llm:
-        settings = get_settings()
-        for service_name in ['openwebui', 'mws']:
+        for service_name in ['openwebui', 'mws', 'gigachat']:
             if service_name in settings.api:
                 try:
                     if service_name == 'openwebui':
@@ -553,6 +588,24 @@ def generate_masks(db, ens_index, min_score, llm):
                             password=cfg.password,
                             api_key=cfg.api_key
                         )
+                    elif service_name == 'mws':
+                        from api_clients.mws_gpt import MWSGPTClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = MWSGPTClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            timeout=cfg.timeout
+                        )
+                    elif service_name == 'gigachat':
+                        from api_clients.gigachat import GigaChatClient
+                        cfg = settings.api[service_name]
+                        llm_clients[service_name] = GigaChatClient(
+                            base_url=cfg.base_url,
+                            api_key=cfg.api_key,
+                            scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
+                            timeout=cfg.timeout,
+                            verify_ssl=False
+                        )
                 except Exception as e:
                     logger.warning(f"Failed to init {service_name}: {e}")
 
@@ -561,7 +614,12 @@ def generate_masks(db, ens_index, min_score, llm):
             return
         click.echo("🤖 LLM генерация включена")
 
-    generator = LLMMaskGenerator(llm_clients, max_retries=3) if llm else None
+    generator = LLMMaskGenerator(clients=llm_clients, settings=settings, max_retries=3) if llm else None
+
+    # Ограничение для отладки
+    if limit and limit > 0:
+        standards = dict(list(standards.items())[:limit])
+        click.echo(f"🔧 Отладочный режим: обрабатываем {limit} стандартов")
 
     stats = {'existing': 0, 'generated': 0, 'activated': 0}
 

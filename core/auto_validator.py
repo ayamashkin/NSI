@@ -159,7 +159,10 @@ class AutoValidator:
         )
 
     def _get_ens_examples(self, standard: str, item_type: str) -> List[Dict]:
-        """Получение примеров из ЕСН по стандарту и типу."""
+        """
+        Получение примеров из ЕСН по стандарту и типу.
+        Тип изделия берется из 'тип_изделия' (поле 'Наименование типа' из ЕСН).
+        """
         if not self._ens_items:
             return []
 
@@ -172,13 +175,17 @@ class AutoValidator:
             item_ntd = str(item.get('нтд', '')).lower().replace(' ', '')
 
             standard_match = (
-                standard_normalized in item_standard or 
+                standard_normalized in item_standard or
                 standard_normalized in item_ntd
             )
 
-            # Проверяем тип
-            item_type_val = str(item.get('тип', '')).lower()
-            type_match = item_type in item_type_val
+            # Проверяем тип — СНАЧАЛА по 'тип_изделия' (Наименование типа из ЕСН)
+            item_type_val = str(item.get('тип_изделия', '')).lower()
+            if not item_type_val:
+                # Fallback на 'тип' ( legacy )
+                item_type_val = str(item.get('тип', '')).lower()
+
+            type_match = item_type in item_type_val if item_type else False
 
             if standard_match or type_match:
                 examples.append(item)
@@ -242,14 +249,7 @@ class AutoValidator:
         """
         from database.mask_database import MaskRecord
 
-        # Получаем маску из БД
-        masks = mask_db.list_masks()
-        mask = None
-        for m in masks:
-            if m.id == mask_id:
-                mask = m
-                break
-
+        mask = mask_db.get_mask_by_id(mask_id)
         if not mask:
             return ValidationResult(
                 mask_id=mask_id,
@@ -261,85 +261,26 @@ class AutoValidator:
                 error_message=f"Mask {mask_id} not found"
             )
 
-        # Валидируем
-        result = self.validate_mask(
+        return self.validate_mask(
             pattern=mask.pattern,
             params=mask.params,
             required=mask.required,
             standard=mask.standard,
-            item_type=mask.item_type
+            item_type=mask.item_type,
+            ens_examples=ens_examples
         )
 
-        result.mask_id = mask_id
+    def get_validation_report(self, mask_id: int, mask_db) -> Dict[str, Any]:
+        """Получение детального отчета о валидации."""
+        result = self.validate_with_db(mask_id, mask_db)
 
-        # Обновляем маску в БД
-        mask_db.update_mask_score(mask_id, result.score, result.details)
-        mask_db.log_validation(
-            mask_id=mask_id,
-            test_count=result.test_count,
-            success_count=result.success_count,
-            score=result.score,
-            details={'passed': result.passed, 'sample_details': result.details[:3]}
-        )
-
-        return result
-
-    def batch_validate(
-        self,
-        masks: List[Tuple[int, str, List[str], List[str], str, str]],
-        mask_db,
-        ens_examples: Optional[List[Dict]] = None
-    ) -> List[ValidationResult]:
-        """
-        Пакетная валидация масок.
-
-        Args:
-            masks: Список (mask_id, pattern, params, required, standard, item_type)
-            mask_db: Экземпляр MaskDatabase
-            ens_examples: Примеры из ЕСН
-
-        Returns:
-            Список ValidationResult
-        """
-        results = []
-
-        for mask_data in masks:
-            mask_id, pattern, params, required, standard, item_type = mask_data
-
-            result = self.validate_mask(
-                pattern=pattern,
-                params=params,
-                required=required,
-                standard=standard,
-                item_type=item_type,
-                ens_examples=ens_examples
-            )
-
-            result.mask_id = mask_id
-
-            # Обновляем БД
-            mask_db.update_mask_score(mask_id, result.score, result.details)
-
-            results.append(result)
-
-        return results
-
-    def get_recommendation(self, result: ValidationResult) -> str:
-        """Получение рекомендации на основе результата валидации."""
-        if result.score >= self.activation_threshold:
-            return "ACTIVATE"
-        elif result.score >= self.retry_threshold:
-            return "RETRY"
-        else:
-            return "REJECT"
-
-
-def create_validator(
-    ens_index_path: Optional[str] = None,
-    min_examples: int = 10
-) -> AutoValidator:
-    """Фабричная функция для создания валидатора."""
-    return AutoValidator(
-        ens_index_path=ens_index_path,
-        min_examples=min_examples
-    )
+        return {
+            'mask_id': mask_id,
+            'score': result.score,
+            'passed': result.passed,
+            'threshold': self.activation_threshold,
+            'test_count': result.test_count,
+            'success_count': result.success_count,
+            'success_rate': result.success_rate,
+            'details': result.details
+        }

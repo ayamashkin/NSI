@@ -58,3 +58,7 @@ Thumbs.db
 # Excel temp files
 ~$*.xlsx
 ~$*.xls
+/data/
+/cache/
+/models/
+/logs/

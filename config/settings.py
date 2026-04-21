@@ -109,6 +109,16 @@ class PromptConfig:
         return settings.api[self.service]
 
 
+
+
+@dataclass
+class MaskGenerationConfig:
+    """Конфигурация генерации масок (fallback при отсутствии prompts.yaml)."""
+    default_service: str = "mws"                     # "openwebui", "mws", "gigachat"
+    default_model: str = "qwen2.5-72b-instruct"      # Модель fallback
+    default_temperature: float = 0.1                 # Температура fallback
+    keyword_match_from_name: bool = True             # Искать keywords в полном наименовании
+
 @dataclass
 class Settings:
     """
@@ -120,6 +130,7 @@ class Settings:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     prompts: Dict[str, PromptConfig] = field(default_factory=dict)
+    mask_generation: MaskGenerationConfig = field(default_factory=MaskGenerationConfig)
 
     @classmethod
     def load(cls, config_path: str = "config/config.yaml",
@@ -168,7 +179,8 @@ class Settings:
             api=api_configs,
             database=DatabaseConfig(**config_data.get('database', {})),
             processing=ProcessingConfig(**config_data.get('processing', {})),
-            prompts=prompt_configs
+            prompts=prompt_configs,
+            mask_generation=MaskGenerationConfig(**config_data.get('mask_generation', {}))
         )
 
     @staticmethod
