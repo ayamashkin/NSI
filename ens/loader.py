@@ -291,6 +291,7 @@ class ENSLoader:
         self.detection_confidence: float = 0.0
         self.column_mapping: ENSColumnMapping = ENSColumnMapping()
         self._detector: Optional[PromptsBasedTypeDetector] = None
+        self._reverse_mapping: Dict[str, str] = {}  # normalized_field -> source_excel_column
 
     def load(self) -> List[Dict[str, Any]]:
         """Загрузка и нормализация данных ЕСН."""
@@ -319,12 +320,21 @@ class ENSLoader:
         category_str = self.category.value if self.category else 'unknown'
         mapping = self.column_mapping.get_mapping_for_category(category_str)
 
+        # Обратный маппинг: normalized_field -> source Excel column
+        self._reverse_mapping = {}
+
         # Добавляем авто-маппинг для неизвестных колонок
         for col in self.available_columns:
             if col and col.lower() not in [k.lower() for k in mapping.keys()]:
                 auto_mapped = self.column_mapping.auto_map_column(col)
                 if auto_mapped:
                     mapping[col] = auto_mapped
+                    self._reverse_mapping[auto_mapped] = col
+
+        # Также записываем reverse для явного маппинга
+        for src_col, dst_field in mapping.items():
+            if dst_field not in self._reverse_mapping:
+                self._reverse_mapping[dst_field] = src_col
 
         self.schema = ENSSchema(
             category=self.category or ENSCategory.UNKNOWN,
@@ -338,6 +348,11 @@ class ENSLoader:
 
         logger.info(f"Loaded {len(self.items)} ENS items for category: {category_str}")
         return self.items
+
+    @property
+    def reverse_mapping(self) -> Dict[str, str]:
+        """Обратный маппинг: normalized_field -> исходная колонка Excel."""
+        return self._reverse_mapping.copy()
 
     def _normalize_dataframe(self) -> List[Dict[str, Any]]:
         """Нормализация DataFrame в список словарей."""

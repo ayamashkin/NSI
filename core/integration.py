@@ -301,10 +301,8 @@ def _analyze_field_statistics(loader, items: List[Dict]) -> Dict[str, Any]:
         if p < 10 and p > 0
     ]
 
-    # 5. Обратный маппинг: какое поле ЕСН -> откуда в Excel
-    reverse_mapping = {}
-    for src, dst in loader.schema.column_mapping.items():
-        reverse_mapping[dst] = src
+    # 5. Обратный маппинг из loader (включая auto_patterns)
+    reverse_mapping = loader.reverse_mapping
 
     return {
         'total_items': total,

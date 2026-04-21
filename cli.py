@@ -557,15 +557,18 @@ def generate_masks(db, ens_index, min_score, llm, limit):
         data = pickle.load(f)
     items = data.get('items', [])
 
-    # Группировка по стандартам
+    # Группировка по стандартам (тип из ЕСН: 'тип_изделия' = 'Наименование типа')
     standards = {}
     for item in items:
         std = item.get('стандарт') or item.get('нтд', 'UNKNOWN')
-        item_type = item.get('тип', 'unknown')
+        item_type = item.get('тип_изделия') or item.get('тип', 'unknown')
         key = (std, item_type)
         if key not in standards:
             standards[key] = []
         standards[key].append(item)
+
+    # Фильтруем: минимум 10 примеров для генерации
+    standards = {k: v for k, v in standards.items() if len(v) >= 10}
 
     click.echo(f"🔍 Найдено {len(standards)} уникальных стандартов")
 
@@ -619,11 +622,13 @@ def generate_masks(db, ens_index, min_score, llm, limit):
     # Ограничение для отладки
     if limit and limit > 0:
         all_items = list(standards.items())
-        click.echo(f"🔍 Найдено {len(all_items)} уникальных пар (тип + стандарт)")
+        click.echo(f"🔍 Найдено {len(all_items)} уникальных пар (тип + стандарт) с ≥10 примерами")
         standards = dict(all_items[:limit])
-        click.echo(f"🔧 Отладочный режим: обрабатываем {limit} пар:")
+        click.echo(f"🔧 Отладочный режим: обрабатываем {len(standards)} пар:")
         for (std, itype), ex_list in all_items[:limit]:
-            click.echo(f"   - {itype} / {std} ({len(ex_list)} примеров)")
+            # Показываем реальный тип из первого примера
+            real_type = ex_list[0].get('тип_изделия') or ex_list[0].get('тип', itype)
+            click.echo(f"   - {real_type} / {std} ({len(ex_list)} примеров)")
 
     stats = {'existing': 0, 'generated': 0, 'activated': 0}
 
