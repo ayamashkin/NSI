@@ -118,6 +118,9 @@ class MaskGenerationConfig:
     default_model: str = "qwen2.5-72b-instruct"      # Модель fallback
     default_temperature: float = 0.1                 # Температура fallback
     keyword_match_from_name: bool = True             # Искать keywords в полном наименовании
+    prompt_template: str = "prompts/templates/mask_generation.txt"
+    save_debug_prompts: bool = True                  # Сохранять промпты для отладки
+    debug_prompts_dir: str = "prompts/debug"          # Папка для сохранения промптов
 
 @dataclass
 class Settings:

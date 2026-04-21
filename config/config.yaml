@@ -69,8 +69,25 @@ logging:
   backup_count: 5
 
 # =============================================================================
-# Дефолтная модель для генерации масок через LLM, если промпт не найдены
+# Mask Generation Configuration
 # =============================================================================
 mask_generation:
-  default_service: "openwebui"
-  default_model: "Qwen/Qwen3-14B-AWQ"
+  # Сервис и модель по умолчанию для генерации масок
+  # Используется когда:
+  #   1. Нет совпадений по keywords в prompts.yaml
+  #   2. Не удалось прочитать prompts.yaml
+  #   3. Указанный в prompts.yaml сервис недоступен
+  default_service: "mws"                     # "openwebui", "mws", "gigachat"
+  default_model: "qwen2.5-72b-instruct"      # Модель для fallback
+  default_temperature: 0.1                   # Температура для fallback
+
+  # Поведение при неопределённом типе изделия
+  # Если item_type = "unknown" — попробовать определить по тексту номенклатуры
+  keyword_match_from_name: true              # Использовать полное наименование для keyword matching
+
+  # Шаблон промпта для генерации regex-масок
+  prompt_template: "prompts/templates/mask_generation.txt"
+
+  # Сохранение сформированных промптов для отладки
+  save_debug_prompts: true                # Сохранять каждый промпт в файл
+  debug_prompts_dir: "prompts/debug"      # Папка для сохранения

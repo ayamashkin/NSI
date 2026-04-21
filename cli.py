@@ -487,7 +487,7 @@ def build_index(excel_file, output, category):
     import json
     meta_path = Path(result_path).with_suffix('.meta.json')
     if meta_path.exists():
-        with open(meta_path, 'r') as f:
+        with open(meta_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
         click.echo(f"📊 Записей: {meta.get('item_count', 0)}")
         click.echo(f"📊 Категория: {meta.get('category', 'unknown')}")
@@ -618,8 +618,12 @@ def generate_masks(db, ens_index, min_score, llm, limit):
 
     # Ограничение для отладки
     if limit and limit > 0:
-        standards = dict(list(standards.items())[:limit])
-        click.echo(f"🔧 Отладочный режим: обрабатываем {limit} стандартов")
+        all_items = list(standards.items())
+        click.echo(f"🔍 Найдено {len(all_items)} уникальных пар (тип + стандарт)")
+        standards = dict(all_items[:limit])
+        click.echo(f"🔧 Отладочный режим: обрабатываем {limit} пар:")
+        for (std, itype), ex_list in all_items[:limit]:
+            click.echo(f"   - {itype} / {std} ({len(ex_list)} примеров)")
 
     stats = {'existing': 0, 'generated': 0, 'activated': 0}
 

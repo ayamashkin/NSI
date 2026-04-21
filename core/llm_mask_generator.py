@@ -475,6 +475,12 @@ class LLMMaskGenerator:
             logger.error("[LLMMaskGenerator] Нет доступных конфигураций LLM")
             return None, []
 
+        # === СОЗДАЕМ ПРОМПТ (один раз на все попытки) ===
+        prompt = self._build_prompt(standard, item_type, examples, context)
+
+        # Сохраняем промпт для отладки
+        self._save_debug_prompt(standard, item_type, prompt)
+
         max_attempts = min(self.max_retries, len(retry_configs))
 
         for i in range(max_attempts):
@@ -486,7 +492,8 @@ class LLMMaskGenerator:
                 standard=standard,
                 item_type=item_type,
                 examples=examples,
-                context=context
+                context=context,
+                prompt=prompt
             )
 
             self.attempts.append(attempt)
@@ -514,7 +521,8 @@ class LLMMaskGenerator:
         standard: str,
         item_type: str,
         examples: List[Dict[str, Any]],
-        context: Optional[Dict]
+        context: Optional[Dict],
+        prompt: Optional[str] = None
     ) -> GenerationAttempt:
         """Одна попытка генерации маски."""
         provider = config["provider"]
@@ -531,7 +539,8 @@ class LLMMaskGenerator:
         client = self._get_client(provider)
 
         # === ПРОМПТ ДЛЯ ГЕНЕРАЦИИ МАСКИ ===
-        prompt = self._build_prompt(standard, item_type, examples, context)
+        if prompt is None:
+            prompt = self._build_prompt(standard, item_type, examples, context)
 
         # Логируем полный промпт на DEBUG уровне
         logger.debug(f"[LLMMaskGenerator] === PROMPT (attempt {attempt_number}) ===\n{prompt}\n=== END PROMPT ===")
@@ -612,137 +621,193 @@ class LLMMaskGenerator:
     # PROMPT BUILDER (промпт для генерации маски)
     # ==========================================================================
 
+    def _load_prompt_template(self) -> str:
+        """Загрузка шаблона промпта из файла (путь из settings)."""
+        # Путь из settings -> mask_generation.prompt_template
+        if self.settings and hasattr(self.settings, 'mask_generation'):
+            mg = self.settings.mask_generation
+            template_path = getattr(mg, 'prompt_template', None)
+            if template_path and Path(template_path).exists():
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+
+        # Fallback: ищем по стандартным путям
+        for path in [
+            'prompts/templates/mask_generation.txt',
+            'config/prompts/templates/mask_generation.txt',
+            '../prompts/templates/mask_generation.txt',
+        ]:
+            if Path(path).exists():
+                with open(path, 'r', encoding='utf-8') as f:
+                    return f.read()
+
+        # Hardcoded fallback (если файл не найден)
+        logger.warning("[LLMMaskGenerator] Шаблон промпта не найден, используем fallback")
+        return self._default_prompt_template()
+
+    def _sanitize_filename(self, text: str) -> str:
+        """Очистка строки для использования в имени файла."""
+        import re
+        # Заменяем недопустимые символы на _
+        sanitized = re.sub(r'[\\/*?:"<>|]', '_', str(text))
+        # Убираем множественные _
+        sanitized = re.sub(r'_+', '_', sanitized)
+        # Обрезаем до 80 символов
+        return sanitized.strip('_')[:80]
+
+    def _save_debug_prompt(self, standard: str, item_type: str, prompt: str):
+        """Сохранение промпта в файл для отладки."""
+        # Проверяем включено ли сохранение
+        save_enabled = False
+        debug_dir = "prompts/debug"
+
+        if self.settings and hasattr(self.settings, 'mask_generation'):
+            mg = self.settings.mask_generation
+            save_enabled = getattr(mg, 'save_debug_prompts', False)
+            debug_dir = getattr(mg, 'debug_prompts_dir', 'prompts/debug')
+
+        if not save_enabled:
+            return
+
+        try:
+            from pathlib import Path
+            from datetime import datetime
+
+            # Создаем папку
+            Path(debug_dir).mkdir(parents=True, exist_ok=True)
+
+            # Имя файла: {item_type}_{standard}_{timestamp}.txt
+            safe_type = self._sanitize_filename(item_type or "unknown")
+            safe_std = self._sanitize_filename(standard or "unknown")
+            timestamp = datetime.now().strftime("%m%d_%H%M%S")
+            filename = f"{safe_type}_{safe_std}_{timestamp}.txt"
+
+            filepath = Path(debug_dir) / filename
+
+            # Заголовок с метаданными
+            header = (
+                f"# Тип: {item_type}\n"
+                f"# Стандарт: {standard}\n"
+                f"# Время: {datetime.now().isoformat()}\n"
+                f"# {'=' * 50}\n\n"
+            )
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(header)
+                f.write(prompt)
+
+            logger.info(f"[LLMMaskGenerator] Промпт сохранен: {filepath}")
+        except Exception as e:
+            logger.warning(f"[LLMMaskGenerator] Не удалось сохранить промпт: {e}")
+
+    def _default_prompt_template(self) -> str:
+        """Fallback шаблон если файл не найден."""
+        return (
+            "Ты — эксперт по техническим стандартам ГОСТ и регулярным выражениям Python.\n\n"
+            "ЗАДАЧА: Создай regex-паттерн с named groups (?P<name>...) "
+            "для извлечения параметров из номенклатуры типа \"{item_type}\" по стандарту {standard}.\n\n"
+            "Примеры:\n{examples_text}\n\n"
+            "Статистика:\n{stats_text}\n\n"
+            "Ответь ТОЛЬКО в формате JSON:\n"
+            "{{\n  \"pattern\": \"...\",\n  \"params\": {params_list},\n  \"required\": {required_list}\n}}"
+        )
+
     def _build_prompt(self, standard, item_type, examples, context):
         """
         Построение промпта для LLM-генерации regex-маски.
-
-        Передает ВСЕ поля из ЕСН для каждого примера, включая разбор
-        где какой параметр находится в строке номенклатуры.
+        Шаблон загружается из файла (prompts/templates/mask_generation.txt).
         """
-        # Берем до 10 примеров для показа в промпте
-        sample_examples = examples[:10]
+        template = self._load_prompt_template()
 
-        # Собираем статистику по ВСЕМ полям из examples (кроме служебных _*)
+        # --- Анализ полей ЕСН ---
         field_stats = {}
         for ex in examples:
             for key, val in ex.items():
-                # Пропускаем служебные поля (_original_, _ens_, _detected_, etc.)
                 if key.startswith('_'):
                     continue
-                # Пропускаем пустые значения
                 if val is None or (isinstance(val, str) and not val.strip()):
                     continue
                 field_stats[key] = field_stats.get(key, 0) + 1
 
-        # Сортируем по заполненности, берем топ полей (>10% заполненности)
         total = len(examples)
-        threshold = max(1, int(total * 0.1))  # минимум 10% или 1
+        threshold = max(1, int(total * 0.1))
         sorted_fields = sorted(field_stats.items(), key=lambda x: -x[1])
         relevant_fields = [k for k, v in sorted_fields if v >= threshold]
+        display_fields = relevant_fields[:15]
 
-        # Поля для показа в разделе ПОЛЯ ЕСН (релевантные + ключевые)
-        display_fields = relevant_fields[:15]  # максимум 15 полей
-
+        # --- Форматирование примеров ---
+        sample_examples = examples[:10]
         examples_lines = []
         for i, ex in enumerate(sample_examples, 1):
             name = ex.get('полное_наименование') or ex.get('наименование', '')
             if not name:
                 continue
-
-            # Собираем все заполненные поля из ЕСН (только релевантные)
             filled_fields = []
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
                     filled_fields.append(f"    {field}: {val}")
-
-            # Показываем где параметры в строке (если значение входит в название)
             in_text = []
             for field in display_fields:
                 val = ex.get(field)
                 if val and str(val) in name:
-                    in_text.append(f"      {field}='{val}' найдено в позиции {name.find(str(val))}")
-
-            in_text_str = "\n".join(in_text) if in_text else "      (разбор не удался)"
-
+                    in_text.append(f"      {field}='{val}' поз.{name.find(str(val))}")
+            in_text_str = "\n".join(in_text) if in_text else "      (нет)"
             examples_lines.append(
-                f"{i}. НОМЕНКЛАТУРА: \"{name}\"\n"
-                f"   ПОЛЯ ЕСН:\n" + "\n".join(filled_fields) + "\n"
-                f"   РАЗБОР ПО ПОЗИЦИЯМ:\n{in_text_str}"
+                f"{i}. \"{name}\"\n   ПОЛЯ:\n" + "\n".join(filled_fields)
+                + f"\n   РАЗБОР:\n{in_text_str}"
             )
-
         examples_text = "\n\n".join(examples_lines)
 
-        # Статистика уже собрана выше — используем relevant_fields
         stats_lines = [f"    {k}: {field_stats[k]} из {total}" for k in relevant_fields]
-
-        # Имена параметров для JSON-примера (только реальные поля из ЕСН)
         params_list = json.dumps(relevant_fields, ensure_ascii=False)
-        # Required — поля с 100% заполненностью
-        required_fields = [k for k, v in sorted_fields if v == total and not k.startswith(('полное_наименование', 'наименование', 'код', 'mdm_key'))]
+        required_fields = [k for k, v in sorted_fields if v == total
+                          and not k.startswith(('полное_наименование', 'наименование', 'код', 'mdm_key'))]
         if not required_fields:
-            required_fields = [k for k, v in sorted_fields if v >= total * 0.8 and not k.startswith(('полное_наименование', 'наименование', 'код', 'mdm_key'))][:5]
+            required_fields = [k for k, v in sorted_fields if v >= total * 0.8
+                              and not k.startswith(('полное_наименование', 'наименование', 'код', 'mdm_key'))][:5]
         required_list = json.dumps(required_fields, ensure_ascii=False)
+        context_text = f"\nДоп. контекст: {json.dumps(context, ensure_ascii=False)}\n" if context else ""
 
-        context_text = ""
-        if context:
-            context_text = f"\nДоп. контекст: {json.dumps(context, ensure_ascii=False)}\n"
-
-        return f"""Ты — эксперт по техническим стандартам ГОСТ/ОСТ/ТУ и регулярным выражениям Python.
-
-ЗАДАЧА: Создай regex-паттерн с named groups (?P<name>...) для извлечения параметров из номенклатуры типа "{item_type}" по стандарту {standard}.
-
-ВАЖНО: Ниже приведены реальные данные из Единого Справочника Номенклатуры (ЕСН).
-Для КАЖДОЙ позиции показаны:
-- Полное наименование (как в базе)
-- ВСЕ заполненные поля ЕСН (материал, покрытие, диаметр, длина и т.д.)
-- Разбор — где в строке находится каждый параметр
-
-ИСПОЛЬЗУЙ эти данные чтобы понять СТРУКТУРУ строки и какие параметры где находятся.
-
-=== ПРИМЕРЫ ИЗ ЕСН ({len(sample_examples)} шт.) ===
-
-{examples_text}
-
-=== СТАТИСТИКА ЗАПОЛНЕННОСТИ ПОЛЕЙ (по {total} примерам) ===
-{chr(10).join(stats_lines)}
-
-ВАЖНО: В ответе перечисли ТОЛЬКО эти параметры: {', '.join(relevant_fields)}
-
-{context_text}
-=== ТРЕБОВАНИЯ К РЕГЕКСУ ===
-
-1. Используй named groups (?P<param_name>...) — имя группы = имя поля из списка выше
-2. Regex ДОЛЖЕН матчить ПОЛНУЮ строку от начала до конца (используй ^ и $)
-3. Учитывай специфику стандарта {standard}:
-   - ГОСТ: обычно М<диаметр>х<длина>.<класс>.<покрытие>
-   - Исполнение может быть числом перед М (например "2М12" = исп.2, диам.М12)
-   - Поле допуска резьбы: 6g, 8g и т.д.
-   - Материал: 40Х, А2, А4 и т.д.
-   - Покрытие: 3-значный код (019, 016 и т.д.)
-4. Поддерживай опциональные части через ?
-5. Для разделителей используй [\.\s]* или [\s\-]*
-6. НЕ используй кириллицу в именах групп — только ASCII
-7. Все числа ДОЛЖНЫ включать возможность десятичной точки/запятой
-
-=== ОТВЕТ ===
-
-Ответь ТОЛЬКО в формате JSON (без markdown-форматирования):
-{{
-  "pattern": "ваш regex с (?P<name>) группами",
-  "params": {params_list},
-  "required": {required_list}
-}}"""
+        # --- Подстановка в шаблон ---
+        try:
+            return template.format(
+                item_type=item_type,
+                standard=standard,
+                example_count=len(sample_examples),
+                total_examples=total,
+                examples_text=examples_text,
+                stats_text="\n".join(stats_lines),
+                params_hint=", ".join(relevant_fields),
+                params_list=params_list,
+                required_list=required_list,
+                context_text=context_text,
+            )
+        except KeyError as e:
+            logger.warning(f"[LLMMaskGenerator] Неизвестный placeholder в шаблоне: {e}")
+            return template  # возвращаем как есть
 
     def _extract_json(self, text):
         """Извлечение JSON из текста."""
-        for pattern in [r"```json\s*(.*?)```", r"```\s*(.*?)```", r"\{{[\s\S]*\}}"]:
-            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-            if match:
-                try:
-                    return json.loads(match.group(1).strip() if match.lastindex else match.group(0))
-                except json.JSONDecodeError:
-                    pass
+        # Ищем JSON в code blocks
+        for prefix in ("```json", "```"):
+            idx = text.find(prefix)
+            if idx >= 0:
+                start = text.find("{", idx)
+                end = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    try:
+                        return json.loads(text[start:end])
+                    except json.JSONDecodeError:
+                        pass
+        # Ищем первый { ... } в тексте
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                pass
         return None
 
 

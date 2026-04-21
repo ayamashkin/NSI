@@ -240,6 +240,147 @@ class ENSNomenclatureProcessor:
         return self.parser.get_stats()
 
 
+
+def _analyze_field_statistics(loader, items: List[Dict]) -> Dict[str, Any]:
+    """
+    Подробная статистика по полям ЕСН.
+    Собирает ВСЕ поля из данных — без фиксированных списков.
+    """
+    if not items or loader.df is None:
+        return {"error": "No data"}
+
+    total = len(items)
+    raw_columns = [str(c) for c in loader.df.columns if c is not None]
+
+    # 1. Статистика по ВСЕМ полям (сколько заполнено)
+    field_stats = {}
+    for item in items:
+        for key, val in item.items():
+            if key.startswith('_'):
+                continue
+            if val is not None and str(val).strip():
+                field_stats[key] = field_stats.get(key, 0) + 1
+
+    # Сортируем по заполненности
+    sorted_stats = sorted(
+        [(k, v, round(v / total * 100, 1)) for k, v in field_stats.items()],
+        key=lambda x: -x[1]
+    )
+
+    # 2. Определяем категории динамически (по заполненности)
+    required_status = {}
+    recommended_status = {}
+    optional_status = {}
+
+    for field, filled, pct in sorted_stats:
+        info = {'filled': filled, 'total': total, 'percent': pct, 'ok': filled > 0}
+        if pct >= 95:
+            required_status[field] = info
+        elif pct >= 50:
+            recommended_status[field] = info
+        else:
+            optional_status[field] = info
+
+    # 3. Неиспользуемые колонки Excel
+    mapped_sources = set()
+    for src, dst in loader.schema.column_mapping.items():
+        mapped_sources.add(src.lower())
+
+    unused_columns = []
+    for col in raw_columns:
+        col_lower = col.lower()
+        if col_lower not in mapped_sources:
+            auto_mapped = loader.column_mapping.auto_map_column(col)
+            if not auto_mapped:
+                unused_columns.append(col)
+
+    # 4. Поля с низкой заполненностью (< 10%)
+    low_fill_fields = [
+        {'field': k, 'filled': v, 'percent': p}
+        for k, v, p in sorted_stats
+        if p < 10 and p > 0
+    ]
+
+    # 5. Обратный маппинг: какое поле ЕСН -> откуда в Excel
+    reverse_mapping = {}
+    for src, dst in loader.schema.column_mapping.items():
+        reverse_mapping[dst] = src
+
+    return {
+        'total_items': total,
+        'total_fields': len(sorted_stats),
+        'field_stats': sorted_stats,
+        'required_fields': required_status,
+        'recommended_fields': recommended_status,
+        'optional_fields': optional_status,
+        'unused_columns': unused_columns,
+        'low_fill_fields': low_fill_fields,
+        'reverse_mapping': reverse_mapping,
+    }
+
+
+def _print_field_report(stats: Dict[str, Any]):
+    """Вывод отчёта в консоль."""
+    import click
+
+    click.echo("\n" + "=" * 70)
+    click.echo("📊 СТАТИСТИКА ПОЛЕЙ ЕСН (динамический анализ)")
+    click.echo("=" * 70)
+    click.echo(f"Всего записей: {stats['total_items']}")
+    click.echo(f"Уникальных полей: {stats['total_fields']}")
+
+    # Обязательные поля (≥95%)
+    click.echo("\n🔴 ОБЯЗАТЕЛЬНЫЕ ПОЛЯ (≥95% заполненности):")
+    for field, info in stats['required_fields'].items():
+        src = stats['reverse_mapping'].get(field, '?')
+        click.echo(f"  ✅ {field:<30} {info['filled']:>8}/{info['total']} ({info['percent']}%)")
+        if src != field:
+            click.echo(f"     └─ из Excel колонки: \"{src}\"")
+
+    # Рекомендуемые поля (50-95%)
+    click.echo("\n🟡 РЕКОМЕНДУЕМЫЕ ПОЛЯ (50-95% заполненности):")
+    for field, info in stats['recommended_fields'].items():
+        src = stats['reverse_mapping'].get(field, '?')
+        click.echo(f"  {field:<30} {info['filled']:>8}/{info['total']} ({info['percent']}%)")
+        if src != field:
+            click.echo(f"     └─ из Excel колонки: \"{src}\"")
+
+    # Опциональные поля (<50%)
+    click.echo("\n⚪ ОПЦИОНАЛЬНЫЕ ПОЛЯ (<50% заполненности):")
+    shown = 0
+    for field, info in stats['optional_fields'].items():
+        if shown >= 10:
+            remaining = len(stats['optional_fields']) - shown
+            click.echo(f"  ... и ещё {remaining} полей")
+            break
+        src = stats['reverse_mapping'].get(field, '?')
+        click.echo(f"  {field:<30} {info['filled']:>8}/{info['total']} ({info['percent']}%)")
+        shown += 1
+
+    # Неиспользуемые колонки
+    if stats['unused_columns']:
+        click.echo(f"\n⚪ НЕИСПОЛЬЗУЕМЫЕ КОЛОНКИ EXCEL ({len(stats['unused_columns'])}):")
+        for col in stats['unused_columns'][:15]:
+            click.echo(f"    - \"{col}\"")
+        if len(stats['unused_columns']) > 15:
+            click.echo(f"    ... и ещё {len(stats['unused_columns']) - 15}")
+        click.echo("  💡 Добавьте в ens_column_mapping.yaml если содержат полезные данные")
+
+    # Поля с низкой заполненностью
+    if stats['low_fill_fields']:
+        click.echo(f"\n⚠️  ПОЛЯ С НИЗКОЙ ЗАПОЛНЕННОСТЬЮ (< 10%):")
+        for f in stats['low_fill_fields'][:10]:
+            click.echo(f"    {f['field']:<30} {f['filled']:>8} ({f['percent']}%)")
+
+    # Топ-20 по заполненности
+    click.echo("\n📈 ТОП-20 ПО ЗАПОЛНЕННОСТИ:")
+    for field, filled, pct in stats['field_stats'][:20]:
+        bar = "█" * int(pct / 5)
+        click.echo(f"  {bar:<20} {field:<30} {filled:>8}/{stats['total_items']} ({pct}%)")
+
+    click.echo("=" * 70)
+
+
 # Утилиты для работы с ЕСН
 def build_ens_index(
     ens_file: str,
@@ -266,19 +407,37 @@ def build_ens_index(
 
     logger.info(f"Loaded {len(items)} items from {ens_file}")
 
+    # === СТАТИСТИКА ПОЛЕЙ ===
+    field_stats = _analyze_field_statistics(loader, items)
+    _print_field_report(field_stats)
+
     # Строим индекс
     index = HybridENSIndex(items)
 
     # Сохраняем
     index.fuzzy_index.save(output_path)
 
-    # Сохраняем метаданные
+    # Сохраняем метаданные (с полной статистикой)
     meta = {
         "source_file": ens_file,
         "category": loader.category.value,
         "item_count": len(items),
         "created_at": datetime.utcnow().isoformat(),
-        "columns": list(loader.df.columns) if loader.df is not None else []
+        "columns": list(loader.df.columns) if loader.df is not None else [],
+        "column_mapping": dict(loader.schema.column_mapping) if loader.schema else {},
+        "field_statistics": {
+            "total_fields": field_stats['total_fields'],
+            "field_stats": [
+                {"field": k, "filled": v, "percent": p}
+                for k, v, p in field_stats['field_stats']
+            ],
+            "required_fields": field_stats['required_fields'],
+            "recommended_fields": field_stats['recommended_fields'],
+            "optional_fields": field_stats['optional_fields'],
+            "optional_fields": field_stats['optional_fields'],
+            "unused_columns": field_stats['unused_columns'],
+            "low_fill_fields": field_stats['low_fill_fields'],
+        }
     }
 
     meta_path = Path(output_path).with_suffix('.meta.json')
