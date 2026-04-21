@@ -7,10 +7,10 @@ Seed Default Masks - Заполнение БД дефолтными маскам
 import sys
 from pathlib import Path
 
-# Добавляем корень проекта в путь
-sys.path.insert(0, str(Path(__file__).parent))
+# Добавляем корень проекта в путь (default/seed_default_masks.py -> корень проекта)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from database.mask_database import MaskDatabase, MaskRecord
+from core.mask_database import MaskDatabase, MaskRecord
 
 
 def seed_default_masks(db_path="cache/masks.db"):

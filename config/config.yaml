@@ -16,7 +16,7 @@ api:
     password_file: "secrets/openwebui_password.txt"  # ← Файл с паролем
 
 
-    default_model: "qwen3:30b"
+    default_model: "Qwen/Qwen3-14B-AWQ"
 
   mws:
     base_url: "https://api.gpt.mws.ru/"

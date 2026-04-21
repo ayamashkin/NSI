@@ -153,8 +153,11 @@ class OpenWebUIClient(BaseLLMClient):
         """
         Отправка запроса на генерацию через OpenWebUI.
         """
+        logger.info(f"[OpenWebUI] Запрос: model={model}, temperature={temperature}")
+
         # Проверяем аутентификацию
         if not self._ensure_authenticated():
+            logger.error(f"[OpenWebUI] Аутентификация не удалась для model={model}")
             return {
                 "success": False,
                 "content": None,
@@ -162,6 +165,26 @@ class OpenWebUIClient(BaseLLMClient):
                 "error": "Authentication failed - check credentials",
                 "model": model
             }
+
+        # Проверяем доступность модели
+        available_models = self.get_models()
+        if model not in available_models:
+            logger.error(f"[OpenWebUI] Модель '{model}' не найдена. Доступные: {available_models}")
+            # Fallback на первую доступную модель
+            if available_models:
+                fallback_model = available_models[0]
+                logger.warning(f"[OpenWebUI] Fallback: используем '{fallback_model}' вместо '{model}'")
+                model = fallback_model
+            else:
+                return {
+                    "success": False,
+                    "content": None,
+                    "raw": None,
+                    "error": f"Model '{model}' not found. No models available.",
+                    "model": model
+                }
+        else:
+            logger.info(f"[OpenWebUI] Модель '{model}' найдена в списке доступных")
 
         url = f"{self.base_url}/chat/completions"
         headers = self._get_auth_headers()
@@ -274,20 +297,18 @@ class OpenWebUIClient(BaseLLMClient):
         try:
             # Проверяем аутентификацию перед запросом
             if not self._ensure_authenticated():
-                logger.error("Cannot get models: authentication failed")
+                logger.error("[OpenWebUI] Cannot get models: authentication failed")
                 return []
 
             headers = self._get_auth_headers()
 
-            # Используем правильный endpoint - base_url уже содержит /api
-            # Пробуем /api/models (если base_url заканчивается на /api)
-            # или /models (если base_url без /api)
+            # Используем правильный endpoint
             if self.base_url.rstrip('/').endswith('/api'):
                 url = f"{self.base_url}/models"
             else:
                 url = f"{self.base_url}/api/models"
 
-            logger.debug(f"Fetching models from: {url}")
+            logger.info(f"[OpenWebUI] Получение списка моделей: {url}")
 
             response = requests.get(
                 url,
@@ -304,9 +325,10 @@ class OpenWebUIClient(BaseLLMClient):
                 elif isinstance(model, str):
                     models.append(model)
 
+            logger.info(f"[OpenWebUI] Доступно моделей: {len(models)}: {models}")
             return sorted(models)
         except Exception as e:
-            logger.error(f"Failed to get models from OpenWebUI: {e}")
+            logger.error(f"[OpenWebUI] Failed to get models: {e}")
             return []
 
     def get_auth_info(self) -> Dict[str, Any]:

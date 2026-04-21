@@ -54,8 +54,11 @@ nomenclature-processor/
 ├── utils/
 │   ├── excel_loader.py          # Загрузка nomenclature.xlsx
 │   └── json_export.py           # Экспорт в JSON
+├── default/
+│   └── seed_default_masks.py    # Заполнение БД дефолтными масками
 ├── cli.py                       # CLI интерфейс (все команды)
-├── seed_default_masks.py        # Заполнение БД дефолтными масками
+├── cli.py                       # CLI интерфейс (все команды)
+├── cli.py                       # CLI интерфейс (все команды)
 └── requirements.txt
 ```
 
@@ -110,11 +113,10 @@ processing:
 
 ```bash
 # Шаг 1: Построить индекс ЕСН
-python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" \
-    -o models/hardware/ens_hardware.pkl
+python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" -o models/hardware/ens_hardware.pkl
 
 # Шаг 2: Заполнить БД дефолтными масками (быстро) ИЛИ сгенерировать через LLM
-python seed_default_masks.py cache/masks.db
+python default/seed_default_masks.py cache/masks.db
 # ИЛИ
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 
@@ -274,13 +276,13 @@ default_model: "qwen2.5:7b"  # вместо qwen3:30b
 ### Пустые params в результатах
 ```bash
 # БД масок пуста — заполнить
-python seed_default_masks.py cache/masks.db
+python default/seed_default_masks.py cache/masks.db
 ```
 
 ### Долгая генерация масок
 ```bash
 # Использовать только hardcoded маски (без LLM)
-python seed_default_masks.py cache/masks.db
+python default/seed_default_masks.py cache/masks.db
 
 # Или проверить доступность API
 python cli.py models --api openwebui

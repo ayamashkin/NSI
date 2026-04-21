@@ -315,12 +315,14 @@ def process_parametric(text, db, ens_index, llm):
                 except Exception as e:
                     logger.warning(f"Failed to init {service_name}: {e}")
 
+    settings = get_settings()
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
-        use_llm_generation=llm
+        use_llm_generation=llm,
+        settings=settings
     )
 
     result = processor.process(text)
@@ -391,12 +393,14 @@ def batch(input_file, db, ens_index, output, llm, validate):
                 except Exception as e:
                     logger.warning(f"Failed to init {service_name}: {e}")
 
+    settings = get_settings()
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
-        use_llm_generation=llm
+        use_llm_generation=llm,
+        settings=settings
     )
 
     click.echo("🚀 Начало обработки...")

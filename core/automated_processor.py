@@ -1,6 +1,6 @@
 """
 Main Processor Module
-Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator -> 
+Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 """
 
@@ -60,7 +60,8 @@ class AutomatedParametricProcessor:
         ens_index_path: Optional[str] = None,
         min_mask_score: float = 0.85,
         max_llm_retries: int = 3,
-        use_llm_generation: bool = True
+        use_llm_generation: bool = True,
+        settings: Optional[Any] = None
     ):
         """
         Инициализация процессора.
@@ -79,6 +80,7 @@ class AutomatedParametricProcessor:
         self.min_mask_score = min_mask_score
         self.max_llm_retries = max_llm_retries
         self.use_llm_generation = use_llm_generation
+        self.settings = settings
 
         # Инициализация компонентов
         self._init_components()
@@ -90,7 +92,7 @@ class AutomatedParametricProcessor:
         self.standard_extractor = get_standard_extractor()
 
         # AutoValidator
-        from core.auto_validator import AutoValidator
+        from validators.auto_validator import AutoValidator
         self.validator = AutoValidator(
             ens_index_path=self.ens_index_path,
             activation_threshold=self.min_mask_score
@@ -98,9 +100,10 @@ class AutomatedParametricProcessor:
 
         # LLM Generator
         if self.use_llm_generation and self.llm_clients:
-            from core.llm_mask_generator import LLMMaskGenerator
+            from generators.llm_mask_generator import LLMMaskGenerator
             self.llm_generator = LLMMaskGenerator(
                 clients=self.llm_clients,
+                settings=self.settings,
                 max_retries=self.max_llm_retries
             )
         else:
@@ -150,7 +153,7 @@ class AutomatedParametricProcessor:
 
         # Level 2: LLM Generation (если разрешено)
         if self.use_llm_generation and self.llm_generator:
-            generated_mask = self._generate_mask(standard, item_type)
+            generated_mask = self._generate_mask(standard, item_type, text)
 
             if generated_mask:
                 # Level 3: AutoValidation
@@ -175,7 +178,7 @@ class AutomatedParametricProcessor:
         # Level 7: TF-IDF Fallback
         return self._tfidf_fallback(text, extracted, start_time)
 
-    def _generate_mask(self, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
+    def _generate_mask(self, standard: str, item_type: str, text: str = "") -> Optional[Dict[str, Any]]:
         """Генерация маски через LLM."""
         if not self.llm_generator:
             return None
@@ -190,7 +193,8 @@ class AutomatedParametricProcessor:
         mask, attempts = self.llm_generator.generate_mask(
             standard=standard,
             item_type=item_type,
-            examples=examples
+            examples=examples,
+            name=text
         )
 
         if mask:
@@ -206,7 +210,7 @@ class AutomatedParametricProcessor:
         item_type: str
     ) -> Any:
         """Валидация сгенерированной маски."""
-        from core.mask_database import MaskRecord
+        from database.mask_database import MaskRecord
 
         # Создаем временную запись для валидации
         temp_mask = MaskRecord(
@@ -230,7 +234,7 @@ class AutomatedParametricProcessor:
 
     def _save_mask(self, mask: Dict[str, Any], validation: Any) -> Optional[Any]:
         """Сохранение валидированной маски в БД."""
-        from core.mask_database import MaskRecord
+        from database.mask_database import MaskRecord
 
         mask_record = MaskRecord(
             standard=mask['standard'],
