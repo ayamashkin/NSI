@@ -92,7 +92,7 @@ class AutomatedParametricProcessor:
         self.standard_extractor = get_standard_extractor()
 
         # AutoValidator
-        from validators.auto_validator import AutoValidator
+        from core.auto_validator import AutoValidator
         self.validator = AutoValidator(
             ens_index_path=self.ens_index_path,
             activation_threshold=self.min_mask_score
@@ -131,30 +131,43 @@ class AutomatedParametricProcessor:
         import time
         start_time = time.time()
 
+        # Очищаем trailing punctuation (запятые, точки и т.д. в конце строки)
+        clean_text = text.strip().rstrip(',.;: ')
+        if clean_text != text.strip():
+            logger.debug(f"Cleaned trailing punctuation: '{text}' -> '{clean_text}'")
+
         logger.info(f"Processing: {text[:50]}...")
 
         # Level 0: Извлечение стандарта
-        extracted = self.standard_extractor.extract_all(text)
+        extracted = self.standard_extractor.extract_all(clean_text)
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
 
         if not standard_info or not item_type:
             # Не удалось извлечь базовую информацию -> Level 8: LLM Direct
-            return self._llm_direct_process(text, start_time)
+            return self._llm_direct_process(clean_text, start_time)
 
         standard = standard_info.normalized
+        logger.info(f"[PROCESS] standard='{standard}', item_type='{item_type}', clean_text='{clean_text[:60]}'")
 
         # Level 1: Проверка MaskDatabase
         mask = self.mask_db.get_mask(standard, item_type)
+        # Fallback: пробуем без учета регистра item_type
+        if mask is None:
+            mask = self.mask_db.get_mask(standard, item_type.lower())
+            if mask:
+                logger.info(f"[PROCESS] Found mask with lower item_type: {item_type.lower()}")
+        logger.info(f"[PROCESS] mask found: {mask is not None}, is_active: {getattr(mask, 'is_active', False)}")
 
         if mask and mask.is_active:
             # Активная маска найдена -> Level 6: ParametricMatch
-            return self._parametric_match(text, mask, extracted, start_time)
+            logger.info(f"[PROCESS] -> Level 6: ParametricMatch with mask {mask.id}")
+            return self._parametric_match(clean_text, mask, extracted, start_time)
 
         # Level 2: LLM Generation (если разрешено)
         if self.use_llm_generation and self.llm_generator:
             standard_info = extracted.get('standard_info')
-            generated_mask = self._generate_mask(standard, item_type, text, standard_info)
+            generated_mask = self._generate_mask(standard, item_type, clean_text, standard_info)
 
             if generated_mask:
                 # Level 3: AutoValidation
@@ -287,11 +300,15 @@ class AutomatedParametricProcessor:
         """Параметрическое сопоставление."""
         import time
 
+        logger.info(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{mask.standard}', mask.item_type='{mask.item_type}'")
+
         match_result = self.parametric_client.match(
             text=text,
             standard=mask.standard,
             item_type=mask.item_type
         )
+
+        logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}")
 
         processing_time = (time.time() - start_time) * 1000
 

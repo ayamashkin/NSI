@@ -3,10 +3,11 @@ LLM Mask Generator Module
 Level 2: Автоматическая генерация regex масок с помощью LLM.
 Модель/температура/system_prompt определяются автоматически по keywords из prompts.yaml.
 """
-from pathlib import Path
+
 import re
 import json
 import logging
+from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -239,6 +240,25 @@ class LLMMaskGenerator:
     # PROMPT CONFIGURATION
     # ==========================================================================
 
+    def _load_skip_fields(self) -> set:
+        """Загрузка skip_fields из ens_column_mapping.yaml."""
+        default = {'код', 'mdm_key', 'единицы_измерения', 'наименование_типа.1',
+                   'полное_наименование', 'наименование', 'нтд'}
+        try:
+            import yaml
+            from pathlib import Path
+            for path in ['config/ens_column_mapping.yaml', 'ens_column_mapping.yaml']:
+                if Path(path).exists():
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    fields = data.get('skip_fields', [])
+                    if fields:
+                        return set(fields)
+                    break
+        except Exception as e:
+            logger.warning(f"[LLMMaskGenerator] Не удалось загрузить skip_fields: {e}")
+        return default
+
     def _get_prompt_config(self, prompt_id: Optional[str] = None) -> Optional[Any]:
         """
         Получение конфигурации промпта из prompts.yaml.
@@ -347,7 +367,7 @@ class LLMMaskGenerator:
                 configs.append({
                     "provider": provider,
                     "model": model,
-                    "temperature": min(temp + 0.2, 0.5),
+                    "temperature": round(min(temp + 0.2, 0.5), 2),
                     "system_prompt": system_prompt,
                     "source": f"prompts.yaml:{prompt_id}(retry)"
                 })
@@ -524,7 +544,7 @@ class LLMMaskGenerator:
         context: Optional[Dict],
         prompt: Optional[str] = None
     ) -> GenerationAttempt:
-        """Одна попытка генерации маски."""
+        """Одна попытка генерации маски с полным логированием."""
         provider = config["provider"]
         model = config["model"]
         temperature = config["temperature"]
@@ -536,86 +556,72 @@ class LLMMaskGenerator:
             f"{provider.value}/{model}, temp={temperature} (source: {source})"
         )
 
-        client = self._get_client(provider)
-
-        # === ПРОМПТ ДЛЯ ГЕНЕРАЦИИ МАСКИ ===
+        # Промпт
         if prompt is None:
             prompt = self._build_prompt(standard, item_type, examples, context)
 
-        # Логируем полный промпт на DEBUG уровне
-        logger.debug(f"[LLMMaskGenerator] === PROMPT (attempt {attempt_number}) ===\n{prompt}\n=== END PROMPT ===")
-
+        # Вызов API с полным логированием
+        raw_response = ""
+        response = None
         try:
+            client = self._get_client(provider)
+            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: ВЫЗОВ API {provider.value}")
             response = client.complete(
-                prompt=prompt,
-                model=model,
-                temperature=temperature,
-                system_prompt=system_prompt
+                prompt=prompt, model=model, temperature=temperature, system_prompt=system_prompt
             )
+            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: API ответ type={type(response)}, value={'None' if response is None else 'not None'}")
 
             if response is None:
-                return GenerationAttempt(
-                    attempt_number=attempt_number,
-                    provider=provider.value,
-                    model=model,
-                    temperature=temperature,
-                    success=False,
-                    error_message="API returned None"
-                )
-
-            if not response.get("success"):
-                error = response.get("error", "Unknown API error")
-                return GenerationAttempt(
-                    attempt_number=attempt_number,
-                    provider=provider.value,
-                    model=model,
-                    temperature=temperature,
-                    success=False,
-                    raw_response=str(response.get("raw", ""))[:500],
-                    error_message=f"API error: {error}"
-                )
-
-            raw_response = response.get("raw", "")
-            content = response.get("content")
-
-            if isinstance(content, dict):
-                result = content
+                raw_response = "API_RESPONSE_WAS_NONE"
+            elif isinstance(response, dict):
+                raw_response = response.get("raw", str(response))
+                logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: success={response.get('success')}, raw_len={len(raw_response)}")
             else:
-                result = self._extract_json(raw_response)
-
-            if result and "pattern" in result:
-                return GenerationAttempt(
-                    attempt_number=attempt_number,
-                    provider=provider.value,
-                    model=model,
-                    temperature=temperature,
-                    success=True,
-                    pattern=result["pattern"],
-                    params=result.get("params", []),
-                    required=result.get("required", []),
-                    raw_response=raw_response[:500]
-                )
-            else:
-                return GenerationAttempt(
-                    attempt_number=attempt_number,
-                    provider=provider.value,
-                    model=model,
-                    temperature=temperature,
-                    success=False,
-                    raw_response=raw_response[:500],
-                    error_message="No valid pattern in response"
-                )
+                raw_response = str(response)
+                logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: response type={type(response)}, str_len={len(raw_response)}")
 
         except Exception as e:
-            logger.error(f"[LLMMaskGenerator] Попытка {attempt_number} failed: {e}")
-            return GenerationAttempt(
-                attempt_number=attempt_number,
-                provider=provider.value,
-                model=model,
-                temperature=temperature,
-                success=False,
-                error_message=str(e)
-            )
+            import traceback
+            raw_response = f"EXCEPTION: {type(e).__name__}: {e}\n{traceback.format_exc()}"
+            logger.error(f"[LLMMaskGenerator] Попытка {attempt_number}: ИСКЛЮЧЕНИЕ: {e}")
+        finally:
+            # ВСЕГДА сохраняем ответ
+            self._save_debug_response(standard, item_type, attempt_number, raw_response)
+            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: ответ СОХРАНЕН, length={len(raw_response)}")
+
+        # Обработка результата
+        if raw_response.startswith("API_RESPONSE_WAS_NONE"):
+            return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
+                model=model, temperature=temperature, success=False,
+                error_message="API returned None", raw_response=raw_response[:500])
+
+        if raw_response.startswith("EXCEPTION:"):
+            return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
+                model=model, temperature=temperature, success=False,
+                error_message=raw_response[:200], raw_response=raw_response[:500])
+
+        if isinstance(response, dict) and not response.get("success"):
+            # API сообщил об ошибке, но raw может содержать JSON
+            logger.warning(f"[LLMMaskGenerator] Попытка {attempt_number}: API success=False, но пробуем парсить raw")
+            # Продолжаем к парсингу ниже — не возвращаем ошибку
+
+        # Парсинг JSON
+        content = response.get("content") if isinstance(response, dict) else None
+        result = content if isinstance(content, dict) else self._extract_json(raw_response)
+
+        if result and "pattern" in result:
+            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: УСПЕХ")
+            return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
+                model=model, temperature=temperature, success=True, pattern=result["pattern"],
+                params=result.get("params", []), required=result.get("required", []),
+                raw_response=raw_response[:500])
+        else:
+            fail_reason = "JSON не найден" if result is None else "Нет поля 'pattern'"
+            preview = raw_response[:300].replace('\n', ' ')
+            logger.error(f"[LLMMaskGenerator] Попытка {attempt_number}: {fail_reason}. Preview: {preview}")
+            return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
+                model=model, temperature=temperature, success=False,
+                error_message=fail_reason, raw_response=raw_response[:500])
 
     # ==========================================================================
     # PROMPT BUILDER (промпт для генерации маски)
@@ -657,7 +663,14 @@ class LLMMaskGenerator:
 
     def _save_debug_prompt(self, standard: str, item_type: str, prompt: str):
         """Сохранение промпта в файл для отладки."""
-        # Проверяем включено ли сохранение
+        self._save_debug_file(standard, item_type, "prompt", prompt)
+
+    def _save_debug_response(self, standard: str, item_type: str, attempt: int, response: str):
+        """Сохранение raw ответа LLM для отладки."""
+        self._save_debug_file(standard, item_type, f"response_a{attempt}", response)
+
+    def _save_debug_file(self, standard: str, item_type: str, suffix: str, content: str):
+        """Сохранение произвольного файла отладки."""
         save_enabled = False
         debug_dir = "prompts/debug"
 
@@ -673,18 +686,21 @@ class LLMMaskGenerator:
             from pathlib import Path
             from datetime import datetime
 
-            # Создаем папку
             Path(debug_dir).mkdir(parents=True, exist_ok=True)
 
-            # Имя файла: {item_type}_{standard}_{timestamp}.txt
             safe_type = self._sanitize_filename(item_type or "unknown")
             safe_std = self._sanitize_filename(standard or "unknown")
-            timestamp = datetime.now().strftime("%m%d_%H%M%S")
-            filename = f"{safe_type}_{safe_std}_{timestamp}.txt"
+            # Имя по маске: [тип]_[стандарт].txt
+            # Для response добавляем _a{N}
+            if suffix == "prompt":
+                filename = f"{safe_type}_{safe_std}.txt"
+            else:
+                # suffix = "response_a1" -> "_a1"
+                attempt_suffix = suffix.replace("response", "")
+                filename = f"{safe_type}_{safe_std}{attempt_suffix}.txt"
 
             filepath = Path(debug_dir) / filename
 
-            # Заголовок с метаданными
             header = (
                 f"# Тип: {item_type}\n"
                 f"# Стандарт: {standard}\n"
@@ -694,11 +710,11 @@ class LLMMaskGenerator:
 
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(header)
-                f.write(prompt)
+                f.write(content)
 
-            logger.info(f"[LLMMaskGenerator] Промпт сохранен: {filepath}")
+            logger.info(f"[LLMMaskGenerator] Файл сохранен: {filepath}")
         except Exception as e:
-            logger.warning(f"[LLMMaskGenerator] Не удалось сохранить промпт: {e}")
+            logger.warning(f"[LLMMaskGenerator] Не удалось сохранить файл: {e}")
 
     def _default_prompt_template(self) -> str:
         """Fallback шаблон если файл не найден."""
@@ -708,8 +724,17 @@ class LLMMaskGenerator:
             "для извлечения параметров из номенклатуры типа \"{item_type}\" по стандарту {standard}.\n\n"
             "Примеры:\n{examples_text}\n\n"
             "Статистика:\n{stats_text}\n\n"
-            "Ответь ТОЛЬКО в формате JSON:\n"
-            "{{\n  \"pattern\": \"...\",\n  \"params\": {params_list},\n  \"required\": {required_list}\n}}"
+            "### Формат ответа\n"
+            "```json\n"
+            "{{\n"
+            "  \"pattern\": \"...\",\n"
+            "  \"params\": {params_list},\n"
+            "  \"required\": {required_list}\n"
+            "}}\n"
+            "```\n\n"
+            "### Строгое соответствие вывода\n"
+            "Выведите результат в виде одного JSON-объекта. "
+            "Не добавляйте в ответ никаких других объектов или комментариев, кроме итогового JSON."
         )
 
     def _build_prompt(self, standard, item_type, examples, context):
@@ -733,7 +758,19 @@ class LLMMaskGenerator:
         threshold = max(1, int(total * 0.1))
         sorted_fields = sorted(field_stats.items(), key=lambda x: -x[1])
         relevant_fields = [k for k, v in sorted_fields if v >= threshold]
-        display_fields = relevant_fields[:15]
+
+        # Загружаем skip_fields из конфига (ens_column_mapping.yaml)
+        skip_fields = self._load_skip_fields()
+        clean_name = lambda n: n.replace('.', '_').replace('-', '_').replace('(', '_').replace(')', '_').replace(',', '_').replace('__', '_').strip('_')
+
+        # Очищаем имена: оригинальное поле -> имя для regex
+        field_name_map = {}
+        for f in relevant_fields:
+            if f not in skip_fields:
+                field_name_map[f] = clean_name(f)
+
+        regex_fields = list(field_name_map.values())
+        display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
         # --- Форматирование примеров ---
         sample_examples = examples[:10]
@@ -742,72 +779,142 @@ class LLMMaskGenerator:
             name = ex.get('полное_наименование') or ex.get('наименование', '')
             if not name:
                 continue
-            filled_fields = []
+            # Всегда показываем полное_наименование (даже если в skip_fields)
+            filled_fields = [f"    полное_наименование: {name}"]
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
                     filled_fields.append(f"    {field}: {val}")
+
+            # Структура: разбиваем строку на части по найденным параметрам
+            structure_parts = []
+            remaining = name
+            for field in display_fields:
+                val = ex.get(field)
+                if val and str(val) in remaining:
+                    pos = remaining.find(str(val))
+                    if pos > 0:
+                        structure_parts.append(f"[{remaining[:pos].strip()}]")
+                    structure_parts.append(f"(?P<{field}>{str(val)})")
+                    remaining = remaining[pos + len(str(val)):]
+            if remaining.strip():
+                structure_parts.append(f"[{remaining.strip()}]")
+            structure_str = " ".join(structure_parts) if structure_parts else "(не удалось разобрать)"
+
             in_text = []
             for field in display_fields:
                 val = ex.get(field)
                 if val and str(val) in name:
-                    in_text.append(f"      {field}='{val}' поз.{name.find(str(val))}")
+                    in_text.append(f"      {field}='{val}' на позиции {name.find(str(val))}")
             in_text_str = "\n".join(in_text) if in_text else "      (нет)"
+
+            # Mapping оригинальное -> очищенное
+            mapping_lines = [f"    # {orig} -> regex: {clean}" for orig, clean in field_name_map.items() if clean != orig][:5]
+
             examples_lines.append(
-                f"{i}. \"{name}\"\n   ПОЛЯ:\n" + "\n".join(filled_fields)
+                f"{i}. ИСХОДНАЯ СТРОКА: \"{name}\"\n"
+                f"   СТРУКТУРА: {structure_str}\n"
+                f"   ПОЛЯ ЕСН:\n" + "\n".join(filled_fields)
+                + ("\n   MAPPING:\n" + "\n".join(mapping_lines) if mapping_lines else "")
                 + f"\n   РАЗБОР:\n{in_text_str}"
             )
         examples_text = "\n\n".join(examples_lines)
 
-        stats_lines = [f"    {k}: {field_stats[k]} из {total}" for k in relevant_fields]
-        params_list = json.dumps(relevant_fields, ensure_ascii=False)
-        required_fields = [k for k, v in sorted_fields if v == total
-                          and not k.startswith(('полное_наименование', 'наименование', 'код', 'mdm_key'))]
+        # stats_lines: очищенное имя + заполненность по оригинальному
+        stats_lines = [f"    {field_name_map.get(k, k)}: {field_stats[k]} из {total}" for k in field_name_map]
+        params_list = json.dumps(regex_fields, ensure_ascii=False)
+        required_fields = [field_name_map[k] for k, v in sorted_fields if v == total and k in field_name_map]
         if not required_fields:
-            required_fields = [k for k, v in sorted_fields if v >= total * 0.8
-                              and not k.startswith(('полное_наименование', 'наименование', 'код', 'mdm_key'))][:5]
+            required_fields = [field_name_map[k] for k, v in sorted_fields if v >= total * 0.8 and k in field_name_map][:5]
         required_list = json.dumps(required_fields, ensure_ascii=False)
         context_text = f"\nДоп. контекст: {json.dumps(context, ensure_ascii=False)}\n" if context else ""
 
-        # --- Подстановка в шаблон ---
-        try:
-            return template.format(
-                item_type=item_type,
-                standard=standard,
-                example_count=len(sample_examples),
-                total_examples=total,
-                examples_text=examples_text,
-                stats_text="\n".join(stats_lines),
-                params_hint=", ".join(relevant_fields),
-                params_list=params_list,
-                required_list=required_list,
-                context_text=context_text,
-            )
-        except KeyError as e:
-            logger.warning(f"[LLMMaskGenerator] Неизвестный placeholder в шаблоне: {e}")
-            return template  # возвращаем как есть
+        # --- Подстановка в шаблон (str.replace — безопасно при { в данных) ---
+        result = template
+        replacements = {
+            "{item_type}": item_type,
+            "{standard}": standard,
+            "{example_count}": str(len(sample_examples)),
+            "{total_examples}": str(total),
+            "{examples_text}": examples_text,
+            "{stats_text}": "\n".join(stats_lines),
+            "{params_hint}": ", ".join(regex_fields),
+            "{params_list}": params_list,
+            "{required_list}": required_list,
+            "{context_text}": context_text,
+        }
+        for placeholder, value in replacements.items():
+            result = result.replace(placeholder, value)
+
+        # Проверяем, остались ли неподставленные placeholder'ы
+        remaining = [m for m in re.finditer(r'\{[a-z_]+\}', result) if m.group() not in ('{{', '}}')]
+        if remaining:
+            logger.warning(f"[LLMMaskGenerator] Неподставленные placeholder'ы: {[m.group() for m in remaining[:5]]}")
+
+        return result
 
     def _extract_json(self, text):
-        """Извлечение JSON из текста."""
-        # Ищем JSON в code blocks
-        for prefix in ("```json", "```"):
-            idx = text.find(prefix)
-            if idx >= 0:
-                start = text.find("{", idx)
-                end = text.rfind("}") + 1
-                if start >= 0 and end > start:
+        """Извлечение JSON из ответа LLM. Приоритет: ```json блоки, затем все {...}."""
+        if not text or not text.strip():
+            return None
+
+        candidates = []
+
+        # === Стратегия 1: Code blocks ```json ... ``` (приоритетная) ===
+        parts = text.split('```')
+        for i in range(1, len(parts), 2):  # берем содержимое между ```
+            block = parts[i].strip()
+            if block.startswith('json'):
+                block = block[4:].strip()
+            brace_start = block.find('{')
+            if brace_start >= 0:
+                depth = 0
+                for j, ch in enumerate(block[brace_start:], brace_start):
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                obj = json.loads(block[brace_start:j+1])
+                                if isinstance(obj, dict):
+                                    score = 0
+                                    if "pattern" in obj: score += 100
+                                    if "params" in obj: score += 10
+                                    candidates.append((score + 50, obj))
+                            except json.JSONDecodeError:
+                                pass
+                            break
+
+        # === Стратегия 2: Все {...} на балансировке скобок ===
+        depth = 0
+        start = -1
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    chunk = text[start:i+1]
                     try:
-                        return json.loads(text[start:end])
+                        obj = json.loads(chunk)
+                        if isinstance(obj, dict):
+                            score = 0
+                            if "pattern" in obj: score += 100
+                            if "params" in obj: score += 10
+                            if "required" in obj: score += 10
+                            candidates.append((score, obj))
                     except json.JSONDecodeError:
                         pass
-        # Ищем первый { ... } в тексте
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                return json.loads(text[start:end])
-            except json.JSONDecodeError:
-                pass
+
+        if candidates:
+            candidates.sort(key=lambda x: -x[0])
+            best = candidates[0][1]
+            logger.info(f"[LLMMaskGenerator] JSON найден: score={candidates[0][0]}, keys={list(best.keys())}")
+            return best
+
         return None
 
 

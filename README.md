@@ -204,10 +204,7 @@ python default/seed_default_masks.py cache/masks.db
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 
 # 3. Обработать файл
-python cli.py batch data/nomenclature.xlsx \
-    -d cache/masks.db \
-    -i models/hardware/ens_hardware.pkl \
-    -o results.json
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json
 ```
 
 ### LLM-режим (legacy, детальный разбор)
