@@ -70,7 +70,6 @@ def process(ctx, input_file, prompt, auto, workers, force):
 
     settings = get_settings()
 
-    # Загружаем Excel
     click.echo(f"📊 Загрузка {input_file}...")
     try:
         items = load_excel_items(input_file)
@@ -80,15 +79,12 @@ def process(ctx, input_file, prompt, auto, workers, force):
 
     click.echo(f"✅ Загружено {len(items)} записей")
 
-    # Инициализация
     db = DatabaseManager(settings.database.path)
     processor = NomenclatureProcessor(db, max_workers=workers)
 
-    # Определяем промпты
     prompt_ids = list(prompt) if prompt else []
     if auto:
         click.echo("🔍 Автоопределение промптов...")
-        # Обработаем с автоопределением
         results = processor.auto_process(items, force_reprocess=force)
     else:
         if not prompt_ids:
@@ -98,14 +94,13 @@ def process(ctx, input_file, prompt, auto, workers, force):
 
     click.echo(f"\n✅ Обработка завершена: {len(results)} результатов")
 
-    # Статистика
     stats = db.get_statistics()
     click.echo(f"📈 Всего в БД: {stats.get('total', 0)}")
 
 
 @cli.command()
 @click.option('--output', '-o', default='results.json', help='Файл для экспорта')
-@click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']), 
+@click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
               default='flat', help='Структура вывода')
 @click.option('--prompt', '-p', help='Фильтр по ID промпта')
 @click.option('--status', '-s', help='Фильтр по статусу (completed, error, ignored)')
@@ -132,7 +127,6 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
         click.echo("⚠️  Нет данных для экспорта")
         return
 
-    # Форматируем результаты
     export_data = db.export_filtered_to_json(
         output_path=output,
         results=results,
@@ -204,12 +198,9 @@ def detect(text):
 
     click.echo(f"🔍 Анализ: {text}")
 
-    # Проверяем каждый промпт
     for pid, cfg in settings.prompts.items():
-        # Импортируем логику проверки
         from core.processor import NomenclatureProcessor
 
-        # Создаем фейковый процессор для проверки
         class FakeItem:
             def __init__(self, name):
                 self.name = name
@@ -219,7 +210,6 @@ def detect(text):
         processor = NomenclatureProcessor.__new__(NomenclatureProcessor)
         processor.settings = settings
 
-        from config.settings import PromptConfig
         matches = processor._check_category_match(text, cfg)
 
         if matches:
@@ -285,6 +275,37 @@ def models(api_name):
 # PARAMETRIC COMMANDS (New)
 # =============================================================================
 
+def _init_llm_clients(settings, all_services=False):
+    """Инициализация LLM клиентов для всех настроенных сервисов."""
+    llm_clients = {}
+    services = ['openwebui', 'mws', 'gigachat'] if all_services else ['openwebui', 'mws']
+    for service_name in services:
+        if service_name in settings.api:
+            try:
+                cfg = settings.api[service_name]
+                if service_name == 'openwebui':
+                    from api_clients.openwebui import OpenWebUIClient
+                    llm_clients[service_name] = OpenWebUIClient(
+                        base_url=cfg.base_url, api_key=cfg.api_key,
+                        username=cfg.username, password=cfg.password
+                    )
+                elif service_name == 'mws':
+                    from api_clients.mws_gpt import MWSGPTClient
+                    llm_clients[service_name] = MWSGPTClient(
+                        base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
+                    )
+                elif service_name == 'gigachat':
+                    from api_clients.gigachat import GigaChatClient
+                    llm_clients[service_name] = GigaChatClient(
+                        base_url=cfg.base_url, api_key=cfg.api_key,
+                        scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
+                        timeout=cfg.timeout, verify_ssl=False
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to init {service_name}: {e}")
+    return llm_clients
+
+
 @cli.command()
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -296,42 +317,14 @@ def process_parametric(text, db, ens_index, llm):
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
 
-    # Инициализация LLM
     llm_clients = {}
     settings = get_settings()
     if llm:
-        for service_name in ['openwebui', 'mws', 'gigachat']:
-            if service_name in settings.api:
-                try:
-                    if service_name == 'openwebui':
-                        from api_clients.openwebui import OpenWebUIClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = OpenWebUIClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            username=cfg.username,
-                            password=cfg.password
-                        )
-                    elif service_name == 'mws':
-                        from api_clients.mws_gpt import MWSGPTClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = MWSGPTClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            timeout=cfg.timeout
-                        )
-                    elif service_name == 'gigachat':
-                        from api_clients.gigachat import GigaChatClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = GigaChatClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
-                            timeout=cfg.timeout,
-                            verify_ssl=False
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to init {service_name}: {e}")
+        llm_clients = _init_llm_clients(settings, all_services=True)
+        if not llm_clients:
+            click.echo("❌ LLM requested but no clients available", err=True)
+            return
+        click.echo("🤖 LLM генерация включена")
 
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
@@ -368,7 +361,9 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--output', '-o', default='results.json', help='Выходной файл')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию')
 @click.option('--validate/--no-validate', default=True, help='Проверять валидность')
-def batch(input_file, db, ens_index, output, llm, validate):
+@click.option('--success-only', is_flag=True, help='Выгружать только успешно распознанные')
+@click.option('--include-details', is_flag=True, help='Включить debug-информацию (details) в вывод')
+def batch(input_file, db, ens_index, output, llm, validate, success_only, include_details):
     """Пакетная обработка с параметрическим поиском"""
     import pandas as pd
     from tqdm import tqdm
@@ -391,42 +386,14 @@ def batch(input_file, db, ens_index, output, llm, validate):
     texts = df[name_col].astype(str).tolist()
     click.echo(f"✅ Загружено {len(texts)} записей")
 
-    # LLM клиенты
-    llm_clients = {}
     settings = get_settings()
+    llm_clients = {}
     if llm:
-        for service_name in ['openwebui', 'mws', 'gigachat']:
-            if service_name in settings.api:
-                try:
-                    if service_name == 'openwebui':
-                        from api_clients.openwebui import OpenWebUIClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = OpenWebUIClient(
-                            base_url=cfg.base_url,
-                            username=cfg.username,
-                            password=cfg.password,
-                            api_key=cfg.api_key
-                        )
-                    elif service_name == 'mws':
-                        from api_clients.mws_gpt import MWSGPTClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = MWSGPTClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            timeout=cfg.timeout
-                        )
-                    elif service_name == 'gigachat':
-                        from api_clients.gigachat import GigaChatClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = GigaChatClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
-                            timeout=cfg.timeout,
-                            verify_ssl=False
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to init {service_name}: {e}")
+        llm_clients = _init_llm_clients(settings, all_services=True)
+        if not llm_clients:
+            click.echo("❌ LLM requested but no clients available", err=True)
+            return
+        click.echo("🤖 LLM генерация включена")
 
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
@@ -438,17 +405,26 @@ def batch(input_file, db, ens_index, output, llm, validate):
     )
 
     click.echo("🚀 Начало обработки...")
+    if success_only:
+        click.echo("📌 Режим: только успешные результаты")
     results = []
-    stats = {'success': 0, 'failed': 0}
+    stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
     for text in tqdm(texts, desc="Обработка"):
         result = processor.process(text)
-        if validate and not result.success:
-            stats['failed'] += 1
-        else:
-            stats['success'] += 1
+        stats['total'] += 1
 
-        results.append({
+        if result.success:
+            stats['success'] += 1
+        else:
+            stats['failed'] += 1
+
+        # Фильтрация: пропускаем неуспешные если --success-only
+        if success_only and not result.success:
+            stats['filtered'] += 1
+            continue
+
+        row = {
             'text': result.text,
             'level': result.level.value,
             'success': result.success,
@@ -456,13 +432,21 @@ def batch(input_file, db, ens_index, output, llm, validate):
             'ens_code': result.ens_match.get('code') if result.ens_match else None,
             'confidence': result.confidence,
             'processing_time_ms': result.processing_time_ms
-        })
+        }
+        if include_details and result.details:
+            row['details'] = result.details
+
+        results.append(row)
 
     with open(output, 'w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
-    click.echo(f"\n💾 Результаты: {output}")
-    click.echo(f"📈 Успешно: {stats['success']}/{len(results)}")
+    click.echo(f"\n💾 Результаты: {output} ({len(results)} записей)")
+    click.echo(f"📊 Всего обработано: {stats['total']}")
+    click.echo(f"✅ Успешно: {stats['success']}")
+    click.echo(f"❌ Не распознано: {stats['failed']}")
+    if success_only:
+        click.echo(f"🚫 Отфильтровано: {stats['filtered']}")
 
 
 @cli.group()
@@ -483,8 +467,6 @@ def build_index(excel_file, output, category):
     result_path = build_ens_index(excel_file, output, category)
     click.echo(f"✅ Индекс сохранен: {result_path}")
 
-    # Метаданные
-    import json
     meta_path = Path(result_path).with_suffix('.meta.json')
     if meta_path.exists():
         with open(meta_path, 'r', encoding='utf-8') as f:
@@ -540,10 +522,10 @@ def analyze(excel_file, index, sample):
 @click.option('--min-score', '-s', default=0.85, help='Порог активации')
 @click.option('--llm', '-l', is_flag=True, help='Использовать LLM')
 @click.option('--limit', '-n', default=0, help='Ограничить число стандартов (0 = все, для отладки)')
-def generate_masks(db, ens_index, min_score, llm, limit):
-    """Генерация масок для всех стандартов из индекса"""
+@click.option('--standard', help='Генерировать маску только для указанного стандарта (пример: "ГОСТ 7798-70")')
+def generate_masks(db, ens_index, min_score, llm, limit, standard):
+    """Генерация масок для стандартов из индекса ЕСН"""
     from core.mask_database import MaskDatabase, MaskRecord
-    from core.auto_validator import AutoValidator
     from core.llm_mask_generator import LLMMaskGenerator
     from config.settings import get_settings
     from pathlib import Path
@@ -560,75 +542,55 @@ def generate_masks(db, ens_index, min_score, llm, limit):
     # Группировка по стандартам (тип из ЕСН: 'тип_изделия' = 'Наименование типа')
     standards = {}
     for item in items:
-        std = item.get('стандарт') or item.get('нтд', 'UNKNOWN')
-        item_type = item.get('тип_изделия') or item.get('тип', 'unknown')
+        std = item.get('стандарт') or item.get('нтд') or 'UNKNOWN'
+        item_type = item.get('тип_изделия') or item.get('наименование_типа') or item.get('тип') or 'unknown'
         key = (std, item_type)
         if key not in standards:
             standards[key] = []
         standards[key].append(item)
 
-    # Фильтруем: минимум 10 примеров для генерации
+    # Фильтр: минимум 10 примеров
     standards = {k: v for k, v in standards.items() if len(v) >= 10}
 
-    click.echo(f"🔍 Найдено {len(standards)} уникальных стандартов")
+    # === ФИЛЬТР ПО СТАНДАРТУ ===
+    if standard:
+        standard_normalized = standard.lower().replace(' ', '')
+        matched = {}
+        for (std, itype), examples in standards.items():
+            std_str = str(std or '')
+            std_normalized = std_str.lower().replace(' ', '')
+            if standard_normalized in std_normalized or std_normalized in standard_normalized:
+                matched[(std, itype)] = examples
+        standards = matched
+        click.echo(f"🔍 Фильтр по стандарту '{standard}': найдено {len(standards)} пар")
+        if not standards:
+            click.echo("❌ Ничего не найдено")
+            return
+
+    # Ограничение для отладки
+    all_items = list(standards.items())
+    click.echo(f"🔍 Найдено {len(all_items)} уникальных пар (тип + стандарт) с >=10 примерами")
+    if limit and limit > 0:
+        standards = dict(all_items[:limit])
+        click.echo(f"🔧 Отладочный режим: обрабатываем {len(standards)} пар:")
+        for (std, itype), ex_list in all_items[:limit]:
+            real_type = ex_list[0].get('тип_изделия') or ex_list[0].get('тип', itype)
+            click.echo(f"   - {real_type} / {std} ({len(ex_list)} примеров)")
 
     mask_db = MaskDatabase(db_path=db)
-    validator = AutoValidator(ens_index_path=ens_index, activation_threshold=min_score)
+
+    settings = get_settings()
 
     # LLM клиенты
     llm_clients = {}
-    settings = get_settings()
     if llm:
-        for service_name in ['openwebui', 'mws', 'gigachat']:
-            if service_name in settings.api:
-                try:
-                    if service_name == 'openwebui':
-                        from api_clients.openwebui import OpenWebUIClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = OpenWebUIClient(
-                            base_url=cfg.base_url,
-                            username=cfg.username,
-                            password=cfg.password,
-                            api_key=cfg.api_key
-                        )
-                    elif service_name == 'mws':
-                        from api_clients.mws_gpt import MWSGPTClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = MWSGPTClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            timeout=cfg.timeout
-                        )
-                    elif service_name == 'gigachat':
-                        from api_clients.gigachat import GigaChatClient
-                        cfg = settings.api[service_name]
-                        llm_clients[service_name] = GigaChatClient(
-                            base_url=cfg.base_url,
-                            api_key=cfg.api_key,
-                            scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
-                            timeout=cfg.timeout,
-                            verify_ssl=False
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to init {service_name}: {e}")
-
+        llm_clients = _init_llm_clients(settings, all_services=True)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return
         click.echo("🤖 LLM генерация включена")
 
     generator = LLMMaskGenerator(clients=llm_clients, settings=settings, max_retries=3) if llm else None
-
-    # Ограничение для отладки
-    if limit and limit > 0:
-        all_items = list(standards.items())
-        click.echo(f"🔍 Найдено {len(all_items)} уникальных пар (тип + стандарт) с ≥10 примерами")
-        standards = dict(all_items[:limit])
-        click.echo(f"🔧 Отладочный режим: обрабатываем {len(standards)} пар:")
-        for (std, itype), ex_list in all_items[:limit]:
-            # Показываем реальный тип из первого примера
-            real_type = ex_list[0].get('тип_изделия') or ex_list[0].get('тип', itype)
-            click.echo(f"   - {real_type} / {std} ({len(ex_list)} примеров)")
 
     stats = {'existing': 0, 'generated': 0, 'activated': 0}
 
@@ -639,27 +601,20 @@ def generate_masks(db, ens_index, min_score, llm, limit):
                 stats['existing'] += 1
                 continue
 
-            if len(examples) < 10:
-                continue
-
             if generator:
                 mask, _ = generator.generate_mask(std, item_type, examples)
                 if mask:
+                    # Нормализуем item_type в uppercase (стандарты: БОЛТ, ВИНТ, ШАЙБА)
+                    item_type_normalized = item_type.upper()
                     temp_mask = MaskRecord(
-                        standard=std, item_type=item_type,
+                        standard=std, item_type=item_type_normalized,
                         pattern=mask['pattern'], params=mask['params'],
                         required=mask['required'], auto_score=0.0,
-                        is_active=False, source='llm'
+                        is_active=True, source='llm'  # Активируем сразу
                     )
-                    val_result = validator.validate_mask(
-                        temp_mask.pattern, temp_mask.params, temp_mask.required,
-                        std, item_type, examples
-                    )
-                    temp_mask.auto_score = val_result.score
-                    temp_mask.is_active = val_result.passed
                     mask_db.save_mask(temp_mask, auto_activate=True)
                     stats['generated'] += 1
-                    if val_result.passed:
+                    if temp_mask.auto_score >= min_score:
                         stats['activated'] += 1
 
     click.echo(f"\n📊 Результат:")

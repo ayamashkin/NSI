@@ -151,13 +151,23 @@ class AutomatedParametricProcessor:
         logger.info(f"[PROCESS] standard='{standard}', item_type='{item_type}', clean_text='{clean_text[:60]}'")
 
         # Level 1: Проверка MaskDatabase
-        mask = self.mask_db.get_mask(standard, item_type)
-        # Fallback: пробуем без учета регистра item_type
+        search_item_type = item_type.upper()  # Нормализуем в uppercase (стандарты: БОЛТ, ВИНТ)
+        mask = self.mask_db.get_mask(standard, search_item_type)
+        # Fallback: пробуем исходный регистр
         if mask is None:
-            mask = self.mask_db.get_mask(standard, item_type.lower())
+            mask = self.mask_db.get_mask(standard, item_type)
             if mask:
-                logger.info(f"[PROCESS] Found mask with lower item_type: {item_type.lower()}")
+                logger.info(f"[PROCESS] Found mask with original item_type: {item_type}")
         logger.info(f"[PROCESS] mask found: {mask is not None}, is_active: {getattr(mask, 'is_active', False)}")
+
+        if mask is not None and not mask.is_active:
+            # Маска найдена но не активна — активируем принудительно
+            logger.info(f"[PROCESS] Mask found but inactive, activating")
+            try:
+                self.mask_db.activate_mask(mask.id)
+                mask.is_active = True
+            except Exception as e:
+                logger.warning(f"[PROCESS] Failed to activate mask: {e}")
 
         if mask and mask.is_active:
             # Активная маска найдена -> Level 6: ParametricMatch
@@ -290,6 +300,75 @@ class AutomatedParametricProcessor:
 
         return None
 
+    @staticmethod
+    def _token_similarity(a: str, b: str) -> float:
+        """
+        Token-based Jaccard similarity для текстовых параметров.
+        Решает проблему перестановки токенов: 'Окс.Фос.ЭФП' ~ 'Фос.Окс.ЭФП' = 100%
+        Также нормализует цифры: 'Кд3' ~ 'Кд' = 100% (для покрытий цифры не значимы)
+        """
+        import re
+        if not a or not b:
+            return 0.0
+        # Извлекаем токены, убираем цифры (для покрытий/материалов они не значимы)
+        def _extract_tokens(text):
+            raw_tokens = re.findall(r'[a-zA-Zа-яА-Я0-9]+', str(text).lower())
+            # Убираем цифры из токенов: 'Кд3' -> 'кд', 'фос' -> 'фос'
+            cleaned = []
+            for t in raw_tokens:
+                # Отделяем буквы от цифр
+                letters = re.sub(r'[0-9]', '', t)
+                if letters:
+                    cleaned.append(letters)
+            return set(cleaned)
+
+        tokens_a = _extract_tokens(a)
+        tokens_b = _extract_tokens(b)
+        if not tokens_a or not tokens_b:
+            return 0.0
+        intersection = tokens_a & tokens_b
+        union = tokens_a | tokens_b
+        return len(intersection) / len(union)
+
+    def _fuzzy_match_ens(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Optional[Dict]:
+        """
+        Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
+        Для текстовых полей (покрытие, материал) использует token-similarity.
+        """
+        TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
+        best_match = None
+        best_score = 0.0
+
+        for candidate in ens_candidates:
+            total_weight = 0.0
+            matched_weight = 0.0
+
+            for param_name, extracted_val in extracted_params.items():
+                if not extracted_val:
+                    continue
+                weight = 2.0 if param_name in TEXT_FIELDS else 1.0
+                total_weight += weight
+
+                # Ищем соответствующее поле в кандидате ЕСН
+                candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
+
+                if param_name in TEXT_FIELDS:
+                    sim = self._token_similarity(extracted_val, candidate_val)
+                    if sim >= 0.8:  # 80% токенов совпадают
+                        matched_weight += weight * sim
+                else:
+                    # Числовые параметры — точное совпадение
+                    if str(extracted_val).strip() == str(candidate_val).strip():
+                        matched_weight += weight
+
+            if total_weight > 0:
+                score = matched_weight / total_weight
+                if score > best_score:
+                    best_score = score
+                    best_match = {**candidate, '_fuzzy_score': best_score}
+
+        return best_match if best_score >= 0.6 else None
+
     def _parametric_match(
         self,
         text: str,
@@ -310,26 +389,84 @@ class AutomatedParametricProcessor:
 
         logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}")
 
+        # Fallback: если маска не сработала (score=0), пробуем "ослабленную" версию
+        # где обязательные скобки/группы делаем опциональными
+        relaxed_result = None
+        if match_result.score == 0 and not match_result.matched_params:
+            try:
+                relaxed_pattern = self._relax_pattern(mask.pattern)
+                if relaxed_pattern != mask.pattern:
+                    # Создаём временную маску с ослабленным паттерном
+                    relaxed_mask = type(mask)(
+                        id=getattr(mask, 'id', -1),
+                        standard=mask.standard,
+                        item_type=mask.item_type,
+                        pattern=relaxed_pattern,
+                        params=mask.params,
+                        required=mask.required,
+                        auto_score=getattr(mask, 'auto_score', 0),
+                        is_active=True,
+                        source='relaxed',
+                        usage_count=0,
+                        test_examples='[]',
+                        created_at='',
+                        last_used='',
+                        pattern_hash=''
+                    )
+                    relaxed_result = self.parametric_client.match(
+                        text=text,
+                        standard=mask.standard,
+                        item_type=mask.item_type
+                    )
+                    if relaxed_result.score > 0:
+                        logger.info(f"[PARAM_MATCH] Relaxed pattern matched: score={relaxed_result.score}")
+                        match_result = relaxed_result
+            except Exception as e:
+                logger.debug(f"[PARAM_MATCH] Relaxed pattern error: {e}")
+
+        # Fuzzy matching fallback: если точный поиск не дал результата,
+        # пробуем token-based matching для текстовых параметров (покрытие, материал)
+        fuzzy_ens_code = None
+        fuzzy_score = 0.0
+        if match_result.score < 0.7 or not match_result.ens_code:
+            try:
+                # Получаем кандидатов из ЕСН
+                ens_candidates = self.validator._get_ens_examples(mask.standard, mask.item_type)
+                if ens_candidates and match_result.matched_params:
+                    fuzzy_match = self._fuzzy_match_ens(match_result.matched_params, ens_candidates)
+                    if fuzzy_match:
+                        fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
+                        fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
+                        logger.info(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
+            except Exception as e:
+                logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
+
+        # Используем лучший результат (fuzzy или обычный)
+        final_ens_code = match_result.ens_code or fuzzy_ens_code
+        final_score = max(match_result.score, fuzzy_score)
+        final_matched_params = match_result.matched_params
+
         processing_time = (time.time() - start_time) * 1000
 
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
-            success=match_result.score > 0.5,
-            params=match_result.matched_params,
+            success=final_score > 0.5,
+            params=final_matched_params,
             ens_match={
-                'code': match_result.ens_code,
-                'mdm_key': match_result.mdm_key,
-                'score': match_result.score,
-                'type': match_result.match_type
-            } if match_result.ens_code else None,
-            confidence=match_result.confidence,
+                'code': final_ens_code,
+                'mdm_key': match_result.mdm_key if match_result.ens_code else fuzzy_ens_code,
+                'score': final_score,
+                'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type
+            } if final_ens_code else None,
+            confidence=max(match_result.confidence, fuzzy_score),
             processing_time_ms=processing_time,
             details={
                 'mask_id': mask.id,
                 'mask_pattern': mask.pattern,
                 'extracted_standard': extracted.get('standard_info'),
-                'extracted_type': extracted.get('item_type')
+                'extracted_type': extracted.get('item_type'),
+                'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code
             }
         )
 
@@ -339,26 +476,28 @@ class AutomatedParametricProcessor:
         extracted: Dict[str, Any],
         start_time: float
     ) -> ProcessingResult:
-        """TF-IDF fallback."""
+        """TF-IDF fallback — всегда success=False, т.к. параметры не извлечены."""
         import time
 
         match_result = self.parametric_client._tfidf_fallback(text)
         processing_time = (time.time() - start_time) * 1000
 
+        # TF-IDF fallback не извлекает параметры -> всегда неуспешен
+        # ens_code сохраняем как candidate для справки, но не как match
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_7_TFIDF_FALLBACK,
-            success=match_result.score > 0.3,
+            success=False,
             params={},
-            ens_match={
-                'code': match_result.ens_code,
-                'mdm_key': match_result.mdm_key,
-                'score': match_result.score,
-                'type': match_result.match_type
-            } if match_result.ens_code else None,
-            confidence=match_result.confidence,
+            ens_match=None,  # Не возвращаем match без параметров
+            confidence=0.0,
             processing_time_ms=processing_time,
-            details={'fallback': True, 'extracted': extracted}
+            details={
+                'fallback': True,
+                'tfidf_score': match_result.score,
+                'tfidf_ens_candidate': match_result.ens_code,
+                'extracted': extracted
+            }
         )
 
     def _llm_direct_process(self, text: str, start_time: float) -> ProcessingResult:

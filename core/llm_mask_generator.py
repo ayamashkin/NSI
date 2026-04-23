@@ -243,7 +243,9 @@ class LLMMaskGenerator:
     def _load_skip_fields(self) -> set:
         """Загрузка skip_fields из ens_column_mapping.yaml."""
         default = {'код', 'mdm_key', 'единицы_измерения', 'наименование_типа.1',
-                   'полное_наименование', 'наименование', 'нтд'}
+                   'полное_наименование', 'наименование', 'нтд',
+                   'наименование_типа',  # дублирует тип_изделия, используем только тип_изделия
+                   }
         try:
             import yaml
             from pathlib import Path
@@ -574,8 +576,9 @@ class LLMMaskGenerator:
             if response is None:
                 raw_response = "API_RESPONSE_WAS_NONE"
             elif isinstance(response, dict):
-                raw_response = response.get("raw", str(response))
-                logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: success={response.get('success')}, raw_len={len(raw_response)}")
+                raw_response = response.get("raw") or str(response)
+                raw_len = len(raw_response) if raw_response is not None else 0
+                logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: success={response.get('success')}, raw_len={raw_len}")
             else:
                 raw_response = str(response)
                 logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: response type={type(response)}, str_len={len(raw_response)}")
@@ -585,9 +588,10 @@ class LLMMaskGenerator:
             raw_response = f"EXCEPTION: {type(e).__name__}: {e}\n{traceback.format_exc()}"
             logger.error(f"[LLMMaskGenerator] Попытка {attempt_number}: ИСКЛЮЧЕНИЕ: {e}")
         finally:
-            # ВСЕГДА сохраняем ответ
-            self._save_debug_response(standard, item_type, attempt_number, raw_response)
-            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: ответ СОХРАНЕН, length={len(raw_response)}")
+            # ВСЕГДА сохраняем ответ (защита от None)
+            safe_response = raw_response if raw_response is not None else "RAW_RESPONSE_WAS_NONE"
+            self._save_debug_response(standard, item_type, attempt_number, safe_response)
+            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: ответ СОХРАНЕН, length={len(safe_response)}")
 
         # Обработка результата
         if raw_response.startswith("API_RESPONSE_WAS_NONE"):
@@ -759,15 +763,46 @@ class LLMMaskGenerator:
         sorted_fields = sorted(field_stats.items(), key=lambda x: -x[1])
         relevant_fields = [k for k, v in sorted_fields if v >= threshold]
 
+        # Убеждаемся что тип_изделия всегда первым в списке (заменяет наименование_типа)
+        if 'тип_изделия' not in relevant_fields:
+            relevant_fields.insert(0, 'тип_изделия')
+        else:
+            # Перемещаем тип_изделия на первое место
+            relevant_fields.remove('тип_изделия')
+            relevant_fields.insert(0, 'тип_изделия')
+
         # Загружаем skip_fields из конфига (ens_column_mapping.yaml)
         skip_fields = self._load_skip_fields()
-        clean_name = lambda n: n.replace('.', '_').replace('-', '_').replace('(', '_').replace(')', '_').replace(',', '_').replace('__', '_').strip('_')
+
+        def clean_name(n: str, max_len: int = 30) -> str:
+            """Очистка имени поля для regex group name + ограничение длины."""
+            result = n.replace('.', '_').replace('-', '_').replace('(', '_').replace(')', '_').replace(',', '_')
+            while '__' in result:
+                result = result.replace('__', '_')
+            result = result.strip('_')
+            if len(result) > max_len:
+                result = result[:max_len].rstrip('_')
+            return result
 
         # Очищаем имена: оригинальное поле -> имя для regex
         field_name_map = {}
+        seen_names = set()
         for f in relevant_fields:
             if f not in skip_fields:
-                field_name_map[f] = clean_name(f)
+                cleaned = clean_name(f)
+                # Обработка дубликатов после обрезки
+                original_cleaned = cleaned
+                suffix = 2
+                while cleaned in seen_names:
+                    suffix_str = f"_{suffix}"
+                    cleaned = original_cleaned[:max_len - len(suffix_str)] + suffix_str
+                    suffix += 1
+                seen_names.add(cleaned)
+                field_name_map[f] = cleaned
+
+        # Убеждаемся что тип_изделия есть в маппинге (ключевое поле)
+        if 'тип_изделия' not in field_name_map:
+            field_name_map['тип_изделия'] = 'тип_изделия'
 
         regex_fields = list(field_name_map.values())
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
@@ -821,7 +856,7 @@ class LLMMaskGenerator:
         examples_text = "\n\n".join(examples_lines)
 
         # stats_lines: очищенное имя + заполненность по оригинальному
-        stats_lines = [f"    {field_name_map.get(k, k)}: {field_stats[k]} из {total}" for k in field_name_map]
+        stats_lines = [f"    {field_name_map.get(k, k)}: {field_stats.get(k, total)} из {total}" for k in field_name_map]
         params_list = json.dumps(regex_fields, ensure_ascii=False)
         required_fields = [field_name_map[k] for k, v in sorted_fields if v == total and k in field_name_map]
         if not required_fields:
@@ -853,10 +888,30 @@ class LLMMaskGenerator:
 
         return result
 
+    def _preprocess_json_text(self, text: str) -> str:
+        r"""
+        Предобработка JSON текста от LLM.
+        LLM часто генерирует regex с одиночными backslash (\s, \d, \w) внутри JSON-строк,
+        что делает JSON невалидным (JSON допускает только \\, \", \/, \b, \f, \n, \r, \t, \uXXXX).
+        Экранируем regex-escapes, сохраняя уже двойные (\\) нетронутыми.
+        """
+        import re
+        # Placeholder для уже двойных backslash
+        placeholder = '\x00DBL\x00'
+        result = text.replace('\\\\', placeholder)
+        # Экранируем одиночные regex backslash: \s -> \\s, \d -> \\d и т.д.
+        result = re.sub(r'\\([sdwSDWbB])', r'\\\\\1', result)
+        # Восстанавливаем двойные
+        result = result.replace(placeholder, '\\\\')
+        return result
+
     def _extract_json(self, text):
         """Извлечение JSON из ответа LLM. Приоритет: ```json блоки, затем все {...}."""
         if not text or not text.strip():
             return None
+
+        # Исправляем невалидные JSON escape от LLM
+        text = self._preprocess_json_text(text)
 
         candidates = []
 
