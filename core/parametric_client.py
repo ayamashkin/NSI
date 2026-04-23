@@ -11,6 +11,51 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Кэш для empty_equivalent_values
+_empty_equiv_cache: Optional[Dict[str, List[str]]] = None
+
+
+def _load_empty_equivalent_values() -> Dict[str, List[str]]:
+    """Загрузка значений, эквивалентных пустым, из ens_column_mapping.yaml."""
+    global _empty_equiv_cache
+    if _empty_equiv_cache is not None:
+        return _empty_equiv_cache
+
+    default = {
+        'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
+    }
+
+    try:
+        import yaml
+        from pathlib import Path
+        for path in ['config/ens_column_mapping.yaml', 'ens_column_mapping.yaml']:
+            if Path(path).exists():
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                equiv = data.get('empty_equivalent_values', {})
+                if equiv:
+                    _empty_equiv_cache = {k: [str(v).strip() for v in vals]
+                                          for k, vals in equiv.items() if vals}
+                    return _empty_equiv_cache
+                break
+    except Exception as e:
+        logger.warning(f"Failed to load empty_equivalent_values: {e}")
+
+    _empty_equiv_cache = default
+    return _empty_equiv_cache
+
+
+def _is_empty_equivalent(field: str, value: Any) -> bool:
+    """Проверяет, является ли значение эквивалентным пустому/None."""
+    if value is None:
+        return True
+    val_str = str(value).strip()
+    if not val_str:
+        return True
+    equiv_values = _load_empty_equivalent_values()
+    empty_vals = equiv_values.get(field, [])
+    return val_str.lower() in [v.lower() for v in empty_vals]
+
 
 @dataclass
 class ParametricMatch:
@@ -177,7 +222,7 @@ class ParametricENSClient:
         required: List[str],
         ens_item: Dict[str, Any]
     ) -> float:
-        """Расчет score сопоставления."""
+        """Расчет score сопоставления с учетом эквивалентности пустых значений."""
         if not required:
             return 0.0
 
@@ -185,10 +230,25 @@ class ParametricENSClient:
         weights = []
 
         for param in required:
-            if param in params and params[param] is not None:
-                # Нормализуем значения
-                query_val = str(params[param]).lower().strip()
-                ens_val = str(ens_item.get(param, '')).lower().strip()
+            query_val_raw = params.get(param)
+            ens_val_raw = ens_item.get(param)
+
+            # Проверяем эквивалентность пустым значениям (БП ≡ None)
+            query_is_empty = query_val_raw is None or _is_empty_equivalent(param, query_val_raw)
+            ens_is_empty = ens_val_raw is None or _is_empty_equivalent(param, ens_val_raw)
+
+            if query_is_empty and ens_is_empty:
+                # Оба пустые (или эквивалентны пустым) — полный match
+                matches += 1
+                weights.append(1.0)
+            elif query_is_empty or ens_is_empty:
+                # Одно пустое, другое заполнено — partial match
+                # (поле опционально, но значения различаются)
+                weights.append(0.5)
+            else:
+                # Оба заполнены — сравниваем значения
+                query_val = str(query_val_raw).lower().strip()
+                ens_val = str(ens_val_raw).lower().strip()
 
                 if query_val == ens_val:
                     matches += 1

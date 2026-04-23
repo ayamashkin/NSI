@@ -763,6 +763,18 @@ class LLMMaskGenerator:
         )
 
 
+    @staticmethod
+    def _format_display_value(val) -> str:
+        """Форматирование значения для отображения в примерах."""
+        if val is None:
+            return ''
+        # float 2.0 -> '2', float 2.5 -> '2.5'
+        if isinstance(val, float):
+            if val == int(val):
+                return str(int(val))
+            return str(val)
+        return str(val)
+
     def _select_diverse_examples(
         self,
         examples: List[Dict[str, Any]],
@@ -891,57 +903,134 @@ class LLMMaskGenerator:
         target_count: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Гарантирует наличие примеров с разными вариантами заполнения опциональных полей.
+        Формирует примеры с вариантами заполнения для КАЖДОГО параметра.
 
-        Для каждого опционального поля ищет в ЕСН записи где оно:
-        - ЗАПОЛНЕНО (уже должны быть в selected)
-        - ПУСТО/None (ищем в all_examples и добавляем в выборку)
+        Для каждого параметра создаёт 2 варианта:
+        - С заполненным значением (из реальных данных ЕСН)
+        - С пропущенным значением (модифицированное наименование без параметра)
 
-        Это даёт LLM понимание что параметр опциональный — даже если
-        большинство записей содержат его.
+        Это даёт LLM понимание как параметр выглядит в строке —
+        и как строка выглядит без него.
         """
+        import copy
+
         result = list(selected)
-        if len(result) >= target_count:
+
+        # Берём один базовый пример для модификации (первый с полным наименованием)
+        base_example = None
+        for ex in all_examples:
+            name = ex.get('полное_наименование') or ex.get('наименование', '')
+            if name and str(name).strip():
+                base_example = ex
+                break
+
+        if not base_example:
             return result
 
-        for opt_field in optional_fields:
-            if opt_field not in display_fields:
-                continue
+        base_name = base_example.get('полное_наименование') or base_example.get('наименование', '')
 
-            # Проверяем: есть ли уже пример БЕЗ этого поля
+        # Для каждого display_field (кроме тип_изделия) создаём вариант без него
+        for field in display_fields:
+            if len(result) >= target_count:
+                break
+
+            if field == 'тип_изделия':
+                continue  # Тип изделия никогда не пропускаем
+
+            # Проверяем: есть ли уже пример с пустым этим полем
             has_empty = any(
-                not (ex.get(opt_field) and str(ex.get(opt_field)).strip())
+                not (ex.get(field) and str(ex.get(field)).strip())
                 for ex in result
             )
             if has_empty:
-                continue  # Уже есть пример с пустым полем
+                continue
 
-            # Ищем в all_examples запись с ПУСТЫМ этим полем
-            empty_example = None
-            for ex in all_examples:
-                val = ex.get(opt_field)
-                if val is None or (isinstance(val, str) and not val.strip()):
-                    # Проверяем что наименование валидное
-                    name = ex.get('полное_наименование') or ex.get('наименование', '')
-                    if name and str(name).strip():
-                        empty_example = ex
-                        break
+            val = base_example.get(field)
+            if not val:
+                continue
 
-            if empty_example:
-                # Проверяем что это не дубликат
-                name_new = empty_example.get('полное_наименование') or empty_example.get('наименование', '')
+            val_str = str(val).strip()
+            if val_str not in base_name:
+                continue
+
+            # Создаём модифицированную копию без этого параметра
+            modified = dict(base_example)
+            modified[field] = None
+
+            # Удаляем значение из наименования
+            new_name = base_name.replace(val_str, '', 1)
+
+            # Чистим артефакты: двойные разделители, пустые скобки и т.д.
+            cleanups = [
+                ('()-', '-'), ('( )-', '-'), ('() ', ' '), ('()', ''),
+                ('  ', ' '), ('--', '-'), ('- -', '-'), ('-  ', ' '),
+                (' - ', ' '), ('  -', ' '), ('. -', '.'), ('-.-', '-'),
+                (' ,', ','), (', ', ','), ('  ', ' '),
+            ]
+            for old, new in cleanups:
+                while old in new_name:
+                    new_name = new_name.replace(old, new)
+            new_name = new_name.strip(' -,.')
+
+            if new_name and new_name != base_name:
+                modified['полное_наименование'] = new_name
+                modified['_variant'] = f"без_{field}"
+
+                # Проверяем что не дублируем
                 existing_names = {
                     (ex.get('полное_наименование') or ex.get('наименование', ''))
                     for ex in result
                 }
-                if name_new not in existing_names:
-                    result.append(empty_example)
+                if new_name not in existing_names:
+                    result.append(modified)
                     logger.info(
-                        f"[LLMMaskGenerator] Добавлен пример с пустым '{opt_field}': "
-                        f"'{name_new}'"
+                        f"[LLMMaskGenerator] Вариант без '{field}': "
+                        f"'{base_name}' -> '{new_name}'"
                     )
-                    if len(result) >= target_count:
-                        break
+
+        # --- Комбинированные варианты: несколько пропущенных параметров ---
+        # Создаём варианты без 2+ параметров одновременно (если есть место)
+        combo_fields = [f for f in display_fields
+                       if f != 'тип_изделия'
+                       and base_example.get(f)
+                       and str(base_example.get(f)).strip()
+                       and str(base_example.get(f)) in base_name][:4]
+
+        for i in range(len(combo_fields)):
+            for j in range(i + 1, len(combo_fields)):
+                if len(result) >= target_count:
+                    break
+
+                f1, f2 = combo_fields[i], combo_fields[j]
+                v1 = str(base_example.get(f1, '')).strip()
+                v2 = str(base_example.get(f2, '')).strip()
+
+                if v1 not in base_name or v2 not in base_name:
+                    continue
+
+                combo = dict(base_example)
+                combo[f1] = None
+                combo[f2] = None
+
+                new_name = base_name.replace(v1, '', 1).replace(v2, '', 1)
+                for old, new in cleanups:
+                    while old in new_name:
+                        new_name = new_name.replace(old, new)
+                new_name = new_name.strip(' -,.')
+
+                if new_name and new_name != base_name:
+                    existing_names = {
+                        (ex.get('полное_наименование') or ex.get('наименование', ''))
+                        for ex in result
+                    }
+                    if new_name not in existing_names:
+                        combo['полное_наименование'] = new_name
+                        combo['_variant'] = f"без_{f1}_и_{f2}"
+                        result.append(combo)
+
+        # Обрезаем до target_count, сохраняя приоритет: оригинальные + варианты
+        if len(result) > target_count:
+            result = result[:target_count]
 
         return result
 
@@ -1014,7 +1103,7 @@ class LLMMaskGenerator:
         # --- Форматирование примеров ---
         # Умный отбор: гарантируем вариативность опциональных параметров
         optional_fields = self._load_optional_fields()
-        diverse_examples = self._select_diverse_examples(examples, display_fields, target_count=10)
+        diverse_examples = self._select_diverse_examples(examples, display_fields, target_count=5)
         sample_examples = self._ensure_diverse_variants(
             diverse_examples, examples, display_fields, optional_fields, target_count=10
         )
@@ -1028,19 +1117,22 @@ class LLMMaskGenerator:
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
-                    filled_fields.append(f"    {field}: {val}")
+                    formatted = self._format_display_value(val)
+                    filled_fields.append(f"    {field}: {formatted}")
 
             # Структура: разбиваем строку на части по найденным параметрам
             structure_parts = []
             remaining = name
             for field in display_fields:
                 val = ex.get(field)
-                if val and str(val) in remaining:
-                    pos = remaining.find(str(val))
-                    if pos > 0:
-                        structure_parts.append(f"[{remaining[:pos].strip()}]")
-                    structure_parts.append(f"(?P<{field}>{str(val)})")
-                    remaining = remaining[pos + len(str(val)):]
+                if val is not None:
+                    disp_val = self._format_display_value(val)
+                    if disp_val and disp_val in remaining:
+                        pos = remaining.find(disp_val)
+                        if pos > 0:
+                            structure_parts.append(f"[{remaining[:pos].strip()}]")
+                        structure_parts.append(f"(?P<{field}>{disp_val})")
+                        remaining = remaining[pos + len(disp_val):]
             if remaining.strip():
                 structure_parts.append(f"[{remaining.strip()}]")
             structure_str = " ".join(structure_parts) if structure_parts else "(не удалось разобрать)"
@@ -1048,18 +1140,26 @@ class LLMMaskGenerator:
             in_text = []
             for field in display_fields:
                 val = ex.get(field)
-                if val and str(val) in name:
-                    in_text.append(f"      {field}='{val}' на позиции {name.find(str(val))}")
+                if val is not None:
+                    disp_val = self._format_display_value(val)
+                    if disp_val and disp_val in name:
+                        in_text.append(f"      {field}='{disp_val}' на позиции {name.find(disp_val)}")
             in_text_str = "\n".join(in_text) if in_text else "      (нет)"
 
             # Mapping оригинальное -> очищенное
             mapping_lines = [f"    # {orig} -> regex: {clean}" for orig, clean in field_name_map.items() if clean != orig][:5]
+
+            # Пометка если это вариант с пропущенным параметром
+            variant_note = ""
+            if ex.get('_variant'):
+                variant_note = f"\n   ВАРИАНТ: {ex['_variant']} (параметр отсутствует в наименовании)"
 
             examples_lines.append(
                 f"{i}. ИСХОДНАЯ СТРОКА: \"{name}\"\n"
                 f"   СТРУКТУРА: {structure_str}\n"
                 f"   ПОЛЯ ЕСН:\n" + "\n".join(filled_fields)
                 + ("\n   MAPPING:\n" + "\n".join(mapping_lines) if mapping_lines else "")
+                + variant_note
                 + f"\n   РАЗБОР:\n{in_text_str}"
             )
         examples_text = "\n\n".join(examples_lines)

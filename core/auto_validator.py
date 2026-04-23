@@ -11,6 +11,22 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Импортируем проверку эквивалентности пустых значений
+try:
+    from core.parametric_client import _is_empty_equivalent
+except ImportError:
+    # Fallback если parametric_client недоступен
+    def _is_empty_equivalent(field: str, value: Any) -> bool:
+        if value is None:
+            return True
+        val_str = str(value).strip()
+        if not val_str:
+            return True
+        empty_vals = {
+            'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
+        }
+        return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
+
 
 @dataclass
 class ValidationResult:
@@ -217,7 +233,17 @@ class AutoValidator:
         # Проверяем наличие required параметров
         missing = []
         for param in required:
-            if param not in extracted or extracted[param] is None or extracted[param] == '':
+            extracted_val = extracted.get(param)
+            expected_val = expected.get(param)
+
+            # Проверяем эквивалентность пустым значениям
+            extracted_empty = extracted_val is None or extracted_val == '' or _is_empty_equivalent(param, extracted_val)
+            expected_empty = expected_val is None or expected_val == '' or _is_empty_equivalent(param, expected_val)
+
+            if extracted_empty and expected_empty:
+                # Оба пустые — OK (опциональный параметр)
+                continue
+            elif extracted_val is None or extracted_val == '':
                 missing.append(param)
 
         success = len(missing) == 0

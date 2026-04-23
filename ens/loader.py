@@ -460,15 +460,9 @@ class ENSLoader:
                 item['тип'] = type_map.get(category, category)
                 item['_implicit_тип'] = True
 
-        # Защита от None - ключевое исправление!
-        item_type = item.get('тип')
-        if item_type is not None and str(item_type).lower() in ['болт', 'винт', 'крепеж'] and not item.get('исполнение'):
-            item['исполнение'] = '1'
-            item['_implicit_исполнение'] = True
-
-        if 'покрытие' in item and not item['покрытие']:
-            item['покрытие'] = 'БП'
-            item['_implicit_покрытие'] = True
+        # НЕ заполняем пустые поля дефолтными значениями —
+        # пустые ячейки в CSV должны оставаться None/пустыми,
+        # чтобы LLM видел что параметр может отсутствовать.
 
     def get_column_info(self) -> Dict[str, Any]:
         """Получение информации о колонках файла."""

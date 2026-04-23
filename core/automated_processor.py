@@ -334,8 +334,25 @@ class AutomatedParametricProcessor:
         """
         Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
         Для текстовых полей (покрытие, материал) использует token-similarity.
+        Учитывает эквивалентность пустых значений (БП ≡ None).
         """
         TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
+
+        # Импортируем проверку эквивалентности
+        try:
+            from core.parametric_client import _is_empty_equivalent
+        except ImportError:
+            def _is_empty_equivalent(field: str, value: Any) -> bool:
+                if value is None:
+                    return True
+                val_str = str(value).strip()
+                if not val_str:
+                    return True
+                empty_vals = {
+                    'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
+                }
+                return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
+
         best_match = None
         best_score = 0.0
 
@@ -344,15 +361,23 @@ class AutomatedParametricProcessor:
             matched_weight = 0.0
 
             for param_name, extracted_val in extracted_params.items():
-                if not extracted_val:
-                    continue
                 weight = 2.0 if param_name in TEXT_FIELDS else 1.0
                 total_weight += weight
 
                 # Ищем соответствующее поле в кандидате ЕСН
                 candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
-                if param_name in TEXT_FIELDS:
+                # Проверяем эквивалентность пустым значениям
+                extracted_empty = not extracted_val or _is_empty_equivalent(param_name, extracted_val)
+                candidate_empty = not candidate_val or _is_empty_equivalent(param_name, candidate_val)
+
+                if extracted_empty and candidate_empty:
+                    # Оба пустые/эквивалентны пустым — полный match
+                    matched_weight += weight
+                elif extracted_empty or candidate_empty:
+                    # Одно пустое, другое заполнено — partial match
+                    matched_weight += weight * 0.5
+                elif param_name in TEXT_FIELDS:
                     sim = self._token_similarity(extracted_val, candidate_val)
                     if sim >= 0.8:  # 80% токенов совпадают
                         matched_weight += weight * sim
