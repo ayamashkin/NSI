@@ -949,8 +949,8 @@ class LLMMaskGenerator:
             if not val:
                 continue
 
-            val_str = str(val).strip()
-            if val_str not in base_name:
+            val_str = self._format_display_value(val)
+            if not val_str or val_str not in base_name:
                 continue
 
             # Создаём модифицированную копию без этого параметра
@@ -1002,10 +1002,10 @@ class LLMMaskGenerator:
                     break
 
                 f1, f2 = combo_fields[i], combo_fields[j]
-                v1 = str(base_example.get(f1, '')).strip()
-                v2 = str(base_example.get(f2, '')).strip()
+                v1 = self._format_display_value(base_example.get(f1))
+                v2 = self._format_display_value(base_example.get(f2))
 
-                if v1 not in base_name or v2 not in base_name:
+                if not v1 or not v2 or v1 not in base_name or v2 not in base_name:
                     continue
 
                 combo = dict(base_example)
@@ -1170,17 +1170,31 @@ class LLMMaskGenerator:
         # Загружаем опциональные поля (не попадают в required никогда)
         optional_fields = self._load_optional_fields()
 
-        # Required: поля с заполненностью >= 95% и не в списке опциональных
+        # Required: поля с заполненностью >= 95%, не опциональные,
+        # и ПРИСУТСТВУЮЩИЕ в полном_наименовании (иначе regex не сможет их извлечь)
         required_threshold = int(total * 0.95)
-        required_fields = [
-            field_name_map[k] for k, v in sorted_fields
-            if v >= required_threshold and k in field_name_map and k not in optional_fields
-        ]
+        required_fields = []
+        for k, v in sorted_fields:
+            if v >= required_threshold and k in field_name_map and k not in optional_fields:
+                # Проверяем что поле встречается в полном_наименовании хотя бы у 1 записи
+                in_any_name = any(
+                    str(ex.get(k, '')).strip() and str(ex.get(k, '')) in str(ex.get('полное_наименование', ''))
+                    for ex in examples
+                )
+                if in_any_name:
+                    required_fields.append(field_name_map[k])
+
         if not required_fields:
-            required_fields = [
-                field_name_map[k] for k, v in sorted_fields
-                if v >= total * 0.8 and k in field_name_map and k not in optional_fields
-            ][:5]
+            for k, v in sorted_fields:
+                if v >= total * 0.8 and k in field_name_map and k not in optional_fields:
+                    in_any_name = any(
+                        str(ex.get(k, '')).strip() and str(ex.get(k, '')) in str(ex.get('полное_наименование', ''))
+                        for ex in examples
+                    )
+                    if in_any_name:
+                        required_fields.append(field_name_map[k])
+                        if len(required_fields) >= 5:
+                            break
         required_list = json.dumps(required_fields, ensure_ascii=False)
         context_text = f"\nДоп. контекст: {json.dumps(context, ensure_ascii=False)}\n" if context else ""
 
