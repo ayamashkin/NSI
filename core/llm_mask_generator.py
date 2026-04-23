@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,26 @@ class LLMMaskGenerator:
                     break
         except Exception as e:
             logger.warning(f"[LLMMaskGenerator] Не удалось загрузить skip_fields: {e}")
+        return default
+
+    def _load_optional_fields(self) -> set:
+        """Загрузка списка опциональных полей из ens_column_mapping.yaml."""
+        # Поля, которые по бизнес-логике могут отсутствовать в номенклатуре
+        # даже если в ЕСН они заполнены у 100% записей
+        default = {'исполнение'}
+        try:
+            import yaml
+            from pathlib import Path
+            for path in ['config/ens_column_mapping.yaml', 'ens_column_mapping.yaml']:
+                if Path(path).exists():
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    fields = data.get('optional_fields', [])
+                    if fields:
+                        return set(fields)
+                    break
+        except Exception as e:
+            logger.warning(f"[LLMMaskGenerator] Не удалось загрузить optional_fields: {e}")
         return default
 
     def _get_prompt_config(self, prompt_id: Optional[str] = None) -> Optional[Any]:
@@ -741,6 +762,189 @@ class LLMMaskGenerator:
             "Не добавляйте в ответ никаких других объектов или комментариев, кроме итогового JSON."
         )
 
+
+    def _select_diverse_examples(
+        self,
+        examples: List[Dict[str, Any]],
+        display_fields: List[str],
+        target_count: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Умный отбор примеров с разным набором параметров.
+
+        Гарантирует, что в выборку попадут примеры, демонстрирующие вариативность
+        заполнения опциональных полей (например, с исполнением и без).
+
+        Алгоритм:
+        1. Анализирует заполненность полей по ВСЕМ примерам
+        2. Находит "вариативные" поля (заполненность 5%-95%)
+        3. Группирует примеры по "сигнатуре" заполненности вариативных полей
+        4. Выбирает примеры из разных групп для максимального покрытия вариантов
+        5. Дополняет оставшимися примерами до target_count
+        """
+        if len(examples) <= target_count:
+            return examples
+
+        total = len(examples)
+
+        # Считаем заполненность каждого поля
+        field_stats = {}
+        for ex in examples:
+            for field in display_fields:
+                val = ex.get(field)
+                if val is not None and str(val).strip():
+                    field_stats[field] = field_stats.get(field, 0) + 1
+
+        # Находим вариативные поля (не 100% и не 0% заполненность)
+        # Это потенциально опциональные параметры
+        variable_fields = []
+        for field in display_fields:
+            count = field_stats.get(field, 0)
+            ratio = count / total
+            if 0.05 < ratio < 0.95:  # Поле заполнено у 5-95% записей
+                variable_fields.append(field)
+
+        if not variable_fields:
+            # Нет явно вариативных полей — отбираем с максимальным разнообразием
+            # по полному наименованию (разные длины, разные значения)
+            seen_names = set()
+            diverse = []
+            for ex in examples:
+                name = ex.get('полное_наименование') or ex.get('наименование', '')
+                if name and name not in seen_names:
+                    seen_names.add(name)
+                    diverse.append(ex)
+                if len(diverse) >= target_count:
+                    return diverse
+            # Если не набрали достаточно уникальных — добавляем оставшиеся
+            already_ids = {id(ex) for ex in diverse}
+            for ex in examples:
+                if id(ex) not in already_ids:
+                    diverse.append(ex)
+                if len(diverse) >= target_count:
+                    break
+            return diverse
+
+        # Группируем примеры по сигнатуре вариативных полей
+        # Сигнатура — битовая маска: какие вариативные поля заполнены
+        signature_groups = defaultdict(list)
+
+        for ex in examples:
+            sig_parts = []
+            for field in variable_fields:
+                val = ex.get(field)
+                is_filled = val is not None and str(val).strip()
+                sig_parts.append('1' if is_filled else '0')
+            signature = ''.join(sig_parts)
+            signature_groups[signature].append(ex)
+
+        # Отбираем примеры: по одному из каждой группы
+        # Приоритет группам с разными сигнатурами (максимально информативные)
+        selected = []
+        selected_ids = set()
+
+        # Сортируем сигнатуры: приоритет тем, где ~50% полей заполнено
+        # (максимальная информативность о вариативности)
+        # Затем по размеру группы (крупнее = более репрезентативна)
+        sorted_sigs = sorted(
+            signature_groups.keys(),
+            key=lambda s: (abs(s.count('1') - len(variable_fields)/2), -len(signature_groups[s]))
+        )
+
+        for sig in sorted_sigs:
+            group = signature_groups[sig]
+            # Берём первый пример из группы
+            ex = group[0]
+            if id(ex) not in selected_ids:
+                selected.append(ex)
+                selected_ids.add(id(ex))
+            if len(selected) >= target_count:
+                return selected
+
+        # Если ещё не набрали target_count — добавляем по второму примеру из крупных групп
+        for sig in sorted_sigs:
+            group = signature_groups[sig]
+            if len(group) > 1:
+                for ex in group[1:]:
+                    if id(ex) not in selected_ids:
+                        selected.append(ex)
+                        selected_ids.add(id(ex))
+                    if len(selected) >= target_count:
+                        return selected
+
+        # Если всё ещё не хватает — дополняем оставшимися примерами
+        for ex in examples:
+            if id(ex) not in selected_ids:
+                selected.append(ex)
+                selected_ids.add(id(ex))
+            if len(selected) >= target_count:
+                break
+
+        return selected
+
+    def _ensure_diverse_variants(
+        self,
+        selected: List[Dict[str, Any]],
+        all_examples: List[Dict[str, Any]],
+        display_fields: List[str],
+        optional_fields: set,
+        target_count: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Гарантирует наличие примеров с разными вариантами заполнения опциональных полей.
+
+        Для каждого опционального поля ищет в ЕСН записи где оно:
+        - ЗАПОЛНЕНО (уже должны быть в selected)
+        - ПУСТО/None (ищем в all_examples и добавляем в выборку)
+
+        Это даёт LLM понимание что параметр опциональный — даже если
+        большинство записей содержат его.
+        """
+        result = list(selected)
+        if len(result) >= target_count:
+            return result
+
+        for opt_field in optional_fields:
+            if opt_field not in display_fields:
+                continue
+
+            # Проверяем: есть ли уже пример БЕЗ этого поля
+            has_empty = any(
+                not (ex.get(opt_field) and str(ex.get(opt_field)).strip())
+                for ex in result
+            )
+            if has_empty:
+                continue  # Уже есть пример с пустым полем
+
+            # Ищем в all_examples запись с ПУСТЫМ этим полем
+            empty_example = None
+            for ex in all_examples:
+                val = ex.get(opt_field)
+                if val is None or (isinstance(val, str) and not val.strip()):
+                    # Проверяем что наименование валидное
+                    name = ex.get('полное_наименование') or ex.get('наименование', '')
+                    if name and str(name).strip():
+                        empty_example = ex
+                        break
+
+            if empty_example:
+                # Проверяем что это не дубликат
+                name_new = empty_example.get('полное_наименование') or empty_example.get('наименование', '')
+                existing_names = {
+                    (ex.get('полное_наименование') or ex.get('наименование', ''))
+                    for ex in result
+                }
+                if name_new not in existing_names:
+                    result.append(empty_example)
+                    logger.info(
+                        f"[LLMMaskGenerator] Добавлен пример с пустым '{opt_field}': "
+                        f"'{name_new}'"
+                    )
+                    if len(result) >= target_count:
+                        break
+
+        return result
+
     def _build_prompt(self, standard, item_type, examples, context):
         """
         Построение промпта для LLM-генерации regex-маски.
@@ -808,7 +1012,12 @@ class LLMMaskGenerator:
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
         # --- Форматирование примеров ---
-        sample_examples = examples[:10]
+        # Умный отбор: гарантируем вариативность опциональных параметров
+        optional_fields = self._load_optional_fields()
+        diverse_examples = self._select_diverse_examples(examples, display_fields, target_count=10)
+        sample_examples = self._ensure_diverse_variants(
+            diverse_examples, examples, display_fields, optional_fields, target_count=10
+        )
         examples_lines = []
         for i, ex in enumerate(sample_examples, 1):
             name = ex.get('полное_наименование') or ex.get('наименование', '')
@@ -858,9 +1067,20 @@ class LLMMaskGenerator:
         # stats_lines: очищенное имя + заполненность по оригинальному
         stats_lines = [f"    {field_name_map.get(k, k)}: {field_stats.get(k, total)} из {total}" for k in field_name_map]
         params_list = json.dumps(regex_fields, ensure_ascii=False)
-        required_fields = [field_name_map[k] for k, v in sorted_fields if v == total and k in field_name_map]
+        # Загружаем опциональные поля (не попадают в required никогда)
+        optional_fields = self._load_optional_fields()
+
+        # Required: поля с заполненностью >= 95% и не в списке опциональных
+        required_threshold = int(total * 0.95)
+        required_fields = [
+            field_name_map[k] for k, v in sorted_fields
+            if v >= required_threshold and k in field_name_map and k not in optional_fields
+        ]
         if not required_fields:
-            required_fields = [field_name_map[k] for k, v in sorted_fields if v >= total * 0.8 and k in field_name_map][:5]
+            required_fields = [
+                field_name_map[k] for k, v in sorted_fields
+                if v >= total * 0.8 and k in field_name_map and k not in optional_fields
+            ][:5]
         required_list = json.dumps(required_fields, ensure_ascii=False)
         context_text = f"\nДоп. контекст: {json.dumps(context, ensure_ascii=False)}\n" if context else ""
 
