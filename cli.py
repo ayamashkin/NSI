@@ -429,10 +429,19 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             'level': result.level.value,
             'success': result.success,
             'params': result.params,
+            'item_type': result.item_type,
+            'standard': result.standard,
+            'ens_params': result.ens_params,
             'ens_code': result.ens_match.get('code') if result.ens_match else None,
+            'ens_name': result.ens_name,
             'confidence': result.confidence,
             'processing_time_ms': result.processing_time_ms
         }
+
+        # Добавляем mask_pattern из details если есть
+        if result.details and result.details.get('mask_pattern'):
+            row['mask_pattern'] = result.details['mask_pattern']
+
         if include_details and result.details:
             row['details'] = result.details
 

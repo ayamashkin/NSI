@@ -233,6 +233,14 @@ python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json --include-details
 ```
 
+
+```bash
+# вызовы для отладки
+python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/hardware2/ens_hardware.pkl    
+python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm      
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o results.json
+```
+
 ## CLI Команды
 
 ### Обработка

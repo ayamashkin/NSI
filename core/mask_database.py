@@ -242,13 +242,22 @@ class MaskDatabase:
             conn.commit()
             logger.info(f"Database initialized: {self.db_path}")
 
-    def save_mask(self, mask: MaskRecord, auto_activate: bool = True) -> Optional[int]:
+    def save_mask(
+        self,
+        mask: MaskRecord,
+        auto_activate: bool = True,
+        replace_existing: bool = False
+    ) -> Optional[int]:
         """
-        Сохранение маски.
+        Сохранение маски с опциональной дедупликацией.
 
         Args:
             mask: Запись маски
             auto_activate: Автоматически активировать если score >= 0.85
+            replace_existing: Если True — искать существующую маску для
+                              (standard, item_type) и обновлять вместо создания новой.
+                              Предотвращает дубликаты когда LLM генерирует
+                              немного разные regex для одного стандарта.
 
         Returns:
             ID сохраненной маски или None при ошибке
@@ -262,6 +271,53 @@ class MaskDatabase:
                     mask.is_active = True
                     logger.info(f"Auto-activating mask for {mask.standard} (score: {mask.auto_score:.2f})")
 
+                # --- Семантическая дедупликация ---
+                existing_id = None
+                if replace_existing:
+                    # Ищем ЛЮБУЮ маску для этой пары (standard, item_type)
+                    cursor.execute("""
+                        SELECT id, auto_score, pattern FROM masks 
+                        WHERE standard = ? AND item_type = ?
+                        ORDER BY auto_score DESC, usage_count DESC
+                        LIMIT 1
+                    """, (mask.standard, mask.item_type))
+                    existing = cursor.fetchone()
+                    if existing:
+                        existing_id = existing['id']
+                        existing_score = existing['auto_score'] or 0.0
+                        # Обновляем только если новая маска лучше или равна
+                        if mask.auto_score >= existing_score:
+                            logger.info(
+                                f"[Dedup] Замена маски #{existing_id} "
+                                f"(score={existing_score:.2f}) на новую "
+                                f"(score={mask.auto_score:.2f}) для "
+                                f"{mask.standard}/{mask.item_type}"
+                            )
+                            mask_data = mask.to_dict()
+                            mask_data['pattern_hash'] = mask.pattern_hash
+                            cursor.execute("""
+                                UPDATE masks SET
+                                    pattern = :pattern,
+                                    params = :params,
+                                    required = :required,
+                                    auto_score = :auto_score,
+                                    is_active = :is_active,
+                                    test_examples = :test_examples,
+                                    pattern_hash = :pattern_hash,
+                                    last_used = CURRENT_TIMESTAMP
+                                WHERE id = :existing_id
+                            """, {**mask_data, 'existing_id': existing_id})
+                            conn.commit()
+                            return existing_id
+                        else:
+                            logger.info(
+                                f"[Dedup] Существующая маска #{existing_id} "
+                                f"(score={existing_score:.2f}) лучше новой "
+                                f"(score={mask.auto_score:.2f}), пропускаем"
+                            )
+                            return existing_id
+
+                # --- Обычное сохранение (upsert по pattern_hash) ---
                 mask_data = mask.to_dict()
                 mask_data['pattern_hash'] = mask.pattern_hash
 
@@ -366,7 +422,7 @@ class MaskDatabase:
         return None
 
     def list_masks(
-        self, 
+        self,
         standard: Optional[str] = None,
         item_type: Optional[str] = None,
         is_active: Optional[bool] = None,
@@ -430,7 +486,7 @@ class MaskDatabase:
             logger.error(f"Failed to update mask score: {e}")
             return False
 
-    def log_validation(self, mask_id: int, test_count: int, success_count: int, 
+    def log_validation(self, mask_id: int, test_count: int, success_count: int,
                        score: float, details: Dict):
         """Логирование валидации."""
         try:

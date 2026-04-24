@@ -114,13 +114,24 @@ class PromptConfig:
 @dataclass
 class MaskGenerationConfig:
     """Конфигурация генерации масок (fallback при отсутствии prompts.yaml)."""
-    default_service: str = "mws"                     # "openwebui", "mws", "gigachat"
-    default_model: str = "qwen2.5-72b-instruct"      # Модель fallback
-    default_temperature: float = 0.1                 # Температура fallback
-    keyword_match_from_name: bool = True             # Искать keywords в полном наименовании
+    default_service: str = "mws"
+    default_model: str = "qwen2.5-72b-instruct"
+    default_temperature: float = 0.1
+    keyword_match_from_name: bool = True
     prompt_template: str = "prompts/templates/mask_generation.txt"
-    save_debug_prompts: bool = True                  # Сохранять промпты для отладки
-    debug_prompts_dir: str = "prompts/debug"          # Папка для сохранения промптов
+    save_debug_prompts: bool = True
+    debug_prompts_dir: str = "prompts/debug"
+    deduplicate_by_standard_type: bool = False       # Не создавать дубликаты масок
+
+@dataclass
+class OutputConfig:
+    """Конфигурация вывода результатов."""
+    include_mask_pattern: bool = False               # Добавлять regex в результат
+    include_ens_details: bool = True                 # Добавлять ENS имя, fuzzy score
+    ens_params_skip_fields: List[str] = field(default_factory=lambda: [
+        '_id', '_index', '_source', 'id', 'created_at', 'updated_at', 'hash', 'pattern_hash'
+    ])
+
 
 @dataclass
 class Settings:
@@ -134,6 +145,7 @@ class Settings:
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     prompts: Dict[str, PromptConfig] = field(default_factory=dict)
     mask_generation: MaskGenerationConfig = field(default_factory=MaskGenerationConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
 
     @classmethod
     def load(cls, config_path: str = "config/config.yaml",
@@ -183,7 +195,8 @@ class Settings:
             database=DatabaseConfig(**config_data.get('database', {})),
             processing=ProcessingConfig(**config_data.get('processing', {})),
             prompts=prompt_configs,
-            mask_generation=MaskGenerationConfig(**config_data.get('mask_generation', {}))
+            mask_generation=MaskGenerationConfig(**config_data.get('mask_generation', {})),
+            output=OutputConfig(**config_data.get('output', {}))
         )
 
     @staticmethod

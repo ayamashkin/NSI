@@ -40,6 +40,16 @@ class StandardInfo:
             return f"{self.standard_type.value} {self.standard_number}-{self.year}"
         return f"{self.standard_type.value} {self.standard_number}"
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Сериализация для JSON."""
+        return {
+            'standard_type': self.standard_type.value if self.standard_type else None,
+            'standard_number': self.standard_number,
+            'year': self.year,
+            'full_name': self.full_name,
+            'normalized': self.normalized,
+        }
+
 
 class StandardExtractor:
     """

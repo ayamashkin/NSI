@@ -21,9 +21,7 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
     if _empty_equiv_cache is not None:
         return _empty_equiv_cache
 
-    default = {
-        'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
-    }
+    default = {}  # Загружается из ens_column_mapping.yaml
 
     try:
         import yaml
@@ -43,6 +41,68 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
 
     _empty_equiv_cache = default
     return _empty_equiv_cache
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """
+    Fuzzy similarity для текстовых параметров (покрытие, материал).
+
+    1. Exact match: 'Кд' == 'Кд' = 1.0
+    2. Prefix match: 'Кд' ~ 'Кд9.хр' = 0.8 (короткий токен — префикс длинного)
+    3. Substring match: 'Хим.Пас' in 'Хим.Пас' = 1.0
+    4. Token Jaccard: 'Окс.Фос' ~ 'Фос.Окс' = 1.0
+    """
+    import re
+    if not a or not b:
+        return 0.0
+
+    a_str = str(a).lower().strip()
+    b_str = str(b).lower().strip()
+
+    # Exact match
+    if a_str == b_str:
+        return 1.0
+
+    # Substring match
+    if a_str in b_str or b_str in a_str:
+        # Масштабируем по длине: чем больше разница, тем меньше score
+        ratio = min(len(a_str), len(b_str)) / max(len(a_str), len(b_str))
+        return 0.5 + ratio * 0.3  # 0.5..0.8
+
+    # Token-based Jaccard с удалением цифр
+    def _extract_tokens(text):
+        raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
+        cleaned = []
+        for t in raw:
+            letters = re.sub(r'[0-9]', '', t)
+            if letters:
+                cleaned.append(letters)
+        return set(cleaned)
+
+    tokens_a = _extract_tokens(a_str)
+    tokens_b = _extract_tokens(b_str)
+
+    if not tokens_a or not tokens_b:
+        return 0.0
+
+    # Jaccard
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    jaccard = len(intersection) / len(union) if union else 0.0
+
+    # Prefix matching между токенами
+    prefix_matches = 0
+    for ta in tokens_a:
+        for tb in tokens_b:
+            if tb.startswith(ta) or ta.startswith(tb):
+                ratio = min(len(ta), len(tb)) / max(len(ta), len(tb))
+                prefix_matches += ratio
+
+    max_pairs = len(tokens_a) * len(tokens_b)
+    prefix_bonus = prefix_matches / max_pairs if max_pairs > 0 else 0.0
+
+    final = max(jaccard, prefix_bonus * 0.8)
+    return min(final, 1.0)
 
 
 def _is_empty_equivalent(field: str, value: Any) -> bool:
@@ -102,6 +162,51 @@ class ParametricENSClient:
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
 
+    @staticmethod
+    def _relax_pattern(pattern: str) -> str:
+        """
+        Исправления regex-масок для корректного matching'а:
+        1. Латинская t/a → русская т/а в типах изделий (Винt → Винт)
+        2. \s* после )? опциональной группы
+        3. \s* перед \( в опциональной группе (пробел ДО скобки)
+        4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (запятая как разделитель)
+        5. ОСТ1 → ОСТ\s*1 (пробел между ОСТ и цифрой)
+        """
+        relaxed = pattern
+
+        # 1. Латинская t/a → русская т/а в типах изделий
+        relaxed = relaxed.replace('Винt', 'Винт')
+        relaxed = relaxed.replace('Болt', 'Болт')
+        relaxed = relaxed.replace('Шайбa', 'Шайба')
+        relaxed = relaxed.replace('Гайкa', 'Гайка')
+
+        # 2. )?(?P< → )?\s*(?P<
+        relaxed = relaxed.replace(')?(?P<', ')?\\s*(?P<')
+
+        # 3. (?:( → (?:\s*\(
+        relaxed = relaxed.replace('(?:(', '(?:\\s*\\(')
+
+        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)?
+        relaxed = relaxed.replace('\\d+(?:\\.\\d+)?', '\\d+(?:[.,]\\d+)?')
+
+        # 5. ОСТ1 → ОСТ\s*1 (только если еще не экранировано)
+        if 'ОСТ\\s*1' not in relaxed:
+            relaxed = relaxed.replace('ОСТ1', 'ОСТ\\s*1')
+
+        # Проверяем что результат — валидный regex
+        try:
+            re.compile(relaxed)
+        except re.error as e:
+            logger.warning(
+                f"_relax_pattern produced invalid regex: {e}. "
+                f"Falling back to original pattern. "
+                f"Original (50 chars): {pattern[:50]!r}. "
+                f"Relaxed (50 chars): {relaxed[:50]!r}"
+            )
+            return pattern
+
+        return relaxed
+
     def _load_ens_index(self):
         """Загрузка индекса ЕСН."""
         try:
@@ -117,7 +222,8 @@ class ParametricENSClient:
         self,
         text: str,
         standard: Optional[str] = None,
-        item_type: Optional[str] = None
+        item_type: Optional[str] = None,
+        pattern: Optional[str] = None
     ) -> ParametricMatch:
         """
         Параметрическое сопоставление.
@@ -150,13 +256,24 @@ class ParametricENSClient:
                     extracted_type
                 )
 
-        # Шаг 2: Применяем маску
-        if mask:
-            extracted_params = self._apply_mask(mask.pattern, text)
+        # Шаг 2: Применяем маску (с релаксацией для совместимости)
+        # Если pattern передан напрямую — используем его (skip БД)
+        effective_mask = mask
+        if pattern and not mask:
+            # Создаём временный mask-like объект
+            from types import SimpleNamespace
+            effective_mask = SimpleNamespace(
+                pattern=pattern, required=[], id=-1
+            )
+
+        if effective_mask:
+            relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern)
+            extracted_params = self._apply_mask(relaxed_pattern, text)
 
             if extracted_params:
                 # Шаг 3: Ищем в ЕСН
-                match_result = self._find_in_ens(extracted_params, mask.required)
+                required = getattr(effective_mask, 'required', [])
+                match_result = self._find_in_ens(extracted_params, required)
 
                 if match_result:
                     return ParametricMatch(
@@ -165,8 +282,14 @@ class ParametricENSClient:
                         matched_params=extracted_params,
                         score=match_result.get('_match_score', 0.0),
                         match_type=match_result.get('_match_type', 'exact'),
-                        confidence=self._calculate_confidence(extracted_params, mask.required),
-                        details={'mask_id': mask.id, 'pattern': mask.pattern}
+                        confidence=self._calculate_confidence(
+                            extracted_params,
+                            getattr(effective_mask, 'required', [])
+                        ),
+                        details={
+                            'mask_id': getattr(effective_mask, 'id', None),
+                            'pattern': getattr(effective_mask, 'pattern', None)
+                        }
                     )
 
         # Fallback: TF-IDF поиск
@@ -192,7 +315,8 @@ class ParametricENSClient:
             if match:
                 return match.groupdict()
         except re.error as e:
-            logger.error(f"Invalid mask pattern: {e}")
+            # Логируем маску для диагностики — показываем первые 200 символов
+            logger.error(f"Invalid mask pattern: {e}. Pattern (first 200 chars): {pattern[:200]!r}")
 
         return None
 
@@ -258,6 +382,15 @@ class ParametricENSClient:
                     weights.append(0.5)
                 else:
                     weights.append(0.0)
+
+                # Fuzzy matching fallback для текстовых полей
+                if weights[-1] == 0.0:
+                    TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
+                    if param in TEXT_FIELDS:
+                        sim = _text_similarity(query_val, ens_val)
+                        if sim >= 0.5:
+                            weights[-1] = sim
+                            matches += sim
 
         if not weights:
             return 0.0

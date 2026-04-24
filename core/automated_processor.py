@@ -36,6 +36,10 @@ class ProcessingResult:
     confidence: float
     processing_time_ms: float
     details: Dict[str, Any]
+    ens_name: Optional[str] = None
+    item_type: Optional[str] = None
+    standard: Optional[str] = None
+    ens_params: Optional[Dict[str, Any]] = None
 
 
 class AutomatedParametricProcessor:
@@ -301,7 +305,78 @@ class AutomatedParametricProcessor:
         return None
 
     @staticmethod
-    def _token_similarity(a: str, b: str) -> float:
+    def _format_ens_value(value: Any) -> Any:
+        """
+        Форматирование значения из ЕСН для вывода.
+        - float 3.0 → 3 (int)
+        - float 46.0 → 46 (int)
+        - str "3.0" → "3"
+        - str "46.0" → "46"
+        - остальное без изменений
+        """
+        if value is None:
+            return None
+        if isinstance(value, float):
+            if value == int(value):
+                return int(value)
+            return value
+        if isinstance(value, str):
+            # Пробуем убрать .0 из строк
+            try:
+                f = float(value)
+                if f == int(f):
+                    return str(int(f))
+            except ValueError:
+                pass
+        return value
+
+    @staticmethod
+    def _relax_pattern(pattern: str) -> str:
+        r"""
+        Исправления regex-масок для корректного matching'а:
+        1. Латинская t/a → русская т/а в типах изделий (Винt → Винт)
+        2. \\s* после )? опциональной группы
+        3. \\s* перед \\( в опциональной группе (пробел ДО скобки)
+        4. \\d+(?:\\.\\d+)? → \\d+(?:[.,]\\d+)? (запятая как разделитель)
+        5. ОСТ1 → ОСТ\\s*1 (пробел между ОСТ и цифрой)
+        """
+        relaxed = pattern
+
+        # 1. Латинская t/a → русская т/а в типах изделий
+        relaxed = relaxed.replace('Винt', 'Винт')
+        relaxed = relaxed.replace('Болt', 'Болт')
+        relaxed = relaxed.replace('Шайбa', 'Шайба')
+        relaxed = relaxed.replace('Гайкa', 'Гайка')
+
+        # 2. )?(?P< → )?\s*(?P<
+        relaxed = relaxed.replace(')?(?P<', ')?\\s*(?P<')
+
+        # 3. (?:( → (?:\s*\(
+        relaxed = relaxed.replace('(?:(', '(?:\\s*\\(')
+
+        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)?
+        relaxed = relaxed.replace('\\d+(?:\\.\\d+)?', '\\d+(?:[.,]\\d+)?')
+
+        # 5. ОСТ1 → ОСТ\s*1 (только если еще не экранировано)
+        if 'ОСТ\\s*1' not in relaxed:
+            relaxed = relaxed.replace('ОСТ1', 'ОСТ\\s*1')
+
+        # Проверяем что результат — валидный regex
+        import re as _re_check
+        try:
+            _re_check.compile(relaxed)
+        except _re_check.error as e:
+            logger.warning(
+                f"_relax_pattern produced invalid regex: {e}. "
+                f"Falling back to original. "
+                f"Original (50ch): {pattern[:50]!r}, "
+                f"Relaxed (50ch): {relaxed[:50]!r}"
+            )
+            return pattern
+
+        return relaxed
+
+    def _token_similarity(self, a: str, b: str) -> float:
         """
         Token-based Jaccard similarity для текстовых параметров.
         Решает проблему перестановки токенов: 'Окс.Фос.ЭФП' ~ 'Фос.Окс.ЭФП' = 100%
@@ -334,25 +409,8 @@ class AutomatedParametricProcessor:
         """
         Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
         Для текстовых полей (покрытие, материал) использует token-similarity.
-        Учитывает эквивалентность пустых значений (БП ≡ None).
         """
         TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
-
-        # Импортируем проверку эквивалентности
-        try:
-            from core.parametric_client import _is_empty_equivalent
-        except ImportError:
-            def _is_empty_equivalent(field: str, value: Any) -> bool:
-                if value is None:
-                    return True
-                val_str = str(value).strip()
-                if not val_str:
-                    return True
-                empty_vals = {
-                    'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
-                }
-                return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
-
         best_match = None
         best_score = 0.0
 
@@ -361,23 +419,15 @@ class AutomatedParametricProcessor:
             matched_weight = 0.0
 
             for param_name, extracted_val in extracted_params.items():
+                if not extracted_val:
+                    continue
                 weight = 2.0 if param_name in TEXT_FIELDS else 1.0
                 total_weight += weight
 
                 # Ищем соответствующее поле в кандидате ЕСН
                 candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
-                # Проверяем эквивалентность пустым значениям
-                extracted_empty = not extracted_val or _is_empty_equivalent(param_name, extracted_val)
-                candidate_empty = not candidate_val or _is_empty_equivalent(param_name, candidate_val)
-
-                if extracted_empty and candidate_empty:
-                    # Оба пустые/эквивалентны пустым — полный match
-                    matched_weight += weight
-                elif extracted_empty or candidate_empty:
-                    # Одно пустое, другое заполнено — partial match
-                    matched_weight += weight * 0.5
-                elif param_name in TEXT_FIELDS:
+                if param_name in TEXT_FIELDS:
                     sim = self._token_similarity(extracted_val, candidate_val)
                     if sim >= 0.8:  # 80% токенов совпадают
                         matched_weight += weight * sim
@@ -416,36 +466,24 @@ class AutomatedParametricProcessor:
 
         # Fallback: если маска не сработала (score=0), пробуем "ослабленную" версию
         # где обязательные скобки/группы делаем опциональными
-        relaxed_result = None
         if match_result.score == 0 and not match_result.matched_params:
             try:
                 relaxed_pattern = self._relax_pattern(mask.pattern)
                 if relaxed_pattern != mask.pattern:
-                    # Создаём временную маску с ослабленным паттерном
-                    relaxed_mask = type(mask)(
-                        id=getattr(mask, 'id', -1),
-                        standard=mask.standard,
-                        item_type=mask.item_type,
-                        pattern=relaxed_pattern,
-                        params=mask.params,
-                        required=mask.required,
-                        auto_score=getattr(mask, 'auto_score', 0),
-                        is_active=True,
-                        source='relaxed',
-                        usage_count=0,
-                        test_examples='[]',
-                        created_at='',
-                        last_used='',
-                        pattern_hash=''
-                    )
-                    relaxed_result = self.parametric_client.match(
-                        text=text,
-                        standard=mask.standard,
-                        item_type=mask.item_type
-                    )
-                    if relaxed_result.score > 0:
-                        logger.info(f"[PARAM_MATCH] Relaxed pattern matched: score={relaxed_result.score}")
-                        match_result = relaxed_result
+                    # Напрямую применяем ослабленный паттерн (без повторного _relax_pattern)
+                    extracted = self.parametric_client._apply_mask(relaxed_pattern, text)
+                    if extracted:
+                        found = self.parametric_client._find_in_ens(extracted, mask.required)
+                        if found:
+                            match_result = type('obj', (object,), {
+                                'ens_code': found.get('код'),
+                                'mdm_key': found.get('mdm_key'),
+                                'matched_params': extracted,
+                                'score': found.get('_match_score', 0.0),
+                                'match_type': found.get('_match_type', 'partial'),
+                                'confidence': len([v for v in extracted.values() if v is not None]) / len(mask.required) if mask.required else 0.5,
+                            })()
+                            logger.info(f"[PARAM_MATCH] Relaxed pattern matched: score={match_result.score}")
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] Relaxed pattern error: {e}")
 
@@ -453,6 +491,7 @@ class AutomatedParametricProcessor:
         # пробуем token-based matching для текстовых параметров (покрытие, материал)
         fuzzy_ens_code = None
         fuzzy_score = 0.0
+        fuzzy_match = None
         if match_result.score < 0.7 or not match_result.ens_code:
             try:
                 # Получаем кандидатов из ЕСН
@@ -469,14 +508,76 @@ class AutomatedParametricProcessor:
         # Используем лучший результат (fuzzy или обычный)
         final_ens_code = match_result.ens_code or fuzzy_ens_code
         final_score = max(match_result.score, fuzzy_score)
-        final_matched_params = match_result.matched_params
+        # Форматируем params — убираем .0 из строковых значений
+        final_matched_params = {
+            k: self._format_ens_value(v)
+            for k, v in (match_result.matched_params or {}).items()
+        }
+
+        # Получаем наименование из ЕСН
+        ens_name = None
+        if fuzzy_ens_code and fuzzy_match:
+            ens_name = fuzzy_match.get('полное_наименование') or fuzzy_match.get('наименование')
+        elif match_result.ens_code:
+            try:
+                items = self.parametric_client._ens_index.get('items', [])
+                for item in items:
+                    if str(item.get('код')) == str(match_result.ens_code):
+                        ens_name = item.get('полное_наименование') or item.get('наименование')
+                        break
+            except Exception:
+                pass
+
+        # Получаем параметры из ЕСН (ens_params)
+        ens_params = None
+        if final_ens_code:
+            try:
+                items = self.parametric_client._ens_index.get('items', [])
+                # Ищем запись в ЕСН по ключевым полям (поиск НЕ зависит от skip_fields!)
+                matched_item = None
+                search_keys = ['код', 'id', 'ens_code', 'код_ЕСН']
+                for item in items:
+                    for key in search_keys:
+                        item_code = item.get(key)
+                        if item_code is not None:
+                            # Нормализуем для сравнения: float 1000380669.0 == str "1000380669"
+                            try:
+                                if str(int(float(item_code))) == str(int(float(final_ens_code))):
+                                    matched_item = item
+                                    break
+                            except (ValueError, TypeError):
+                                if str(item_code).strip() == str(final_ens_code).strip():
+                                    matched_item = item
+                                    break
+                    if matched_item:
+                        break
+
+                if matched_item:
+                    # Загружаем skip_fields из конфига — ТОЛЬКО для фильтрации вывода
+                    skip_fields = []
+                    if hasattr(self, 'settings') and self.settings and self.settings.output:
+                        skip_fields = self.settings.output.ens_params_skip_fields or []
+                    # Формируем ens_params: убираем skip_fields + пустые + служебные (_*)
+                    ens_params = {
+                        k: self._format_ens_value(v)
+                        for k, v in matched_item.items()
+                        if v is not None
+                           and str(v).strip()
+                           and not k.startswith('_')
+                           and k not in skip_fields
+                    }
+            except Exception as e:
+                logger.warning(f"[ENS] Не удалось получить ens_params: {e}")
+
+        # Используем confidence как переменную (regex match confidence)
+        confidence = max(match_result.confidence, fuzzy_score)
 
         processing_time = (time.time() - start_time) * 1000
 
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
-            success=final_score > 0.5,
+            success=len(final_matched_params) > 0 and confidence > 0.5,
             params=final_matched_params,
             ens_match={
                 'code': final_ens_code,
@@ -484,12 +585,16 @@ class AutomatedParametricProcessor:
                 'score': final_score,
                 'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type
             } if final_ens_code else None,
-            confidence=max(match_result.confidence, fuzzy_score),
+            ens_name=ens_name,
+            confidence=confidence,
             processing_time_ms=processing_time,
+            item_type=mask.item_type,
+            standard=mask.standard,
+            ens_params=ens_params,
             details={
                 'mask_id': mask.id,
                 'mask_pattern': mask.pattern,
-                'extracted_standard': extracted.get('standard_info'),
+                'extracted_standard': extracted.get('standard_info').to_dict() if extracted.get('standard_info') else None,
                 'extracted_type': extracted.get('item_type'),
                 'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code
             }
@@ -514,14 +619,19 @@ class AutomatedParametricProcessor:
             level=ProcessingLevel.LEVEL_7_TFIDF_FALLBACK,
             success=False,
             params={},
-            ens_match=None,  # Не возвращаем match без параметров
+            ens_match=None,
             confidence=0.0,
             processing_time_ms=processing_time,
+            item_type=str(extracted.get('item_type')) if extracted and extracted.get('item_type') else None,
+            standard=extracted.get('standard_info').normalized if extracted and extracted.get('standard_info') else None,
             details={
                 'fallback': True,
                 'tfidf_score': match_result.score,
                 'tfidf_ens_candidate': match_result.ens_code,
-                'extracted': extracted
+                'extracted': {
+                    **extracted,
+                    'standard_info': extracted.get('standard_info').to_dict() if extracted and extracted.get('standard_info') else None
+                } if extracted else None
             }
         )
 
