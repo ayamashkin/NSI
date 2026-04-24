@@ -498,7 +498,7 @@ class AutomatedParametricProcessor:
             item_type=mask.item_type
         )
 
-        logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}")
+        logger.info(f"[PARAM_MATCH] score={match_result.score}, match_type={match_result.match_type}, confidence={match_result.confidence}, matched_params={match_result.matched_params}")
 
         # Fallback: если маска не сработала (score=0), пробуем "ослабленную" версию
         # где обязательные скобки/группы делаем опциональными

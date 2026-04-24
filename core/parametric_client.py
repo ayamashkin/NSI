@@ -329,6 +329,32 @@ class ParametricENSClient:
                             'pattern': getattr(effective_mask, 'pattern', None)
                         }
                     )
+                # Если ЕСН не нашёл — всё равно возвращаем extracted params
+                # (confidence от regex match)
+                required = getattr(effective_mask, 'required', [])
+                if required:
+                    regex_confidence = self._calculate_confidence(extracted_params, required)
+                else:
+                    # Если required не заданы — считаем confidence по всем non-None полям
+                    non_none = sum(1 for v in extracted_params.values() if v is not None)
+                    regex_confidence = non_none / len(extracted_params) if extracted_params else 0.0
+
+                logger.debug(f"[REGEX_ONLY] extracted={extracted_params}, required={required}, confidence={regex_confidence:.2f}")
+
+                # Всегда возвращаем regex_only при непустых extracted (threshold 0.1)
+                if regex_confidence > 0.1:
+                    return ParametricMatch(
+                        ens_code=None,
+                        mdm_key=None,
+                        matched_params=extracted_params,
+                        score=0.0,
+                        match_type='regex_only',
+                        confidence=regex_confidence,
+                        details={
+                            'mask_id': getattr(effective_mask, 'id', None),
+                            'pattern': getattr(effective_mask, 'pattern', None)
+                        }
+                    )
 
         # Fallback: TF-IDF поиск
         if self.use_tfidf_fallback and self._ens_index:
