@@ -241,6 +241,14 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o results.json
 ```
 
+```bash
+# prod
+python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" -o models/hardware/ens_hardware.pkl    
+python cli.py generate-masks -d cache/masks.db -i models/hardware
+/ens_hardware.pkl --llm      
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json
+```
+
 ## CLI Команды
 
 ### Обработка
