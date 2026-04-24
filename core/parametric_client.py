@@ -164,34 +164,72 @@ class ParametricENSClient:
 
     @staticmethod
     def _relax_pattern(pattern: str) -> str:
-        """
+        r"""
         Исправления regex-масок для корректного matching'а:
-        1. Латинская t/a → русская т/а в типах изделий (Винt → Винт)
+        1. Латинская t/a → русская т/а + \s* после типа изделия
         2. \s* после )? опциональной группы
-        3. \s* перед \( в опциональной группе (пробел ДО скобки)
+        3. \s* перед \( в опциональной группе
         4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (запятая как разделитель)
         5. ОСТ1 → ОСТ\s*1 (пробел между ОСТ и цифрой)
+        6. Винт: вынести номинальный_диаметр_резьбы из опциональной группы
+        7. Шайба: добавить толщину между наружным_диаметром и покрытием
         """
         relaxed = pattern
 
-        # 1. Латинская t/a → русская т/а в типах изделий
-        relaxed = relaxed.replace('Винt', 'Винт')
-        relaxed = relaxed.replace('Болt', 'Болт')
-        relaxed = relaxed.replace('Шайбa', 'Шайба')
-        relaxed = relaxed.replace('Гайкa', 'Гайка')
+        # 1. Латинская t/a → русская т/а (без double \s*)
+        _ru_t = chr(0x0442)  # русская т
+        _ru_a = chr(0x0430)  # русская а
+        _ru_b = chr(0x0431)  # русская б
+        _ru_g = chr(0x0433)  # русская г
+
+        _ru_g = chr(0x0433)  # русская г
+        for latin, cyr in [('Винt', 'Вин' + _ru_t), ('Болt', 'Бол' + _ru_t),
+                           ('Шайba', 'Шай' + _ru_b + _ru_a), ('Гайka', 'Гай' + _ru_g + _ru_a)]:
+            if latin in relaxed:
+                has_s = relaxed[relaxed.find(latin) + len(latin):].startswith(r'\s*')
+                relaxed = relaxed.replace(latin, cyr + (r'\s*' if not has_s else ''), 1)
+
+        # Fallback: fix any remaining mixed-script type names
+        relaxed = relaxed.replace('Винt', 'Вин' + _ru_t)
+        relaxed = relaxed.replace('Болt', 'Бол' + _ru_t)
+        relaxed = relaxed.replace('Шайb', 'Шай' + _ru_b)
+        relaxed = relaxed.replace('Гайk', 'Гай' + _ru_g)
 
         # 2. )?(?P< → )?\s*(?P<
-        relaxed = relaxed.replace(')?(?P<', ')?\\s*(?P<')
+        relaxed = re.sub(r'\)\?\(\?P<', lambda m: r')?\s*(?P<', relaxed)
 
         # 3. (?:( → (?:\s*\(
-        relaxed = relaxed.replace('(?:(', '(?:\\s*\\(')
+        relaxed = re.sub(r'\(\?\:\(', lambda m: r'(?:\s*\(', relaxed)
 
-        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)?
-        relaxed = relaxed.replace('\\d+(?:\\.\\d+)?', '\\d+(?:[.,]\\d+)?')
+        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (через .replace)
+        relaxed = relaxed.replace(r'\\d+(?:\\.\\d+)?', r'\\d+(?:[.,]\\d+)?')
+        # Also try with single backslash (masks loaded from DB)
+        relaxed = relaxed.replace(r'\d+(?:\.\d+)?', r'\d+(?:[.,]\d+)?')
 
-        # 5. ОСТ1 → ОСТ\s*1 (только если еще не экранировано)
-        if 'ОСТ\\s*1' not in relaxed:
-            relaxed = relaxed.replace('ОСТ1', 'ОСТ\\s*1')
+        # 5. ОСТ1 → ОСТ\s*1
+        if r'ОСТ\s*1' not in relaxed:
+            relaxed = re.sub(r'ОСТ1', lambda m: r'ОСТ\s*1', relaxed)
+
+        # 6. Винт: вынести номинальный_диаметр_резьбы из опциональной группы
+        #    )\s*\)\s*-(?P<номинальный_диаметр_резьбы>  →  )\s*\)\s*-)?(?P<номинальный_диаметр_резьбы>
+        _opt_fix_old = r')\s*\)\s*-(?P<номинальный_диаметр_резьбы>'
+        _opt_fix_new = r')\s*\)\s*-)?(?P<номинальный_диаметр_резьбы>'
+        if _opt_fix_old in relaxed:
+            relaxed = relaxed.replace(_opt_fix_old, _opt_fix_new, 1)
+            #    Затем: ))?\s*(?P<длина> → )\s*-(?P<длина>
+            relaxed = relaxed.replace(r'))?\s*(?P<длина>', r')\s*-(?P<длина>', 1)
+
+        # 7. Шайба: поддержка толщины как опционального параметра
+        #    Толщина есть в тексте (0,5-4-8), но не в ЕНС — делаем опциональной
+        _thick_old = r'(?P<наружный_диаметр_диаметр_вписа>\d+)\-?(?P<покрытие>[\w.]+)?'
+        _thick_new = r'(?P<наружный_диаметр_диаметр_вписа>\d+)(?:\-(?P<толщина>\d+(?:[.,]\d+)?))?\-(?P<покрытие>[\w.]+)'
+        if _thick_old in relaxed:
+            relaxed = relaxed.replace(_thick_old, _thick_new, 1)
+        # Альтернатива: уже с \d+(?:[.,]\d+)? (после rule 4)
+        _thick_old2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)\-(?P<покрытие>[\w.]+)?'
+        _thick_new2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)(?:\-(?P<толщина>\d+(?:[.,]\d+)?))?\-(?P<покрытие>[\w.]+)'
+        if _thick_old2 in relaxed:
+            relaxed = relaxed.replace(_thick_old2, _thick_new2, 1)
 
         # Проверяем что результат — валидный regex
         try:
