@@ -45,12 +45,14 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
 
 def _text_similarity(a: str, b: str) -> float:
     """
-    Fuzzy similarity для текстовых параметров (покрытие, материал).
+    Token-based Jaccard similarity для текстовых параметров.
+    Удаляет цифры перед сравнением (Кд9.хр → кд, хр).
 
-    1. Exact match: 'Кд' == 'Кд' = 1.0
-    2. Prefix match: 'Кд' ~ 'Кд9.хр' = 0.8 (короткий токен — префикс длинного)
-    3. Substring match: 'Хим.Пас' in 'Хим.Пас' = 1.0
-    4. Token Jaccard: 'Окс.Фос' ~ 'Фос.Окс' = 1.0
+    Examples:
+        'Хим.Пас' ~ 'Хим.Пас' = 1.0
+        'Кд' ~ 'Кд9.хр' = 0.5 (кд общий, хр нет)
+        'Кд.фос' ~ 'Кд.фос.окс' = 0.67
+        'Окс.Фос' ~ 'Фос.Окс' = 1.0
     """
     import re
     if not a or not b:
@@ -63,13 +65,7 @@ def _text_similarity(a: str, b: str) -> float:
     if a_str == b_str:
         return 1.0
 
-    # Substring match
-    if a_str in b_str or b_str in a_str:
-        # Масштабируем по длине: чем больше разница, тем меньше score
-        ratio = min(len(a_str), len(b_str)) / max(len(a_str), len(b_str))
-        return 0.5 + ratio * 0.3  # 0.5..0.8
-
-    # Token-based Jaccard с удалением цифр
+    # Extract tokens, remove digits
     def _extract_tokens(text):
         raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
         cleaned = []
@@ -85,24 +81,10 @@ def _text_similarity(a: str, b: str) -> float:
     if not tokens_a or not tokens_b:
         return 0.0
 
-    # Jaccard
     intersection = tokens_a & tokens_b
     union = tokens_a | tokens_b
-    jaccard = len(intersection) / len(union) if union else 0.0
 
-    # Prefix matching между токенами
-    prefix_matches = 0
-    for ta in tokens_a:
-        for tb in tokens_b:
-            if tb.startswith(ta) or ta.startswith(tb):
-                ratio = min(len(ta), len(tb)) / max(len(ta), len(tb))
-                prefix_matches += ratio
-
-    max_pairs = len(tokens_a) * len(tokens_b)
-    prefix_bonus = prefix_matches / max_pairs if max_pairs > 0 else 0.0
-
-    final = max(jaccard, prefix_bonus * 0.8)
-    return min(final, 1.0)
+    return len(intersection) / len(union)
 
 
 def _is_empty_equivalent(field: str, value: Any) -> bool:
@@ -311,7 +293,15 @@ class ParametricENSClient:
             if extracted_params:
                 # Шаг 3: Ищем в ЕСН
                 required = getattr(effective_mask, 'required', [])
-                match_result = self._find_in_ens(extracted_params, required)
+                # Если required — JSON строка, парсим
+                if isinstance(required, str):
+                    try:
+                        import json as _json
+                        required = _json.loads(required)
+                    except (ValueError, TypeError):
+                        required = []
+
+                match_result = self._find_in_ens(extracted_params, required, standard=standard)
 
                 if match_result:
                     return ParametricMatch(
@@ -384,7 +374,7 @@ class ParametricENSClient:
 
         return None
 
-    def _find_in_ens(self, params: Dict[str, Any], required: List[str]) -> Optional[Dict[str, Any]]:
+    def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Поиск по параметрам в индексе ЕСН."""
         if not self._ens_index or 'items' not in self._ens_index:
             return None
@@ -394,6 +384,12 @@ class ParametricENSClient:
         best_score = 0.0
 
         for item in items:
+            # Фильтр по стандарту (нтд) — обязательное совпадение
+            if standard:
+                item_std = item.get('нтд') or item.get('standard')
+                if item_std and standard not in str(item_std) and str(item_std) not in standard:
+                    continue  # Пропускаем записи с другим стандартом
+
             score = self._calculate_match_score(params, required, item)
 
             if score > best_score:
@@ -401,6 +397,10 @@ class ParametricENSClient:
                 best_match = item
                 best_match['_match_score'] = score
                 best_match['_match_type'] = 'exact' if score > 0.9 else 'partial'
+
+        # Minimum threshold: отбрасываем слишком слабые совпадения
+        if best_score < 0.7:
+            return None
 
         return best_match
 
@@ -410,59 +410,72 @@ class ParametricENSClient:
         required: List[str],
         ens_item: Dict[str, Any]
     ) -> float:
-        """Расчет score сопоставления с учетом эквивалентности пустых значений."""
+        """
+        Строгое сопоставление параметров с ЕНС:
+        - Точное совпадение для числовых/технических полей
+        - Fuzzy (Jaccard >= 0.6) только для определённых текстовых полей
+        - Поле есть в ЕНС, но нет в params — игнорируется (не штрафуем)
+        - null в params и отсутствие в ЕНС — считаем совпадением
+        """
         if not required:
             return 0.0
 
-        matches = 0
-        weights = []
+        FUZZY_FIELDS = {'покрытие', 'марка_материала', 'марка_стали', 'материал'}
+
+        matches = 0.0
+        total = 0
 
         for param in required:
+            # Получаем значения
             query_val_raw = params.get(param)
             ens_val_raw = ens_item.get(param)
 
-            # Проверяем эквивалентность пустым значениям (БП ≡ None)
-            query_is_empty = query_val_raw is None or _is_empty_equivalent(param, query_val_raw)
-            ens_is_empty = ens_val_raw is None or _is_empty_equivalent(param, ens_val_raw)
+            # Приводим к None если пусто
+            query_val = None if query_val_raw is None or str(query_val_raw).strip() == '' else query_val_raw
+            ens_val = None if ens_val_raw is None or str(ens_val_raw).strip() == '' else ens_val_raw
 
-            if query_is_empty and ens_is_empty:
-                # Оба пустые (или эквивалентны пустым) — полный match
-                matches += 1
-                weights.append(1.0)
-            elif query_is_empty or ens_is_empty:
-                # Одно пустое, другое заполнено — partial match
-                # (поле опционально, но значения различаются)
-                weights.append(0.5)
-            else:
-                # Оба заполнены — сравниваем значения
-                query_val = str(query_val_raw).lower().strip()
-                ens_val = str(ens_val_raw).lower().strip()
+            # Случай 1: null ≡ null (нет ни в params, ни в ЕНС)
+            if query_val is None and ens_val is None:
+                matches += 1.0
+                total += 1
+                continue
 
-                if query_val == ens_val:
-                    matches += 1
-                    weights.append(1.0)
-                elif query_val in ens_val or ens_val in query_val:
-                    matches += 0.5
-                    weights.append(0.5)
-                else:
-                    weights.append(0.0)
+            # Случай 2: поле есть в ЕНС, но нет в params — игнорируем
+            if query_val is None and ens_val is not None:
+                continue
 
-                # Fuzzy matching fallback для текстовых полей
-                if weights[-1] == 0.0:
-                    TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
-                    if param in TEXT_FIELDS:
-                        sim = _text_similarity(query_val, ens_val)
-                        if sim >= 0.5:
-                            weights[-1] = sim
-                            matches += sim
+            # Случай 3: поле есть в params, но нет в ЕНС — mismatch
+            if query_val is not None and ens_val is None:
+                total += 1
+                continue
 
-        if not weights:
-            return 0.0
+            # Случай 4: оба не None — сравниваем
+            total += 1
+            query_str = str(query_val).lower().strip()
+            ens_str = str(ens_val).lower().strip()
 
-        return sum(weights) / len(weights)
+            # Точное совпадение
+            if query_str == ens_str:
+                matches += 1.0
+            elif param in FUZZY_FIELDS:
+                # Fuzzy только для разрешённых полей
+                sim = _text_similarity(query_str, ens_str)
+                if sim >= 0.6:
+                    matches += sim
+            # else: mismatch для не-fuzzy полей
+
+        return matches / total if total > 0 else 0.0
 
     def _calculate_confidence(self, params: Dict[str, Any], required: List[str]) -> float:
         """Расчет уверенности в извлечении."""
+        # Если required — JSON строка, парсим
+        if isinstance(required, str):
+            try:
+                import json as _json
+                required = _json.loads(required)
+            except (ValueError, TypeError):
+                required = []
+
         if not required:
             return 0.0
 

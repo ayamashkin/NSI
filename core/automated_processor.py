@@ -509,7 +509,7 @@ class AutomatedParametricProcessor:
                     # Напрямую применяем ослабленный паттерн (без повторного _relax_pattern)
                     extracted = self.parametric_client._apply_mask(relaxed_pattern, text)
                     if extracted:
-                        found = self.parametric_client._find_in_ens(extracted, mask.required)
+                        found = self.parametric_client._find_in_ens(extracted, mask.required, standard=mask.standard)
                         if found:
                             match_result = type('obj', (object,), {
                                 'ens_code': found.get('код'),
