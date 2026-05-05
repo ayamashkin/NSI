@@ -26,7 +26,6 @@ class ProcessingLevel(Enum):
 
 
 @dataclass
-@dataclass
 class ProcessingResult:
     """Результат обработки."""
     text: str
@@ -42,10 +41,11 @@ class ProcessingResult:
 
     @property
     def ens_params(self) -> Optional[Dict[str, Any]]:
-        """Параметры из ENS записи (если есть match)."""
-        if self.ens_match and 'params' in self.ens_match:
+        """Параметры из ENS записи (если есть match), иначе fallback на params."""
+        if self.ens_match and 'params' in self.ens_match and self.ens_match['params']:
             return self.ens_match['params']
-        return None
+        # Fallback: возвращаем извлеченные params даже без ENS match
+        return self.params if self.params else None
 
 
 class AutomatedParametricProcessor:

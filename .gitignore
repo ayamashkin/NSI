@@ -50,6 +50,7 @@ logs/
 results/
 output/
 *.json
+prompts/debug
 
 # OS
 .DS_Store
