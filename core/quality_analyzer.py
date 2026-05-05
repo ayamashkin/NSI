@@ -127,7 +127,7 @@ class QualityAnalyzer:
                     "text": text,
                     "item_type": item_type,
                     "standard": standard,
-                    "ens_code": result.ens_code,
+                    "ens_code": result.ens_match.get('code') if result.ens_match else None,
                     "has_params": has_params,
                     "has_ens_params": has_ens_params,
                     "params": result.params,

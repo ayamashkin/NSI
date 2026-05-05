@@ -2,6 +2,8 @@
 Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
+
+VERSION: 2025-05-06-fix4 (generic-fallback)
 """
 
 import logging
@@ -197,6 +199,11 @@ class AutomatedParametricProcessor:
 
         if mask and mask.is_active:
             # Активная маска найдена -> Level 6: ParametricMatch
+            # Убеждаемся что у маски заполнен стандарт (берем извлеченный если в маске пусто)
+            effective_standard = getattr(mask, 'standard', None) or standard
+            if not getattr(mask, 'standard', None):
+                mask.standard = effective_standard
+                logger.info(f"[PROCESS] Fixed empty mask.standard -> '{effective_standard}'")
             logger.info(f"[PROCESS] -> Level 6: ParametricMatch with mask {mask.id}")
             return self._parametric_match(clean_text, mask, extracted, start_time)
 
@@ -396,6 +403,76 @@ class AutomatedParametricProcessor:
         return best_match if best_score >= 0.6 else None
 
 
+    def _get_generic_pattern(self, item_type: str, standard: str = None) -> Optional[str]:
+        """
+        Генерация "generic" паттерна для item_type когда маска БД не срабатывает.
+        Извлекает основные параметры без жёсткой привязки к структуре маски.
+        """
+        _ru_t = chr(0x0442)
+        _ru_b = chr(0x0431)
+        _ru_v = 'В'
+
+        item_upper = (item_type or '').upper()
+
+        # Generic bolt pattern: Болт (исполнение)?-диаметр-длина-покрытие
+        if item_upper in ('БОЛТ', 'БОЛ' + _ru_t, 'BOLT'):
+            pattern = (
+                r'^Болт\s*(?:\((?P<исполнение>\d+)\)\s*)?'
+                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                # Add optional standard suffix
+                pattern += r'(?:[-\s]*.*)?'  # loose matching after coating
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        # Generic screw pattern: Винт (исполнение)?-диаметр-длина-покрытие
+        if item_upper in ('ВИНТ', 'ВИН' + _ru_t, 'SCREW'):
+            pattern = (
+                r'^Винт\s*(?:\((?P<исполнение>\d+)\)\s*)?'
+                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        # Generic washer pattern: Шайба диаметр-наружный-толщина-покрытие
+        if item_upper in ('ШАЙБА', 'ШАЙ' + _ru_b + chr(0x0430), 'WASHER'):
+            pattern = (
+                r'^Шайба\s*(?:(?P<тип>[A-Z])\s*)?'
+                r'(?P<диаметр>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        # Generic nut pattern: Гайка диаметр-покрытие
+        if item_upper in ('ГАЙКА', 'ГАЙКА', 'NUT'):
+            pattern = (
+                r'^Гайка\s*(?:(?P<исполнение>\d+)\s*)?'
+                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        return None
+
     def _parametric_match(
         self,
         text: str,
@@ -406,39 +483,74 @@ class AutomatedParametricProcessor:
         """Параметрическое сопоставление."""
         import time
 
-        logger.info(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{mask.standard}', mask.item_type='{mask.item_type}'")
+        # Гарантируем что у маски есть стандарт
+        extracted_std = None
+        if extracted.get('standard_info'):
+            extracted_std = extracted['standard_info'].normalized
+        effective_standard = getattr(mask, 'standard', None) or extracted_std or ''
+        if not getattr(mask, 'standard', None) and extracted_std:
+            mask.standard = extracted_std
+            logger.info(f"[PARAM_MATCH] Fixed mask.standard from extracted: '{extracted_std}'")
+
+        logger.info(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{effective_standard}', mask.item_type='{mask.item_type}'")
 
         match_result = self.parametric_client.match(
             text=text,
-            standard=mask.standard,
+            standard=effective_standard,
             item_type=mask.item_type
         )
 
-        logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}")
+        logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}, ens_code={match_result.ens_code}")
 
         # Fallback: если parametric_client вернул пустые params но score > 0,
-        # извлекаем params напрямую через regex
+        # извлекаем params напрямую через regex (используем re.search с IGNORECASE,
+        # как и в parametric_client._apply_mask)
         fallback_params = None
         if not match_result.matched_params and match_result.score > 0:
             import re
             try:
-                m = re.match(self.parametric_client._relax_pattern(mask.pattern, standard=mask.standard), text)
+                relaxed_for_fallback = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                logger.debug(f"[PARAM_MATCH] Fallback pattern: {relaxed_for_fallback[:200]}")
+                m = re.search(relaxed_for_fallback, text, re.IGNORECASE)
                 if m:
                     fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                     if fallback_params:
                         logger.info(f"[PARAM_MATCH] Fallback extraction: {fallback_params}")
+                else:
+                    logger.warning(f"[PARAM_MATCH] Fallback regex did NOT match. Pattern: {relaxed_for_fallback[:120]}")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fallback extraction error: {e}")
+
+        # Ultimate fallback: generic pattern по item_type
+        # Когда маска БД имеет неправильную структуру (лишние/отсутствующие параметры),
+        # пробуем generic паттерн который извлекает только основные параметры.
+        if not fallback_params and match_result.ens_code:
+            import re
+            try:
+                generic_pattern = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic_pattern:
+                    # Применяем те же relax-правила к generic pattern
+                    relaxed_generic = self.parametric_client._relax_pattern(generic_pattern, standard=effective_standard)
+                    logger.debug(f"[PARAM_MATCH] Generic pattern: {relaxed_generic[:200]}")
+                    m = re.search(relaxed_generic, text, re.IGNORECASE)
+                    if m:
+                        fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                        if fallback_params:
+                            logger.info(f"[PARAM_MATCH] Generic extraction: {fallback_params}")
+                    else:
+                        logger.debug(f"[PARAM_MATCH] Generic pattern did NOT match")
+            except Exception as e:
+                logger.warning(f"[PARAM_MATCH] Generic fallback error: {e}")
         # где обязательные скобки/группы делаем опциональными
         relaxed_result = None
         if match_result.score == 0 and not match_result.matched_params:
             try:
-                relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=mask.standard)
+                relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
                 if relaxed_pattern != mask.pattern:
                     # Создаём временную маску с ослабленным паттерном
                     relaxed_mask = type(mask)(
                         id=getattr(mask, 'id', -1),
-                        standard=mask.standard,
+                        standard=effective_standard,
                         item_type=mask.item_type,
                         pattern=relaxed_pattern,
                         params=mask.params,
@@ -454,7 +566,7 @@ class AutomatedParametricProcessor:
                     )
                     relaxed_result = self.parametric_client.match(
                         text=text,
-                        standard=mask.standard,
+                        standard=effective_standard,
                         item_type=mask.item_type,
                         pattern=relaxed_pattern
                     )
@@ -475,7 +587,7 @@ class AutomatedParametricProcessor:
         if match_result.score < 0.7 or not match_result.ens_code:
             try:
                 # Получаем кандидатов из ЕСН
-                ens_candidates = self.validator._get_ens_examples(mask.standard, mask.item_type)
+                ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
                 if ens_candidates and match_result.matched_params:
                     fuzzy_match = self._fuzzy_match_ens(match_result.matched_params, ens_candidates)
                     if fuzzy_match:

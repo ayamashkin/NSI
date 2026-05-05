@@ -518,6 +518,135 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         click.echo(f"\n💾 JSON отчет сохранен: {json_output}")
 
 
+@cli.command('diagnose')
+@click.argument('text')
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
+@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
+@click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
+@click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
+def diagnose(text, db, ens_index, llm, coating_map):
+    """Диагностика обработки одной строки номенклатуры."""
+    import re
+    from core.mask_database import MaskDatabase
+    from core.automated_processor import AutomatedParametricProcessor
+    from core.parametric_client import ParametricENSClient
+    from config.settings import get_settings
+
+    settings = get_settings()
+    llm_clients = {}
+    if llm:
+        # Lazy import to avoid startup overhead
+        llm_clients = _init_llm_clients(settings, all_services=True)
+        if not llm_clients:
+            click.echo("❌ LLM requested but no clients available", err=True)
+            return
+        click.echo("🤖 LLM генерация включена")
+
+    # Инициализация CoatingMapper
+    if coating_map:
+        from core.coating_mapper import init_mapper
+        init_mapper(coating_map)
+        click.echo(f"🎨 Справочник покрытий загружен: {coating_map}")
+
+    mask_db = MaskDatabase(db_path=db)
+    processor = AutomatedParametricProcessor(
+        mask_db=mask_db,
+        llm_clients=llm_clients if llm else None,
+        ens_index_path=ens_index,
+        use_llm_generation=llm,
+        settings=settings
+    )
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"🔍 ДИАГНОСТИКА: {text}")
+    click.echo(f"{'='*60}")
+
+    # Step 0: Standard extraction
+    extracted = processor.standard_extractor.extract_all(text)
+    standard_info = extracted.get('standard_info')
+    item_type = extracted.get('item_type')
+    click.echo(f"\n📌 Извлечение (Level 0):")
+    click.echo(f"   standard_info: {standard_info.to_dict() if standard_info else None}")
+    click.echo(f"   item_type: {item_type}")
+
+    if not standard_info or not item_type:
+        click.echo("\n❌ Не удалось извлечь стандарт или тип — переход на LLM Direct")
+        return
+
+    standard = standard_info.normalized
+    search_item_type = item_type.upper()
+
+    # Step 1: Mask lookup
+    click.echo(f"\n📌 Mask lookup (Level 1):")
+    mask = mask_db.get_mask(standard, search_item_type)
+    click.echo(f"   Поиск: standard='{standard}', item_type='{search_item_type}'")
+    click.echo(f"   Найдена: {mask is not None}")
+
+    if mask is None:
+        mask = mask_db.get_mask(standard, item_type)
+        if mask:
+            click.echo(f"   Найдена (оригинальный регистр): item_type='{item_type}'")
+
+    if mask is None:
+        click.echo(f"   ❌ Маска не найдена в БД")
+        return
+
+    click.echo(f"   mask.id: {getattr(mask, 'id', 'N/A')}")
+    click.echo(f"   mask.standard: {getattr(mask, 'standard', 'N/A')}")
+    click.echo(f"   mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
+    click.echo(f"   mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
+    click.echo(f"   mask.pattern (первые 120 символов):")
+    click.echo(f"      {getattr(mask, 'pattern', 'N/A')[:120]}")
+
+    # Step 2: Pattern relaxation
+    effective_standard = getattr(mask, 'standard', None) or standard
+    client = ParametricENSClient.__new__(ParametricENSClient)
+    relaxed = client._relax_pattern(mask.pattern, standard=effective_standard)
+    click.echo(f"\n📌 Relax pattern:")
+    click.echo(f"   standard передан: '{effective_standard}'")
+    click.echo(f"   relaxed (первые 200 символов):")
+    click.echo(f"      {relaxed[:200]}")
+    if len(relaxed) > 200:
+        click.echo(f"      ... ({len(relaxed)} символов всего)")
+
+    # Step 3: Regex match
+    try:
+        compiled = re.compile(relaxed, re.IGNORECASE)
+        match = compiled.search(text)
+        click.echo(f"\n📌 Regex match:")
+        if match:
+            click.echo(f"   ✅ MATCH")
+            click.echo(f"   groups: {match.groupdict()}")
+        else:
+            click.echo(f"   ❌ NO MATCH")
+            # Find longest prefix
+            for i in range(len(text), 0, -1):
+                if compiled.search(text[:i]):
+                    click.echo(f"   longest matching prefix: '{text[:i]}'")
+                    break
+            else:
+                click.echo(f"   no prefix matches at all")
+    except re.error as e:
+        click.echo(f"\n📌 Regex match:")
+        click.echo(f"   ❌ INVALID REGEX: {e}")
+        click.echo(f"   pattern: {relaxed[:100]}")
+
+    # Step 4: Full processor result
+    click.echo(f"\n📌 Full processor result:")
+    result = processor.process(text)
+    click.echo(f"   level: {result.level.value}")
+    click.echo(f"   success: {result.success}")
+    click.echo(f"   params: {result.params}")
+    click.echo(f"   ens_code: {result.ens_match.get('code') if result.ens_match else None}")
+    click.echo(f"   ens_params: {result.ens_params}")
+    click.echo(f"   confidence: {result.confidence:.3f}")
+    click.echo(f"   processing_time_ms: {result.processing_time_ms:.1f}")
+    if result.details:
+        click.echo(f"   details: {result.details}")
+
+    click.echo(f"\n{'='*60}")
+
+
 @cli.group()
 def ens():
     """Команды для работы с ЕСН"""

@@ -345,7 +345,14 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm      
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.json
 python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
+
+# Запуск с логированием DEBUG — будет видно, где раньше терялись params
+python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --output output/results.json 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
+
+# Диагностика отдельной строки + паттерна
+python test/test_params.py --text "Болт (2)-12-44-Окс.Фос.ЭФП-ОСТ 1 31133-80" --pattern "^Болт\\s*(?:\\((?P<исполнение>\\d+)\\)\\s*)?(?P<номинальный_диаметр_резьбы>\\d+(?:[.,]\\d+)?)\\s*[-\\s]*\\s*(?P<длина>\\d+(?:[.,]\\d+)?)\\s*[-\\s]*\\s*(?P<покрытие>[\\w.]+)\\s*$" --standard "ОСТ 1 31133-80"
 ``` 
+
 ```bash
 # prod
 python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" -o models/hardware/ens_hardware.pkl    

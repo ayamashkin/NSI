@@ -1,6 +1,8 @@
 """
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
+
+VERSION: 2025-05-06-fix4 (generic-fallback)
 """
 
 import re
@@ -145,8 +147,7 @@ class ParametricENSClient:
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
 
-    @staticmethod
-    def _relax_pattern(pattern: str) -> str:
+    def _relax_pattern(self, pattern: str, standard: str = None) -> str:
         r"""
         Исправления regex-масок для корректного matching'а:
         1. Латинская t/a → русская т/а + \s* после типа изделия
@@ -181,8 +182,9 @@ class ParametricENSClient:
         # 2. )?(?P< → )?\s*(?P<
         relaxed = re.sub(r'\)\?\(\?P<', lambda m: r')?\s*(?P<', relaxed)
 
-        # 3. (?:( → (?:\s*\(
-        relaxed = re.sub(r'\(\?\:\(', lambda m: r'(?:\s*\(', relaxed)
+        # 3. REMOVED: was broken - matched (?:(?P< and produced unbalanced parentheses.
+        #    If LLM generates (?:( instead of (?:(?: , the pattern is already wrong.
+        #    The correct fix is to regenerate the mask, not to hack the regex here.
 
         # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (через .replace)
         relaxed = relaxed.replace(r'\\d+(?:\\.\\d+)?', r'\\d+(?:[.,]\\d+)?')
@@ -213,6 +215,94 @@ class ParametricENSClient:
         _shaiba_new2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)(?:\-\d+)?\-(?P<покрытие>[\w.]+)'
         if _shaiba_old2 in relaxed:
             relaxed = relaxed.replace(_shaiba_old2, _shaiba_new2, 1)
+
+        # 8. Винт: добавить \s* перед \( в группе исполнения
+        #    "Винт (4)-5-..." -> паттерн "(?:\((?P<исполнение>" без пробела
+        relaxed = relaxed.replace(
+            r'(?:\u005c(\u005cs*(?P<исполнение>',
+            r'(?:\s*\(\s*(?P<исполнение>',
+            1
+        )
+
+        # 9. Исполнение: сделать скобки опциональными, разрешить пробел/дефис после
+        #    "$" в маске заменяет "\\(" или "\\)" (баг LLM с экранированием)
+        #    Заменяем $(?P< на \\((?P<  и $\s*) на \\)\s*)
+        relaxed = relaxed.replace('$(?P<', r'\((?P<')
+        relaxed = relaxed.replace(r'$\s*)', r'\)\s*)')
+        # Дополнительно: $\s*(?P< → \)\s*(?P< (если после $ идет следующая группа)
+        relaxed = relaxed.replace(r'$\s*(?P<', r'\)\s*(?P<')
+        # Если после \) идет \s* -- заменить на [-\s]* (чтобы съедать и дефис)
+        relaxed = relaxed.replace(r'\)\s*', r'\)[-\s]*')
+
+        # 9b. Любой оставшийся $ в середине паттерна (не anchor) — заменить на \)
+        #     LLM иногда использует $ как замену \) в произвольных местах
+        if '$' in relaxed.rstrip('$').rstrip():
+            # Заменяем $ которой не в конце строки
+            relaxed = re.sub(r'\$(?=\s|[-\s]*\(|[-\s]*\d|[-\s]*[A-Z])', r'\\)', relaxed)
+            # Если остался $ перед концом — тоже заменяем
+            relaxed = re.sub(r'\$(?=\s*$)', r'\\)', relaxed)
+
+        # 14. Разделители между параметрами: \s+ → [-\s]+
+        #     LLM иногда генерирует пробелы между числами, но в тексте дефисы
+        #     "Болт 2 12 44" vs "Болт 2-12-44"
+        #     Заменяем )\s+ перед (?P< на )[-\s]+
+        relaxed = re.sub(r'\)\\s\+(?=\(\?P<)', lambda m: r')[-\s]+', relaxed)
+        #     Также \d+\s+\d+ → \d+[-\s]+\d+ (между двумя числовыми группами)
+        relaxed = re.sub(r'(\d)\\s\+(\d)', lambda m: r'\1[-\s]+\2', relaxed)
+
+        # 10. Метрическая резьба: добавить опциональный шаг (x1,25)
+        #     "M12x1,25" -> M12 + x1,25
+        relaxed = relaxed.replace(
+            r'(?:M(?P<номинальный_диаметр_резьбы>\d+))',
+            r'(?:M(?P<номинальный_диаметр_резьбы>\d+)(?:[xX\u00d7]\d+(?:[.,]\d+)?)?)',
+            1
+        )
+
+        # 11. Класс поля допуска: ограничить буквами (без цифр)
+        #     [\w]* съедает цифры -> [a-zA-Z\u0430-\u044f\u0410-\u042f]*
+        relaxed = relaxed.replace(
+            r'(?P<класс_поле_допуска>[\d+][\w]*)',
+            r'(?P<класс_поле_допуска>[\d+][a-zA-Z\u0430-\u044f\u0410-\u042f]*)',
+            1
+        )
+
+        # 12. Удалить конфликтующую группу tipo_rezby=M
+        #     (?:\s*(?P<tipo_rezby>M))?\s*[-\s]* крадёт M из M12
+        relaxed = relaxed.replace(
+            r'(?:\s*(?P<тип_резьбы>M))?\s*[-\s]*',
+            r'\s*[-\s]*',
+            1
+        )
+
+        # 13. Группа прочности: ограничить цифры перед точкой
+        #     \d+\.\d+ -> 100.58 интерпретирует как длина.100 + группа.58
+        #     \d{1,2}(?:\.\d+)? -> 5.8, 10.9, но не 100.58
+        relaxed = relaxed.replace(
+            r'(?P<группа_класс_прочности>\d+\.\d+)',
+            r'(?P<группа_класс_прочности>\d{1,2}(?:\.\d+)?)',
+            1
+        )
+
+        # 9a. Если маска не содержит суффикс стандарта -- добавить
+        #    Болт ...-Окс.Фос.ЭФП$ -> Болт ...-Окс.Фос.ЭФП-ОСТ\s*1\s*31133-80$
+        has_std = any(s in relaxed for s in ['ОСТ', 'ГОСТ', 'ТУ', 'ISO'])
+        if standard and not has_std:
+            std_suffix = None
+            # Используем startswith чтобы не спутать ГОСТ с ОСТ
+            if standard.startswith('ОСТ 1'):
+                parts = standard.split('1', 1)
+                if len(parts) > 1:
+                    std_suffix = r'-ОСТ\s*1\s*' + parts[1].strip().replace(' ', r'\s*')
+            elif standard.startswith('ГОСТ'):
+                std_suffix = r'\s*ГОСТ\s*' + standard.replace('ГОСТ', '').strip().replace(' ', r'\s*')
+            elif standard.startswith('ТУ'):
+                std_suffix = r'\s*ТУ\s*' + standard.replace('ТУ', '').strip().replace(' ', r'\s*')
+            elif standard.startswith('ISO'):
+                std_suffix = r'\s*ISO\s*' + standard.replace('ISO', '').strip().replace(' ', r'\s*')
+
+            if std_suffix:
+                # Убираем $ из конца, добавляем суффикс, возвращаем $
+                relaxed = relaxed.rstrip('$').rstrip() + std_suffix + r'\s*$'
 
         # Проверяем что результат - валидный regex
         try:
@@ -288,8 +378,10 @@ class ParametricENSClient:
             )
 
         if effective_mask:
-            relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern, standard=effective_mask.standard)
-            extracted_params = self._apply_mask(relaxed_pattern, text, standard=effective_mask.standard)
+            # Используем стандарт из параметра match() если в маске пусто
+            effective_standard = getattr(effective_mask, 'standard', None) or standard
+            relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern, standard=effective_standard)
+            extracted_params = self._apply_mask(relaxed_pattern, text, standard=effective_standard)
 
             if extracted_params:
                 # Шаг 3: Ищем в ЕСН
@@ -371,6 +463,8 @@ class ParametricENSClient:
 
             if match:
                 return match.groupdict()
+            else:
+                logger.debug(f"[_apply_mask] Regex did not match. Pattern: {pattern[:150]!r}, Text: {text[:80]!r}")
         except re.error as e:
             # Логируем маску для диагностики - показываем первые 200 символов
             logger.error(f"Invalid mask pattern: {e}. Pattern (first 200 chars): {pattern[:200]!r}")
