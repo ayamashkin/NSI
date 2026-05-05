@@ -718,9 +718,13 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Failed to get ENS params: {e}")
 
-        # Если из индекса ничего не получили — fallback на parsed params (legacy)
-        if not ens_params_from_index:
-            ens_params_from_index = final_matched_params
+        # Нормализация типов: float 12.0 → int 12, str "2.0" → int 2
+        if final_matched_params:
+            final_matched_params = self._normalize_params(final_matched_params)
+            logger.debug(f"[PARAM_MATCH] Normalized params: {final_matched_params}")
+        if ens_params_from_index:
+            ens_params_from_index = self._normalize_params(ens_params_from_index)
+            logger.debug(f"[PARAM_MATCH] Normalized ens_params: {ens_params_from_index}")
 
         processing_time = (time.time() - start_time) * 1000
 
@@ -735,7 +739,7 @@ class AutomatedParametricProcessor:
                 'mdm_key': final_mdm_key or final_ens_code,
                 'score': final_score,
                 'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type,
-                'params': ens_params_from_index  # ← теперь из ENS индекса!
+                'params': ens_params_from_index  # ← из ENS индекса, нормализованные типы
             } if final_ens_code else None,
             confidence=max(match_result.confidence, fuzzy_score),
             processing_time_ms=processing_time,
@@ -749,6 +753,34 @@ class AutomatedParametricProcessor:
             item_type=mask.item_type,
             standard=mask.standard
         )
+
+    def _normalize_value_types(self, value: Any) -> Any:
+        """
+        Нормализация типов значений параметров.
+        - float 12.0 → int 12
+        - str "2.0" → int 2
+        - str "1.5" → float 1.5
+        - str "abc" → str "abc" (не меняем)
+        """
+        if isinstance(value, float):
+            if value == int(value):
+                return int(value)
+            return value
+        if isinstance(value, str):
+            try:
+                f = float(value)
+                if f == int(f):
+                    return int(f)
+                return f
+            except ValueError:
+                return value
+        return value
+
+    def _normalize_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Нормализация типов для всех значений в словаре параметров."""
+        if not params:
+            return params
+        return {k: self._normalize_value_types(v) for k, v in params.items()}
 
     def _get_ens_by_code(self, ens_code: str) -> Optional[Dict[str, Any]]:
         """Поиск записи ЕСН по коду в индексе."""
