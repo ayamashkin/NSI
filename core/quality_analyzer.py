@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.automated_processor import AutomatedParametricProcessor
-from utils.excel_loader import ExcelLoader
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,6 @@ class QualityAnalyzer:
 
     def __init__(self, processor: AutomatedParametricProcessor):
         self.processor = processor
-        self.loader = ExcelLoader()
         self._last_detail_results: List[Dict[str, Any]] = []
 
     def analyze_file(self, excel_path: str) -> Dict[str, QualityStats]:
@@ -66,7 +64,19 @@ class QualityAnalyzer:
             Словарь: ключ "item_type|standard" → QualityStats
         """
         logger.info(f"[ANALYZE] Загрузка файла: {excel_path}")
-        texts = self.loader.load(excel_path)
+
+        import pandas as pd
+        df = pd.read_excel(excel_path)
+
+        name_col = 'Краткое наименование'
+        if name_col not in df.columns:
+            name_cols = [c for c in df.columns if 'наименование' in str(c).lower()]
+            if name_cols:
+                name_col = name_cols[0]
+            else:
+                raise ValueError("Колонка с наименованием не найдена")
+
+        texts = df[name_col].astype(str).tolist()
         logger.info(f"[ANALYZE] Загружено {len(texts)} строк")
 
         # Группировка статистики
@@ -95,7 +105,7 @@ class QualityAnalyzer:
                 stats.total += 1
 
                 # ens_code определен?
-                if result.ens_code:
+                if result.ens_match and result.ens_match.get('code'):
                     stats.ens_code_found += 1
 
                 # params распознаны (парсинг text)?
@@ -147,16 +157,134 @@ class QualityAnalyzer:
         self._last_detail_results = detail_results
         return stats_by_group
 
-    def format_report_json(self, stats: Dict[str, QualityStats]) -> dict:
+    def format_report(self, stats: Dict[str, QualityStats]) -> str:
         """
-        Форматировать отчет в виде JSON-структуры.
+        Форматировать отчет в виде текстовой таблицы.
 
         Args:
             stats: Результат analyze_file()
 
         Returns:
-            dict с полной статистикой
+            Строка с таблицей
         """
+        lines = []
+        lines.append("=" * 120)
+        lines.append("АНАЛИЗ КАЧЕСТВА РАСПОЗНАВАНИЯ")
+        lines.append("=" * 120)
+
+        # Сортировка: сначала по item_type, затем по standard
+        sorted_items = sorted(stats.items(), key=lambda x: (x[1].item_type, x[1].standard))
+
+        # Заголовок таблицы
+        header = (
+            f"{'Тип':<12} {'Стандарт':<30} {'Всего':>6} "
+            f"{'ENS код':>8} {'%':>6} "
+            f"{'Params':>8} {'%':>6} "
+            f"{'ENS params':>10} {'%':>6} "
+            f"{'Оба':>8} {'%':>6}"
+        )
+        lines.append(header)
+        lines.append("-" * 120)
+
+        # Итоги
+        total_all = 0
+        total_ens_code = 0
+        total_params = 0
+        total_ens_params = 0
+        total_both = 0
+
+        for key, s in sorted_items:
+            line = (
+                f"{s.item_type:<12} {s.standard:<30} {s.total:>6} "
+                f"{s.ens_code_found:>8} {s.ens_code_percent:>5.1f}% "
+                f"{s.params_parsed:>8} {s.params_percent:>5.1f}% "
+                f"{s.ens_params_parsed:>10} {s.ens_params_percent:>5.1f}% "
+                f"{s.both_params_parsed:>8} {s.both_params_percent:>5.1f}%"
+            )
+            lines.append(line)
+
+            total_all += s.total
+            total_ens_code += s.ens_code_found
+            total_params += s.params_parsed
+            total_ens_params += s.ens_params_parsed
+            total_both += s.both_params_parsed
+
+        # Итоговая строка
+        lines.append("-" * 120)
+        if total_all > 0:
+            total_line = (
+                f"{'ИТОГО':<12} {'':<30} {total_all:>6} "
+                f"{total_ens_code:>8} {total_ens_code/total_all*100:>5.1f}% "
+                f"{total_params:>8} {total_params/total_all*100:>5.1f}% "
+                f"{total_ens_params:>10} {total_ens_params/total_all*100:>5.1f}% "
+                f"{total_both:>8} {total_both/total_all*100:>5.1f}%"
+            )
+            lines.append(total_line)
+
+        lines.append("=" * 120)
+        lines.append("")
+        lines.append("Легенда:")
+        lines.append("  ENS код   — определен ens_code (по TF-IDF или маске)")
+        lines.append("  Params    — распознаны params из текста (парсинг)")
+        lines.append("  ENS params — распознаны ens_params из модели ENS")
+        lines.append("  Оба       — и params, и ens_params распознаны")
+
+        return "\n".join(lines)
+
+    def save_excel(self, stats: Dict[str, QualityStats], output_path: str):
+        """Сохранить отчет в Excel."""
+        try:
+            import pandas as pd
+        except ImportError:
+            logger.error("pandas не установлен — Excel не сохранен")
+            return
+
+        rows = []
+        for key, s in sorted(stats.items(), key=lambda x: (x[1].item_type, x[1].standard)):
+            rows.append({
+                "Тип": s.item_type,
+                "Стандарт": s.standard,
+                "Всего": s.total,
+                "ENS код (шт)": s.ens_code_found,
+                "ENS код (%)": s.ens_code_percent,
+                "Params (шт)": s.params_parsed,
+                "Params (%)": s.params_percent,
+                "ENS params (шт)": s.ens_params_parsed,
+                "ENS params (%)": s.ens_params_percent,
+                "Оба (шт)": s.both_params_parsed,
+                "Оба (%)": s.both_params_percent,
+            })
+
+        df = pd.DataFrame(rows)
+
+        # Итоговая строка
+        total_all = sum(s.total for s in stats.values())
+        total_ens = sum(s.ens_code_found for s in stats.values())
+        total_par = sum(s.params_parsed for s in stats.values())
+        total_ens_par = sum(s.ens_params_parsed for s in stats.values())
+        total_both = sum(s.both_params_parsed for s in stats.values())
+
+        if total_all > 0:
+            totals = pd.DataFrame([{
+                "Тип": "ИТОГО",
+                "Стандарт": "",
+                "Всего": total_all,
+                "ENS код (шт)": total_ens,
+                "ENS код (%)": round(total_ens / total_all * 100, 2),
+                "Params (шт)": total_par,
+                "Params (%)": round(total_par / total_all * 100, 2),
+                "ENS params (шт)": total_ens_par,
+                "ENS params (%)": round(total_ens_par / total_all * 100, 2),
+                "Оба (шт)": total_both,
+                "Оба (%)": round(total_both / total_all * 100, 2),
+            }])
+            df = pd.concat([df, totals], ignore_index=True)
+
+        df.to_excel(output_path, index=False, engine='openpyxl')
+        logger.info(f"[ANALYZE] Excel сохранен: {output_path}")
+
+    def save_json(self, stats: Dict[str, QualityStats], output_path: str):
+        """Сохранить статистику и детали в JSON."""
         sorted_items = sorted(stats.items(), key=lambda x: (x[1].item_type, x[1].standard))
 
         total_all = sum(s.total for s in stats.values())
@@ -189,7 +317,7 @@ class QualityAnalyzer:
                 }
             })
 
-        report = {
+        data = {
             "summary": {
                 "total": total_all,
                 "ens_code": {
@@ -209,22 +337,12 @@ class QualityAnalyzer:
                     "percent": round(total_both / total_all * 100, 2) if total_all else 0
                 }
             },
-            "groups": groups
+            "groups": groups,
+            "details": self._last_detail_results
         }
 
-        return report
-
-    def save_json(self, stats: Dict[str, QualityStats], output_path: str):
-        """Сохранить статистику и детали в JSON."""
-        data = {
-            "summary": {
-                k: {f: getattr(v, f) for f in v.__dataclass_fields__}
-                for k, v in stats.items()
-            },
-            "details": getattr(self, '_last_detail_results', [])
-        }
-        Path(output_path).write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                                     encoding='utf-8')
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
         logger.info(f"[ANALYZE] JSON сохранен: {output_path}")
 
 

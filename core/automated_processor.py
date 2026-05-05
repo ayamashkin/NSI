@@ -490,6 +490,7 @@ class AutomatedParametricProcessor:
         final_score = max(match_result.score, fuzzy_score)
 
 
+
         processing_time = (time.time() - start_time) * 1000
 
         return ProcessingResult(
@@ -499,6 +500,7 @@ class AutomatedParametricProcessor:
             params=final_matched_params,
             ens_match={
                 'code': final_ens_code,
+                'name': match_result.ens_name if match_result.ens_code else None,
                 'mdm_key': match_result.mdm_key if match_result.ens_code else fuzzy_ens_code,
                 'score': final_score,
                 'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type,

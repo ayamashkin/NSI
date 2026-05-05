@@ -103,6 +103,7 @@ def _is_empty_equivalent(field: str, value: Any) -> bool:
 class ParametricMatch:
     """Результат параметрического сопоставления."""
     ens_code: Optional[str]
+    ens_name: Optional[str]
     mdm_key: Optional[str]
     matched_params: Dict[str, Any]
     score: float
@@ -355,6 +356,7 @@ class ParametricENSClient:
                 if match_result:
                     return ParametricMatch(
                         ens_code=match_result.get('код'),
+                        ens_name=match_result.get('полное_наименование') or match_result.get('наименование'),
                         mdm_key=match_result.get('mdm_key'),
                         matched_params=extracted_params,
                         score=match_result.get('_match_score', 0.0),
@@ -384,6 +386,7 @@ class ParametricENSClient:
                 if regex_confidence > 0.1:
                     return ParametricMatch(
                         ens_code=None,
+                        ens_name=None,
                         mdm_key=None,
                         matched_params=extracted_params,
                         score=0.0,
@@ -577,6 +580,7 @@ class ParametricENSClient:
 
                 return ParametricMatch(
                     ens_code=best_item.get('код'),
+                    ens_name=best_item.get('полное_наименование') or best_item.get('наименование'),
                     mdm_key=best_item.get('mdm_key'),
                     matched_params={},
                     score=best_score,

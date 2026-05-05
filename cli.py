@@ -458,12 +458,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
-@click.option('--output', '-o', help='JSON-файл для детального отчета')
+@click.option('--output', '-o', help='Excel-файл для сохранения отчета')
+@click.option('--json', '-j', 'json_output', help='JSON-файл для детального отчета')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
-@click.option('--workers', '-w', default=4, type=int, help='Количество workers')
-def analyze_quality_cmd(input_file, db, ens_index, output, llm, workers):
+def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm):
     """Анализ качества распознавания: статистика по (item_type, standard)"""
-    from core.quality_analyzer import analyze_quality
+    from core.quality_analyzer import QualityAnalyzer
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
@@ -491,15 +491,17 @@ def analyze_quality_cmd(input_file, db, ens_index, output, llm, workers):
 
     click.echo(f"📊 Анализ файла: {input_file}...")
     stats = analyzer.analyze_file(input_file)
-    report = analyzer.format_report_json(stats)
+    report_text = analyzer.format_report(stats)
 
-    # JSON вывод в stdout
-    click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    click.echo("\n" + report_text)
 
     if output:
-        with open(output, 'w', encoding='utf-8') as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        click.echo(f"\n💾 JSON отчет сохранен: {output}", err=True)
+        analyzer.save_excel(stats, output)
+        click.echo(f"\n💾 Excel отчет сохранен: {output}")
+
+    if json_output:
+        analyzer.save_json(stats, json_output)
+        click.echo(f"\n💾 JSON отчет сохранен: {json_output}")
 
 
 @cli.group()
