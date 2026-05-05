@@ -15,8 +15,9 @@ api:
     username: "default7@yandex.ru"  # ← Ваш email/логин
     password_file: "secrets/openwebui_password.txt"  # ← Файл с паролем
 
+    timeout: 240
 
-    default_model: "Qwen/Qwen3-14B-AWQ"
+    default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
 
   mws:
     base_url: "https://api.gpt.mws.ru/"
@@ -44,7 +45,7 @@ database:
 # =============================================================================
 processing:
   default_workers: 1
-  default_timeout: 120
+  default_timeout: 180
   batch_size: 100
   retry_attempts: 3
   retry_delay: 5  # секунд
@@ -73,8 +74,8 @@ logging:
 # =============================================================================
 mask_generation:
   # Сервис и модель по умолчанию для генерации масок
-  default_service: "mws"
-  default_model: "qwen2.5-72b-instruct"
+  default_service: "openwebui"
+  default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
   default_temperature: 0.1
 
   keyword_match_from_name: true

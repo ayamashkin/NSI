@@ -224,13 +224,13 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.p
 
 ```bash
 # Все записи
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json
 
 # Только успешно распознанные (для загрузки в систему)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json --success-only
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json --success-only
 
 # С debug-информацией (для анализа)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json --include-details
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json --include-details
 ```
 
 
@@ -238,15 +238,14 @@ python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/
 # вызовы для отладки
 python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/hardware2/ens_hardware.pkl    
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm      
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o results.json
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.json
 ```
 
 ```bash
 # prod
 python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" -o models/hardware/ens_hardware.pkl    
-python cli.py generate-masks -d cache/masks.db -i models/hardware
-/ens_hardware.pkl --llm      
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o results.json
+python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm      
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json
 ```
 
 ## CLI Команды

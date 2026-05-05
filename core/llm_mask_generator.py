@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -260,26 +259,6 @@ class LLMMaskGenerator:
                     break
         except Exception as e:
             logger.warning(f"[LLMMaskGenerator] Не удалось загрузить skip_fields: {e}")
-        return default
-
-    def _load_optional_fields(self) -> set:
-        """Загрузка списка опциональных полей из ens_column_mapping.yaml."""
-        # Поля, которые по бизнес-логике могут отсутствовать в номенклатуре
-        # даже если в ЕСН они заполнены у 100% записей
-        default = {'исполнение'}
-        try:
-            import yaml
-            from pathlib import Path
-            for path in ['config/ens_column_mapping.yaml', 'ens_column_mapping.yaml']:
-                if Path(path).exists():
-                    with open(path, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
-                    fields = data.get('optional_fields', [])
-                    if fields:
-                        return set(fields)
-                    break
-        except Exception as e:
-            logger.warning(f"[LLMMaskGenerator] Не удалось загрузить optional_fields: {e}")
         return default
 
     def _get_prompt_config(self, prompt_id: Optional[str] = None) -> Optional[Any]:
@@ -583,6 +562,15 @@ class LLMMaskGenerator:
         if prompt is None:
             prompt = self._build_prompt(standard, item_type, examples, context)
 
+        # Проверка промпта перед вызовом
+        if not prompt or not prompt.strip():
+            logger.error(f"[LLMMaskGenerator] Попытка {attempt_number}: ПРОМПТ ПУСТОЙ!")
+            return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
+                model=model, temperature=temperature, success=False,
+                error_message="Prompt is empty", raw_response="PROMPT_WAS_EMPTY")
+
+        logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: prompt_len={len(prompt)}, prompt_preview={prompt[:100]}")
+
         # Вызов API с полным логированием
         raw_response = ""
         response = None
@@ -762,284 +750,26 @@ class LLMMaskGenerator:
             "Не добавляйте в ответ никаких других объектов или комментариев, кроме итогового JSON."
         )
 
-
-    @staticmethod
-    def _format_display_value(val) -> str:
-        """Форматирование значения для отображения в примерах."""
-        if val is None:
-            return ''
-        # float 2.0 -> '2', float 2.5 -> '2.5'
-        if isinstance(val, float):
-            if val == int(val):
-                return str(int(val))
-            return str(val)
-        return str(val)
-
-    def _select_diverse_examples(
-        self,
-        examples: List[Dict[str, Any]],
-        display_fields: List[str],
-        target_count: int = 10
-    ) -> List[Dict[str, Any]]:
-        """
-        Умный отбор примеров с разным набором параметров.
-
-        Гарантирует, что в выборку попадут примеры, демонстрирующие вариативность
-        заполнения опциональных полей (например, с исполнением и без).
-
-        Алгоритм:
-        1. Анализирует заполненность полей по ВСЕМ примерам
-        2. Находит "вариативные" поля (заполненность 5%-95%)
-        3. Группирует примеры по "сигнатуре" заполненности вариативных полей
-        4. Выбирает примеры из разных групп для максимального покрытия вариантов
-        5. Дополняет оставшимися примерами до target_count
-        """
-        if len(examples) <= target_count:
-            return examples
-
-        total = len(examples)
-
-        # Считаем заполненность каждого поля
-        field_stats = {}
-        for ex in examples:
-            for field in display_fields:
-                val = ex.get(field)
-                if val is not None and str(val).strip():
-                    field_stats[field] = field_stats.get(field, 0) + 1
-
-        # Находим вариативные поля (не 100% и не 0% заполненность)
-        # Это потенциально опциональные параметры
-        variable_fields = []
-        for field in display_fields:
-            count = field_stats.get(field, 0)
-            ratio = count / total
-            if 0.05 < ratio < 0.95:  # Поле заполнено у 5-95% записей
-                variable_fields.append(field)
-
-        if not variable_fields:
-            # Нет явно вариативных полей — отбираем с максимальным разнообразием
-            # по полному наименованию (разные длины, разные значения)
-            seen_names = set()
-            diverse = []
-            for ex in examples:
-                name = ex.get('полное_наименование') or ex.get('наименование', '')
-                if name and name not in seen_names:
-                    seen_names.add(name)
-                    diverse.append(ex)
-                if len(diverse) >= target_count:
-                    return diverse
-            # Если не набрали достаточно уникальных — добавляем оставшиеся
-            already_ids = {id(ex) for ex in diverse}
-            for ex in examples:
-                if id(ex) not in already_ids:
-                    diverse.append(ex)
-                if len(diverse) >= target_count:
-                    break
-            return diverse
-
-        # Группируем примеры по сигнатуре вариативных полей
-        # Сигнатура — битовая маска: какие вариативные поля заполнены
-        signature_groups = defaultdict(list)
-
-        for ex in examples:
-            sig_parts = []
-            for field in variable_fields:
-                val = ex.get(field)
-                is_filled = val is not None and str(val).strip()
-                sig_parts.append('1' if is_filled else '0')
-            signature = ''.join(sig_parts)
-            signature_groups[signature].append(ex)
-
-        # Отбираем примеры: по одному из каждой группы
-        # Приоритет группам с разными сигнатурами (максимально информативные)
-        selected = []
-        selected_ids = set()
-
-        # Сортируем сигнатуры: приоритет тем, где ~50% полей заполнено
-        # (максимальная информативность о вариативности)
-        # Затем по размеру группы (крупнее = более репрезентативна)
-        sorted_sigs = sorted(
-            signature_groups.keys(),
-            key=lambda s: (abs(s.count('1') - len(variable_fields)/2), -len(signature_groups[s]))
-        )
-
-        for sig in sorted_sigs:
-            group = signature_groups[sig]
-            # Берём первый пример из группы
-            ex = group[0]
-            if id(ex) not in selected_ids:
-                selected.append(ex)
-                selected_ids.add(id(ex))
-            if len(selected) >= target_count:
-                return selected
-
-        # Если ещё не набрали target_count — добавляем по второму примеру из крупных групп
-        for sig in sorted_sigs:
-            group = signature_groups[sig]
-            if len(group) > 1:
-                for ex in group[1:]:
-                    if id(ex) not in selected_ids:
-                        selected.append(ex)
-                        selected_ids.add(id(ex))
-                    if len(selected) >= target_count:
-                        return selected
-
-        # Если всё ещё не хватает — дополняем оставшимися примерами
-        for ex in examples:
-            if id(ex) not in selected_ids:
-                selected.append(ex)
-                selected_ids.add(id(ex))
-            if len(selected) >= target_count:
-                break
-
-        return selected
-
-    def _ensure_diverse_variants(
-        self,
-        selected: List[Dict[str, Any]],
-        all_examples: List[Dict[str, Any]],
-        display_fields: List[str],
-        optional_fields: set,
-        target_count: int = 10
-    ) -> List[Dict[str, Any]]:
-        """
-        Формирует примеры с вариантами заполнения для КАЖДОГО параметра.
-
-        Для каждого параметра создаёт 2 варианта:
-        - С заполненным значением (из реальных данных ЕСН)
-        - С пропущенным значением (модифицированное наименование без параметра)
-
-        Это даёт LLM понимание как параметр выглядит в строке —
-        и как строка выглядит без него.
-        """
-        import copy
-
-        result = list(selected)
-
-        # Берём один базовый пример для модификации (первый с полным наименованием)
-        base_example = None
-        for ex in all_examples:
-            name = ex.get('полное_наименование') or ex.get('наименование', '')
-            if name and str(name).strip():
-                base_example = ex
-                break
-
-        if not base_example:
-            return result
-
-        base_name = base_example.get('полное_наименование') or base_example.get('наименование', '')
-
-        # Для каждого display_field (кроме тип_изделия) создаём вариант без него
-        for field in display_fields:
-            if len(result) >= target_count:
-                break
-
-            if field == 'тип_изделия':
-                continue  # Тип изделия никогда не пропускаем
-
-            # Проверяем: есть ли уже пример с пустым этим полем
-            has_empty = any(
-                not (ex.get(field) and str(ex.get(field)).strip())
-                for ex in result
-            )
-            if has_empty:
-                continue
-
-            val = base_example.get(field)
-            if not val:
-                continue
-
-            val_str = self._format_display_value(val)
-            if not val_str or val_str not in base_name:
-                continue
-
-            # Создаём модифицированную копию без этого параметра
-            modified = dict(base_example)
-            modified[field] = None
-
-            # Удаляем значение из наименования
-            new_name = base_name.replace(val_str, '', 1)
-
-            # Чистим артефакты: двойные разделители, пустые скобки и т.д.
-            cleanups = [
-                ('()-', '-'), ('( )-', '-'), ('() ', ' '), ('()', ''),
-                ('  ', ' '), ('--', '-'), ('- -', '-'), ('-  ', ' '),
-                (' - ', ' '), ('  -', ' '), ('. -', '.'), ('-.-', '-'),
-                (' ,', ','), (', ', ','), ('  ', ' '),
-            ]
-            for old, new in cleanups:
-                while old in new_name:
-                    new_name = new_name.replace(old, new)
-            new_name = new_name.strip(' -,.')
-
-            if new_name and new_name != base_name:
-                modified['полное_наименование'] = new_name
-                modified['_variant'] = f"без_{field}"
-
-                # Проверяем что не дублируем
-                existing_names = {
-                    (ex.get('полное_наименование') or ex.get('наименование', ''))
-                    for ex in result
-                }
-                if new_name not in existing_names:
-                    result.append(modified)
-                    logger.info(
-                        f"[LLMMaskGenerator] Вариант без '{field}': "
-                        f"'{base_name}' -> '{new_name}'"
-                    )
-
-        # --- Комбинированные варианты: несколько пропущенных параметров ---
-        # Создаём варианты без 2+ параметров одновременно (если есть место)
-        combo_fields = [f for f in display_fields
-                       if f != 'тип_изделия'
-                       and base_example.get(f)
-                       and str(base_example.get(f)).strip()
-                       and str(base_example.get(f)) in base_name][:4]
-
-        for i in range(len(combo_fields)):
-            for j in range(i + 1, len(combo_fields)):
-                if len(result) >= target_count:
-                    break
-
-                f1, f2 = combo_fields[i], combo_fields[j]
-                v1 = self._format_display_value(base_example.get(f1))
-                v2 = self._format_display_value(base_example.get(f2))
-
-                if not v1 or not v2 or v1 not in base_name or v2 not in base_name:
-                    continue
-
-                combo = dict(base_example)
-                combo[f1] = None
-                combo[f2] = None
-
-                new_name = base_name.replace(v1, '', 1).replace(v2, '', 1)
-                for old, new in cleanups:
-                    while old in new_name:
-                        new_name = new_name.replace(old, new)
-                new_name = new_name.strip(' -,.')
-
-                if new_name and new_name != base_name:
-                    existing_names = {
-                        (ex.get('полное_наименование') or ex.get('наименование', ''))
-                        for ex in result
-                    }
-                    if new_name not in existing_names:
-                        combo['полное_наименование'] = new_name
-                        combo['_variant'] = f"без_{f1}_и_{f2}"
-                        result.append(combo)
-
-        # Обрезаем до target_count, сохраняя приоритет: оригинальные + варианты
-        if len(result) > target_count:
-            result = result[:target_count]
-
-        return result
-
     def _build_prompt(self, standard, item_type, examples, context):
         """
         Построение промпта для LLM-генерации regex-маски.
         Шаблон загружается из файла (prompts/templates/mask_generation.txt).
         """
         template = self._load_prompt_template()
+
+        # --- Алиасы полей: если 'тип_изделия' отсутствует, берём из 'наименование_типа' ---
+        field_aliases = {'тип_изделия': 'наименование_типа'}
+
+        # Применяем алиасы к examples (создаём 'тип_изделия' из 'наименование_типа' если нужно)
+        aliased_examples = []
+        for ex in examples:
+            new_ex = dict(ex)
+            for target, source in field_aliases.items():
+                if target not in new_ex or not new_ex.get(target):
+                    if source in new_ex and new_ex.get(source):
+                        new_ex[target] = new_ex[source]
+            aliased_examples.append(new_ex)
+        examples = aliased_examples
 
         # --- Анализ полей ЕСН ---
         field_stats = {}
@@ -1101,12 +831,8 @@ class LLMMaskGenerator:
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
         # --- Форматирование примеров ---
-        # Умный отбор: гарантируем вариативность опциональных параметров
-        optional_fields = self._load_optional_fields()
-        diverse_examples = self._select_diverse_examples(examples, display_fields, target_count=5)
-        sample_examples = self._ensure_diverse_variants(
-            diverse_examples, examples, display_fields, optional_fields, target_count=10
-        )
+        # Берём разнообразные примеры: с пропущенными параметрами, разные покрытия и т.д.
+        sample_examples = self._select_diverse_examples(examples, n=10)
         examples_lines = []
         for i, ex in enumerate(sample_examples, 1):
             name = ex.get('полное_наименование') or ex.get('наименование', '')
@@ -1117,97 +843,60 @@ class LLMMaskGenerator:
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
-                    formatted = self._format_display_value(val)
-                    filled_fields.append(f"    {field}: {formatted}")
+                    filled_fields.append(f"    {field}: {val}")
+
+            # Отмечаем пропущенные параметры (важно для опциональности в regex)
+            missing_fields = [f for f in display_fields if not ex.get(f) or not str(ex.get(f)).strip()]
+            if missing_fields:
+                filled_fields.append(f"    [ПРОПУЩЕНЫ: {', '.join(missing_fields)}]")
 
             # Структура: разбиваем строку на части по найденным параметрам
             structure_parts = []
-            remaining = name
             for field in display_fields:
                 val = ex.get(field)
-                if val is not None:
-                    disp_val = self._format_display_value(val)
-                    if disp_val and disp_val in remaining:
-                        pos = remaining.find(disp_val)
-                        if pos > 0:
-                            structure_parts.append(f"[{remaining[:pos].strip()}]")
-                        structure_parts.append(f"(?P<{field}>{disp_val})")
-                        remaining = remaining[pos + len(disp_val):]
-            if remaining.strip():
-                structure_parts.append(f"[{remaining.strip()}]")
-            structure_str = " ".join(structure_parts) if structure_parts else "(не удалось разобрать)"
+                if val is not None and str(val).strip():
+                    group_name = field_name_map.get(field, field)
+                    structure_parts.append(f"(?P<{group_name}>{val})")
 
-            in_text = []
-            for field in display_fields:
-                val = ex.get(field)
-                if val is not None:
-                    disp_val = self._format_display_value(val)
-                    if disp_val and disp_val in name:
-                        in_text.append(f"      {field}='{disp_val}' на позиции {name.find(disp_val)}")
-            in_text_str = "\n".join(in_text) if in_text else "      (нет)"
-
-            # Mapping оригинальное -> очищенное
-            mapping_lines = [f"    # {orig} -> regex: {clean}" for orig, clean in field_name_map.items() if clean != orig][:5]
-
-            # Пометка если это вариант с пропущенным параметром
-            variant_note = ""
-            if ex.get('_variant'):
-                variant_note = f"\n   ВАРИАНТ: {ex['_variant']} (параметр отсутствует в наименовании)"
+            structure_str = ' '.join(structure_parts)
 
             examples_lines.append(
                 f"{i}. ИСХОДНАЯ СТРОКА: \"{name}\"\n"
-                f"   СТРУКТУРА: {structure_str}\n"
+                f"   СТРУКТУРА: [тип_изделия] [разделители] " + structure_str + "\n"
                 f"   ПОЛЯ ЕСН:\n" + "\n".join(filled_fields)
-                + ("\n   MAPPING:\n" + "\n".join(mapping_lines) if mapping_lines else "")
-                + variant_note
-                + f"\n   РАЗБОР:\n{in_text_str}"
             )
-        examples_text = "\n\n".join(examples_lines)
 
-        # stats_lines: очищенное имя + заполненность по оригинальному
+        examples_text = "\n\n".join(examples_lines) if examples_lines else "Нет примеров"
+
+        # --- Статистика ---
         stats_lines = [f"    {field_name_map.get(k, k)}: {field_stats.get(k, total)} из {total}" for k in field_name_map]
+        stats_text = "\n".join(stats_lines) if stats_lines else "Нет статистики"
+
+        # --- Подстановка в шаблон ---
+        # params_list: JSON-список очищенных имён
+        import json
         params_list = json.dumps(regex_fields, ensure_ascii=False)
-        # Загружаем опциональные поля (не попадают в required никогда)
-        optional_fields = self._load_optional_fields()
 
-        # Required: поля с заполненностью >= 95%, не опциональные,
-        # и ПРИСУТСТВУЮЩИЕ в полном_наименовании (иначе regex не сможет их извлечь)
-        required_threshold = int(total * 0.95)
-        required_fields = []
-        for k, v in sorted_fields:
-            if v >= required_threshold and k in field_name_map and k not in optional_fields:
-                # Проверяем что поле встречается в полном_наименовании хотя бы у 1 записи
-                in_any_name = any(
-                    str(ex.get(k, '')).strip() and str(ex.get(k, '')) in str(ex.get('полное_наименование', ''))
-                    for ex in examples
-                )
-                if in_any_name:
-                    required_fields.append(field_name_map[k])
-
-        if not required_fields:
-            for k, v in sorted_fields:
-                if v >= total * 0.8 and k in field_name_map and k not in optional_fields:
-                    in_any_name = any(
-                        str(ex.get(k, '')).strip() and str(ex.get(k, '')) in str(ex.get('полное_наименование', ''))
-                        for ex in examples
-                    )
-                    if in_any_name:
-                        required_fields.append(field_name_map[k])
-                        if len(required_fields) >= 5:
-                            break
+        # required_list: JSON-список (все кроме опциональных)
+        optional_params = {'исполнение', 'покрытие', 'марка_материала'}
+        required_fields = [f for f in regex_fields if f not in optional_params]
         required_list = json.dumps(required_fields, ensure_ascii=False)
-        context_text = f"\nДоп. контекст: {json.dumps(context, ensure_ascii=False)}\n" if context else ""
 
-        # --- Подстановка в шаблон (str.replace — безопасно при { в данных) ---
+        # params_hint: строка для подсказки
+        params_hint = ", ".join(regex_fields[:10])
+
+        # context_text
+        context_text = context.get('context', '') if context else ''
+
+        # Подстановка через str.replace (НЕ format! из-за {} в данных)
         result = template
         replacements = {
             "{item_type}": item_type,
             "{standard}": standard,
             "{example_count}": str(len(sample_examples)),
-            "{total_examples}": str(total),
             "{examples_text}": examples_text,
-            "{stats_text}": "\n".join(stats_lines),
-            "{params_hint}": ", ".join(regex_fields),
+            "{stats_text}": stats_text,
+            "{params_hint}": params_hint,
             "{params_list}": params_list,
             "{required_list}": required_list,
             "{context_text}": context_text,
@@ -1221,6 +910,61 @@ class LLMMaskGenerator:
             logger.warning(f"[LLMMaskGenerator] Неподставленные placeholder'ы: {[m.group() for m in remaining[:5]]}")
 
         return result
+
+    @staticmethod
+    def _select_diverse_examples(examples: List[Dict], n: int = 10) -> List[Dict]:
+        """
+        Выбор разнообразных примеров для промпта.
+
+        Цель: показать LLM записи с РАЗНЫМ набором параметров:
+        - С полным набором (все поля заполнены)
+        - С пропущенным исполнением
+        - С пропущенным покрытием
+        - С пропущенным диаметром (если есть)
+
+        Это позволяет LLM сделать параметры опциональными через ? в regex.
+        """
+        if len(examples) <= n:
+            return examples
+
+        selected = []
+        seen_patterns = set()
+
+        # 1. Пример с максимальным набором полей (первый, обычно полный)
+        selected.append(examples[0])
+        seen_patterns.add('full')
+
+        # 2. Ищем примеры с пропущенными полями
+        key_fields = ['исполнение', 'покрытие', 'тип_резьбы', 'марка_материала', 'шаг_резьбы', 'номинальный_диаметр_резьбы']
+
+        for field in key_fields:
+            for ex in examples[1:]:
+                pattern_key = f"missing_{field}"
+                if pattern_key in seen_patterns:
+                    continue
+                # Проверяем что это поле пропущено, но другие важные есть
+                if not ex.get(field) or not str(ex.get(field)).strip():
+                    # Проверяем что не все поля пустые (иначе бесполезный пример)
+                    has_some = any(ex.get(f) and str(ex.get(f)).strip() for f in key_fields if f != field)
+                    if has_some:
+                        selected.append(ex)
+                        seen_patterns.add(pattern_key)
+                        break
+            if len(selected) >= n // 2:
+                break
+
+        # 3. Дополняем случайными разнообразными до n
+        import random
+        random.seed(42)  # воспроизводимость
+        remaining = [ex for ex in examples if ex not in selected]
+        random.shuffle(remaining)
+
+        # Добавляем до n штук
+        needed = n - len(selected)
+        if remaining and needed > 0:
+            selected.extend(remaining[:needed])
+
+        return selected[:n]
 
     def _preprocess_json_text(self, text: str) -> str:
         r"""

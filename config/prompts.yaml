@@ -23,8 +23,8 @@ prompts:
       - "анкер"
       - "саморез"
       - "шайба"
-    service: "mws"
-    model: "qwen2.5-72b-instruct"
+    service: "openwebui"
+    model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
     temperature: 0.1
 
   # ==========================================================================
@@ -37,8 +37,8 @@ prompts:
     category: "hardware_washer"
     keywords:
       - "шайбы"
-    service: "mws"
-    model: "qwen2.5-72b-instruct"
+    service: "openwebui"
+    model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
     temperature: 0.1
   # ==========================================================================
   # Металлы и прокат
@@ -66,6 +66,6 @@ prompts:
       - "прутки"
         # Регулярное выражение
       - 'regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\.|ст\.сорт\.|ст\.констр\.|ст\.КАЧ\.'
-    service: "gigachat"
-    model: "GigaChat-2"
+    service: "openwebui"
+    model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
     temperature: 0.1

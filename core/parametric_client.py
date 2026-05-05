@@ -213,6 +213,23 @@ class ParametricENSClient:
         if _shaiba_old2 in relaxed:
             relaxed = relaxed.replace(_shaiba_old2, _shaiba_new2, 1)
 
+        # 8. Болт: добавить "-" после (исполнение) если его нет
+        #    "Болт (2)-12-..." → паттерн после "(2)" не содержит "-"
+        #    Ищем '(?P<исполнение>' → '\\d+\\)\\s*\\)?' → если дальше не '-', добавляем
+        _exec_marker = r'(?P<исполнение>'
+        _exec_pos = relaxed.find(_exec_marker)
+        if _exec_pos >= 0:
+            _exec_rest = relaxed[_exec_pos:]
+            _exec_dash_idx = _exec_rest.find(r')\s*)?')
+            if _exec_dash_idx >= 0:
+                _after_exec = _exec_rest[_exec_dash_idx + len(r')\s*)?'):]
+                if not _after_exec.startswith('-'):
+                    # Уже есть )\s*)? → заменяем на )\s*-)?
+                    _fixed_rest = (_exec_rest[:_exec_dash_idx] +
+                                   r')\s*-)?' +
+                                   _exec_rest[_exec_dash_idx + len(r')\s*)?'):])
+                    relaxed = relaxed[:_exec_pos] + _fixed_rest
+
         # Проверяем что результат — валидный regex
         try:
             re.compile(relaxed)
@@ -383,11 +400,15 @@ class ParametricENSClient:
         best_match = None
         best_score = 0.0
 
+        # Нормализуем запрошенный стандарт для сравнения
+        query_std_norm = self._normalize_standard(standard) if standard else None
+
         for item in items:
             # Фильтр по стандарту (нтд) — обязательное совпадение
-            if standard:
+            if query_std_norm:
                 item_std = item.get('нтд') or item.get('standard')
-                if item_std and standard not in str(item_std) and str(item_std) not in standard:
+                item_std_norm = self._normalize_standard(item_std) if item_std else None
+                if item_std_norm and query_std_norm != item_std_norm:
                     continue  # Пропускаем записи с другим стандартом
 
             score = self._calculate_match_score(params, required, item)
@@ -398,11 +419,20 @@ class ParametricENSClient:
                 best_match['_match_score'] = score
                 best_match['_match_type'] = 'exact' if score > 0.9 else 'partial'
 
-        # Minimum threshold: отбрасываем слишком слабые совпадения
+        # Minimum threshold
         if best_score < 0.7:
             return None
 
         return best_match
+
+    @staticmethod
+    def _normalize_standard(std: Optional[str]) -> str:
+        """Нормализация стандарта для сравнения: ОСТ 1 → ОСТ1."""
+        if not std:
+            return ''
+        s = str(std).strip()
+        s = re.sub(r'ОСТ\s*1', 'ОСТ1', s)
+        return s
 
     def _calculate_match_score(
         self,
