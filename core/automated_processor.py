@@ -422,7 +422,7 @@ class AutomatedParametricProcessor:
         if not match_result.matched_params and match_result.score > 0:
             import re
             try:
-                m = re.match(self.parametric_client._relax_pattern(mask.pattern), text)
+                m = re.match(self.parametric_client._relax_pattern(mask.pattern, standard=mask.standard), text)
                 if m:
                     fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                     if fallback_params:
@@ -433,7 +433,7 @@ class AutomatedParametricProcessor:
         relaxed_result = None
         if match_result.score == 0 and not match_result.matched_params:
             try:
-                relaxed_pattern = self._relax_pattern(mask.pattern)
+                relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=mask.standard)
                 if relaxed_pattern != mask.pattern:
                     # Создаём временную маску с ослабленным паттерном
                     relaxed_mask = type(mask)(

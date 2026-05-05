@@ -143,6 +143,8 @@ class StandardExtractor:
             return None
 
         text = text.strip()
+        # Очистка от пунктуации в конце (Шайба ...-ОСТ 1 34505-80, -> Шайба ...-ОСТ 1 34505-80)
+        text = text.rstrip(',.;: ')
 
         # Пробуем каждый тип стандарта
         for std_type, patterns in self._compiled.items():

@@ -363,7 +363,8 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--validate/--no-validate', default=True, help='Проверять валидность')
 @click.option('--success-only', is_flag=True, help='Выгружать только успешно распознанные')
 @click.option('--include-details', is_flag=True, help='Включить debug-информацию (details) в вывод')
-def batch(input_file, db, ens_index, output, llm, validate, success_only, include_details):
+@click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
+def batch(input_file, db, ens_index, output, llm, validate, success_only, include_details, coating_map):
     """Пакетная обработка с параметрическим поиском"""
     import pandas as pd
     from tqdm import tqdm
@@ -385,6 +386,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
 
     texts = df[name_col].astype(str).tolist()
     click.echo(f"✅ Загружено {len(texts)} записей")
+
+    # Инициализация CoatingMapper
+    if coating_map:
+        from core.coating_mapper import init_mapper
+        init_mapper(coating_map)
+        click.echo(f"🎨 Справочник покрытий загружен: {coating_map}")
 
     settings = get_settings()
     llm_clients = {}
@@ -461,7 +468,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
 @click.option('--output', '-o', help='Excel-файл для сохранения отчета')
 @click.option('--json', '-j', 'json_output', help='JSON-файл для детального отчета')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
-def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm):
+@click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
+def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coating_map):
     """Анализ качества распознавания: статистика по (item_type, standard)"""
     from core.quality_analyzer import QualityAnalyzer
     from core.mask_database import MaskDatabase
@@ -485,6 +493,12 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm):
         use_llm_generation=llm,
         settings=settings
     )
+
+    # Инициализация CoatingMapper
+    if coating_map:
+        from core.coating_mapper import init_mapper
+        init_mapper(coating_map)
+        click.echo(f"🎨 Справочник покрытий загружен: {coating_map}")
 
     from core.quality_analyzer import QualityAnalyzer
     analyzer = QualityAnalyzer(processor=processor)

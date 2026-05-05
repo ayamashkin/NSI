@@ -214,56 +214,7 @@ class ParametricENSClient:
         if _shaiba_old2 in relaxed:
             relaxed = relaxed.replace(_shaiba_old2, _shaiba_new2, 1)
 
-        # 8. Винт: добавить \s* перед \( в группе исполнения
-        #    "Винт (4)-5-..." → паттерн "(?:\((?P<исполнение>" без пробела
-        relaxed = relaxed.replace(
-            r'(?:\u005c(\u005cs*(?P<исполнение>',
-            r'(?:\s*\(\s*(?P<исполнение>',
-            1
-        )
-
-        # 9. Исполнение: сделать скобки опциональными, разрешить пробел/дефис после
-        #    "Болт 2M12..." → исполнение без скобок; "(2)-12" → дефис после )
-        relaxed = relaxed.replace(
-            r'(?:\s*\((?P<исполнение>\d+)\)\s*)?',
-            r'(?:\s*\(?(?P<исполнение>\d+)\)?[\s-]*)?',
-            1
-        )
-
-        # 10. Метрическая резьба: добавить опциональный шаг (x1,25)
-        #     "M12x1,25" → M12 + x1,25
-        relaxed = relaxed.replace(
-            r'(?:M(?P<номинальный_диаметр_резьбы>\d+))',
-            r'(?:M(?P<номинальный_диаметр_резьбы>\d+)(?:[xX×]\d+(?:[.,]\d+)?)?)',
-            1
-        )
-
-        # 11. Класс поля допуска: ограничить буквами (без цифр)
-        #     [\d+][\w]* съедает цифры → [\d+][a-zA-Zа-яА-Я]*
-        relaxed = relaxed.replace(
-            r'(?P<класс_поле_допуска>[\d+][\w]*)',
-            r'(?P<класс_поле_допуска>[\d+][a-zA-Zа-яА-Я]*)',
-            1
-        )
-
-        # 12. Удалить конфликтующую группу tipo_rezby=M
-        #     (?:\s*(?P<tipo_rezby>M))?\s*[-\s]* крадёт M из M12
-        relaxed = relaxed.replace(
-            r'(?:\s*(?P<тип_резьбы>M))?\s*[-\s]*',
-            r'\s*[-\s]*',
-            1
-        )
-
-        # 13. Группа прочности: ограничить цифры перед точкой
-        #     \d+\.\d+ → 100.58 интерпретирует как длина.100 + группа.58
-        #     \d{1,2}(?:\.\d+)? → 5.8, 10.9, но не 100.58
-        relaxed = relaxed.replace(
-            r'(?P<группа_класс_прочности>\d+\.\d+)',
-            r'(?P<группа_класс_прочности>\d{1,2}(?:\.\d+)?)',
-            1
-        )
-
-        # Проверяем что результат — валидный regex
+        # Проверяем что результат - валидный regex
         try:
             re.compile(relaxed)
         except re.error as e:
@@ -327,7 +278,7 @@ class ParametricENSClient:
                 )
 
         # Шаг 2: Применяем маску (с релаксацией для совместимости)
-        # Если pattern передан напрямую — используем его (skip БД)
+        # Если pattern передан напрямую - используем его (skip БД)
         effective_mask = mask
         if pattern and not mask:
             # Создаём временный mask-like объект
@@ -337,13 +288,13 @@ class ParametricENSClient:
             )
 
         if effective_mask:
-            relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern)
-            extracted_params = self._apply_mask(relaxed_pattern, text)
+            relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern, standard=effective_mask.standard)
+            extracted_params = self._apply_mask(relaxed_pattern, text, standard=effective_mask.standard)
 
             if extracted_params:
                 # Шаг 3: Ищем в ЕСН
                 required = getattr(effective_mask, 'required', [])
-                # Если required — JSON строка, парсим
+                # Если required - JSON строка, парсим
                 if isinstance(required, str):
                     try:
                         import json as _json
@@ -370,13 +321,13 @@ class ParametricENSClient:
                             'pattern': getattr(effective_mask, 'pattern', None)
                         }
                     )
-                # Если ЕСН не нашёл — всё равно возвращаем extracted params
+                # Если ЕСН не нашёл - всё равно возвращаем extracted params
                 # (confidence от regex match)
                 required = getattr(effective_mask, 'required', [])
                 if required:
                     regex_confidence = self._calculate_confidence(extracted_params, required)
                 else:
-                    # Если required не заданы — считаем confidence по всем non-None полям
+                    # Если required не заданы - считаем confidence по всем non-None полям
                     non_none = sum(1 for v in extracted_params.values() if v is not None)
                     regex_confidence = non_none / len(extracted_params) if extracted_params else 0.0
 
@@ -412,7 +363,7 @@ class ParametricENSClient:
             details={'error': 'No mask found and no fallback available'}
         )
 
-    def _apply_mask(self, pattern: str, text: str) -> Optional[Dict[str, Any]]:
+    def _apply_mask(self, pattern: str, text: str, standard: str = None) -> Optional[Dict[str, Any]]:
         """Применение regex маски к тексту."""
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
@@ -421,7 +372,7 @@ class ParametricENSClient:
             if match:
                 return match.groupdict()
         except re.error as e:
-            # Логируем маску для диагностики — показываем первые 200 символов
+            # Логируем маску для диагностики - показываем первые 200 символов
             logger.error(f"Invalid mask pattern: {e}. Pattern (first 200 chars): {pattern[:200]!r}")
 
         return None
@@ -439,7 +390,7 @@ class ParametricENSClient:
         query_std_norm = self._normalize_standard(standard) if standard else None
 
         for item in items:
-            # Фильтр по стандарту (нтд) — обязательное совпадение
+            # Фильтр по стандарту (нтд) - обязательное совпадение
             if query_std_norm:
                 item_std = item.get('нтд') or item.get('standard')
                 item_std_norm = self._normalize_standard(item_std) if item_std else None
@@ -479,8 +430,8 @@ class ParametricENSClient:
         Строгое сопоставление параметров с ЕНС:
         - Точное совпадение для числовых/технических полей
         - Fuzzy (Jaccard >= 0.6) только для определённых текстовых полей
-        - Поле есть в ЕНС, но нет в params — игнорируется (не штрафуем)
-        - null в params и отсутствие в ЕНС — считаем совпадением
+        - Поле есть в ЕНС, но нет в params - игнорируется (не штрафуем)
+        - null в params и отсутствие в ЕНС - считаем совпадением
         """
         if not required:
             return 0.0
@@ -505,16 +456,16 @@ class ParametricENSClient:
                 total += 1
                 continue
 
-            # Случай 2: поле есть в ЕНС, но нет в params — игнорируем
+            # Случай 2: поле есть в ЕНС, но нет в params - игнорируем
             if query_val is None and ens_val is not None:
                 continue
 
-            # Случай 3: поле есть в params, но нет в ЕНС — mismatch
+            # Случай 3: поле есть в params, но нет в ЕНС - mismatch
             if query_val is not None and ens_val is None:
                 total += 1
                 continue
 
-            # Случай 4: оба не None — сравниваем
+            # Случай 4: оба не None - сравниваем
             total += 1
             query_str = str(query_val).lower().strip()
             ens_str = str(ens_val).lower().strip()
@@ -533,7 +484,7 @@ class ParametricENSClient:
 
     def _calculate_confidence(self, params: Dict[str, Any], required: List[str]) -> float:
         """Расчет уверенности в извлечении."""
-        # Если required — JSON строка, парсим
+        # Если required - JSON строка, парсим
         if isinstance(required, str):
             try:
                 import json as _json
