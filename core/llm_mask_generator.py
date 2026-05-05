@@ -735,6 +735,11 @@ class LLMMaskGenerator:
             "Ты — эксперт по техническим стандартам ГОСТ и регулярным выражениям Python.\n\n"
             "ЗАДАЧА: Создай regex-паттерн с named groups (?P<name>...) "
             "для извлечения параметров из номенклатуры типа \"{item_type}\" по стандарту {standard}.\n\n"
+            "### КРИТИЧЕСКОЕ ПРАВИЛО\n"
+            "Создавай named groups ТОЛЬКО для параметров, которые реально видны в исходной строке.\n"
+            "НЕ добавляй группы для метаданных ЕСН (тип_резьбы, марка_материала и т.д.), "
+            "если их значения не присутствуют в номенклатурной строке.\n"
+            "Примеры показывают 'ВИДИМЫЕ В СТРОКЕ' и 'МЕТАДАННЫЕ БД' — используй только ВИДИМЫЕ для regex.\n\n"
             "Примеры:\n{examples_text}\n\n"
             "Статистика:\n{stats_text}\n\n"
             "### Формат ответа\n"
@@ -827,7 +832,42 @@ class LLMMaskGenerator:
         if 'тип_изделия' not in field_name_map:
             field_name_map['тип_изделия'] = 'тип_изделия'
 
-        regex_fields = list(field_name_map.values())
+        # === КЛЮЧЕВОЕ: разделяем видимые и невидимые параметры ===
+        # Видимые = значение реально присутствует в полном_наименовании (хотя бы в одном примере)
+        # Невидимые = метаданные ЕСН, которых нет в номенклатурной строке
+        visible_fields = set()
+        for ex in examples:
+            name = ex.get('полное_наименование') or ex.get('наименование', '')
+            if not name:
+                continue
+            name_lower = name.lower()
+            for field in list(field_name_map.keys()):
+                val = ex.get(field)
+                if val is None:
+                    continue
+                val_str = str(val).strip()
+                if not val_str:
+                    continue
+                # Нормализуем для поиска: убираем точки, пробелы, регистр
+                val_norm = val_str.lower().replace('.', '').replace(' ', '').replace(',', '')
+                name_norm = name_lower.replace('.', '').replace(' ', '').replace(',', '')
+                # Проверяем вхождение (прямое или нормализованное)
+                if val_str.lower() in name_lower or val_norm in name_norm:
+                    visible_fields.add(field)
+
+        # Разделяем поля
+        visible_field_names = [f for f in relevant_fields if f in visible_fields and f not in skip_fields]
+        invisible_field_names = [f for f in relevant_fields if f not in visible_fields and f not in skip_fields]
+
+        # regex_fields = ТОЛЬКО видимые параметры (для named groups в маске)
+        regex_fields = [field_name_map[f] for f in visible_field_names if f in field_name_map]
+
+        # Убеждаемся что тип_изделия всегда есть
+        if 'тип_изделия' not in visible_field_names and 'тип_изделия' in field_name_map:
+            visible_field_names.insert(0, 'тип_изделия')
+            if field_name_map['тип_изделия'] not in regex_fields:
+                regex_fields.insert(0, field_name_map['тип_изделия'])
+
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
         # --- Форматирование примеров ---
@@ -850,34 +890,55 @@ class LLMMaskGenerator:
             if missing_fields:
                 filled_fields.append(f"    [ПРОПУЩЕНЫ: {', '.join(missing_fields)}]")
 
-            # Структура: разбиваем строку на части по найденным параметрам
-            structure_parts = []
-            for field in display_fields:
+            # ВИДИМЫЕ параметры: те, что реально есть в строке
+            visible_parts = []
+            for field in visible_field_names:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
                     group_name = field_name_map.get(field, field)
-                    structure_parts.append(f"(?P<{group_name}>{val})")
+                    visible_parts.append(f"(?P<{group_name}>{val})")
 
-            structure_str = ' '.join(structure_parts)
+            # НЕВИДИМЫЕ параметры: метаданные из БД
+            invisible_parts = []
+            for field in invisible_field_names:
+                val = ex.get(field)
+                if val is not None and str(val).strip():
+                    invisible_parts.append(f"{field}={val}")
+
+            structure_lines = []
+            if visible_parts:
+                structure_lines.append("   ВИДИМЫЕ В СТРОКЕ: " + ' '.join(visible_parts))
+            if invisible_parts:
+                structure_lines.append("   МЕТАДАННЫЕ БД: " + ', '.join(invisible_parts))
 
             examples_lines.append(
                 f"{i}. ИСХОДНАЯ СТРОКА: \"{name}\"\n"
-                f"   СТРУКТУРА: [тип_изделия] [разделители] " + structure_str + "\n"
-                f"   ПОЛЯ ЕСН:\n" + "\n".join(filled_fields)
+                + "\n".join(structure_lines) + "\n"
+                + "   ПОЛЯ ЕСН:\n" + "\n".join(filled_fields)
             )
 
         examples_text = "\n\n".join(examples_lines) if examples_lines else "Нет примеров"
 
         # --- Статистика ---
-        stats_lines = [f"    {field_name_map.get(k, k)}: {field_stats.get(k, total)} из {total}" for k in field_name_map]
+        stats_lines = []
+        # Статистика только по ВИДИМЫМ полям (для regex)
+        for k in visible_field_names:
+            if k in field_name_map:
+                stats_lines.append(f"    {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
+        # Отдельно показываем метаданные
+        if invisible_field_names:
+            stats_lines.append("    --- МЕТАДАННЫЕ (не для regex): ---")
+            for k in invisible_field_names:
+                if k in field_name_map:
+                    stats_lines.append(f"    {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в БД, не в строке]")
         stats_text = "\n".join(stats_lines) if stats_lines else "Нет статистики"
 
         # --- Подстановка в шаблон ---
-        # params_list: JSON-список очищенных имён
+        # params_list: JSON-список очищенных имён (ТОЛЬКО видимые)
         import json
         params_list = json.dumps(regex_fields, ensure_ascii=False)
 
-        # required_list: JSON-список (все кроме опциональных)
+        # required_list: JSON-список (все видимые кроме опциональных)
         optional_params = {'исполнение', 'покрытие', 'марка_материала'}
         required_fields = [f for f in regex_fields if f not in optional_params]
         required_list = json.dumps(required_fields, ensure_ascii=False)
