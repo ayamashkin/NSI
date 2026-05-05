@@ -1,12 +1,9 @@
 """
 Модуль анализа качества распознавания параметрических данных.
 
-Группирует результаты по паре (item_type + standard) и выводит статистику:
-- Общее количество строк
-- Количество с определенным ens_code
-- Количество с распознанными params
-- Количество с распознанными ens_params
-- Проценты распознавания
+Группирует результаты по паре (item_type + standard) и выводит статистику.
+
+VERSION: 2025-05-06-fix7 (double-dollar-fix)
 """
 
 import json
@@ -14,6 +11,7 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -341,8 +339,16 @@ class QualityAnalyzer:
             "details": self._last_detail_results
         }
 
+        def _json_default(obj):
+            """JSON serializer for non-standard types."""
+            if isinstance(obj, Enum):
+                return obj.value
+            if hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
         logger.info(f"[ANALYZE] JSON сохранен: {output_path}")
 
 

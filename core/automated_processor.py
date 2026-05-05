@@ -3,7 +3,7 @@ Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2025-05-06-fix4 (generic-fallback)
+VERSION: 2025-05-06-fix7 (double-dollar-fix)
 """
 
 import logging
@@ -403,6 +403,37 @@ class AutomatedParametricProcessor:
         return best_match if best_score >= 0.6 else None
 
 
+    def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Переименование неправильных имён групп из LLM-генерированных масок
+        в корректные ENS-имена параметров.
+        """
+        if not params:
+            return params
+
+        remapped = dict(params)
+        aliases = {
+            # Кривые имена групп → правильные ENS-имена
+            'наружный_диаметр_диаметр_вписа': 'номинальный_диаметр_резьбы',
+            'наружный_диаметр': 'номинальный_диаметр_резьбы',
+            'диаметр_вписанной_окружности': 'номинальный_диаметр_резьбы',
+            'd_вп': 'номинальный_диаметр_резьбы',
+            'наружный_диаметр_головки': 'диаметр_головки',
+            'диаметр_резьбы': 'номинальный_диаметр_резьбы',
+        }
+
+        for wrong, correct in aliases.items():
+            if wrong in remapped:
+                value = remapped.pop(wrong)
+                # Если correct уже существует (например, номинальный_диаметр_резьбы=26),
+                # сдвигаем его в "длина" — типичный случай для Болт ОСТ 1 31133-80
+                if correct in remapped and correct == 'номинальный_диаметр_резьбы':
+                    remapped['длина'] = remapped[correct]
+                remapped[correct] = value
+                logger.debug(f"[REMAP] {wrong} → {correct}: {value}")
+
+        return remapped
+
     def _get_generic_pattern(self, item_type: str, standard: str = None) -> Optional[str]:
         """
         Генерация "generic" паттерна для item_type когда маска БД не срабатывает.
@@ -416,15 +447,26 @@ class AutomatedParametricProcessor:
 
         # Generic bolt pattern: Болт (исполнение)?-диаметр-длина-покрытие
         if item_upper in ('БОЛТ', 'БОЛ' + _ru_t, 'BOLT'):
+            # Metric bolt: Болт 2M12x1,25-6gx100.58 ГОСТ 7795-70
+            if standard and '7795' in standard:
+                return (
+                    r'^Болт\s*(?:(?P<исполнение>\d+)\s*)?'
+                    r'(?:M(?P<номинальный_диаметр_резьбы>\d+)'
+                    r'(?:[xX×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?'
+                    r'[-\s]*(?P<класс_поле_допуска>\d+[a-zA-Z])'
+                    r'[-\s]*[xX×]?(?P<длина>\d+(?:[.,]\d+)?))'
+                    r'(?:[-\s]*(?P<покрытие>[\w.]+))?'
+                    r'\s*$'
+                )
+            # Standard bolt: Болт (2)-8-26-Кд-ОСТ 1 31133-80
             pattern = (
-                r'^Болт\s*(?:\((?P<исполнение>\d+)\)\s*)?'
+                r'^Болт\s*(?:\((?P<исполнение>\d+)\)[-\s]*)?'
                 r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
                 r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
                 r'[-\s]+(?P<покрытие>[\w.]+)'
             )
             if standard:
-                # Add optional standard suffix
-                pattern += r'(?:[-\s]*.*)?'  # loose matching after coating
+                pattern += r'(?:[-\s]*.*)?'
             else:
                 pattern += r'(?:\s+.*)?'
             return pattern
@@ -523,8 +565,9 @@ class AutomatedParametricProcessor:
 
         # Ultimate fallback: generic pattern по item_type
         # Когда маска БД имеет неправильную структуру (лишние/отсутствующие параметры),
-        # пробуем generic паттерн который извлекает только основные параметры.
-        if not fallback_params and match_result.ens_code:
+        # или regex вообще не сработал — пробуем generic паттерн который извлекает
+        # только основные параметры (номинальный_диаметр, длина, покрытие).
+        if not fallback_params:
             import re
             try:
                 generic_pattern = self._get_generic_pattern(mask.item_type, effective_standard)
@@ -584,16 +627,35 @@ class AutomatedParametricProcessor:
         # Определяем итоговые params (fallback или обычные)
         final_matched_params = fallback_params if fallback_params else match_result.matched_params
 
+        # Remap неправильных имён групп на корректные ENS-имена
+        if final_matched_params:
+            final_matched_params = self._remap_params(final_matched_params)
+            logger.debug(f"[PARAM_MATCH] Remapped params: {final_matched_params}")
+
         if match_result.score < 0.7 or not match_result.ens_code:
             try:
                 # Получаем кандидатов из ЕСН
                 ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
-                if ens_candidates and match_result.matched_params:
-                    fuzzy_match = self._fuzzy_match_ens(match_result.matched_params, ens_candidates)
+                # Сначала пробуем fuzzy match с remapped params
+                if ens_candidates and final_matched_params:
+                    fuzzy_match = self._fuzzy_match_ens(final_matched_params, ens_candidates)
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
                         logger.info(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
+                # Если fuzzy не сработал и есть remapped params — пробуем parametric ENS search
+                if not fuzzy_ens_code and final_matched_params:
+                    # Фильтруем None значения
+                    clean_params = {k: v for k, v in final_matched_params.items() if v is not None}
+                    manual_ens = self.parametric_client._find_in_ens(
+                        clean_params,
+                        list(clean_params.keys()),  # required = все распознанные поля
+                        standard=effective_standard
+                    )
+                    if manual_ens and manual_ens.get('code'):
+                        fuzzy_ens_code = manual_ens['code']
+                        fuzzy_score = manual_ens.get('_match_score', 0.8)
+                        logger.info(f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
 
