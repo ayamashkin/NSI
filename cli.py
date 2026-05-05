@@ -454,6 +454,54 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
         click.echo(f"🚫 Отфильтровано: {stats['filtered']}")
 
 
+@cli.command('analyze-quality')
+@click.argument('input_file', type=click.Path(exists=True))
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
+@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
+@click.option('--output', '-o', help='JSON-файл для детального отчета')
+@click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
+@click.option('--workers', '-w', default=4, type=int, help='Количество workers')
+def analyze_quality_cmd(input_file, db, ens_index, output, llm, workers):
+    """Анализ качества распознавания: статистика по (item_type, standard)"""
+    from core.quality_analyzer import analyze_quality
+    from core.mask_database import MaskDatabase
+    from core.automated_processor import AutomatedParametricProcessor
+    from config.settings import get_settings
+
+    settings = get_settings()
+    llm_clients = {}
+    if llm:
+        llm_clients = _init_llm_clients(settings, all_services=True)
+        if not llm_clients:
+            click.echo("❌ LLM requested but no clients available", err=True)
+            return
+        click.echo("🤖 LLM генерация включена")
+
+    mask_db = MaskDatabase(db_path=db)
+    processor = AutomatedParametricProcessor(
+        mask_db=mask_db,
+        llm_clients=llm_clients if llm else None,
+        ens_index_path=ens_index,
+        use_llm_generation=llm,
+        settings=settings
+    )
+
+    from core.quality_analyzer import QualityAnalyzer
+    analyzer = QualityAnalyzer(processor=processor)
+
+    click.echo(f"📊 Анализ файла: {input_file}...")
+    stats = analyzer.analyze_file(input_file)
+    report = analyzer.format_report_json(stats)
+
+    # JSON вывод в stdout
+    click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+
+    if output:
+        with open(output, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        click.echo(f"\n💾 JSON отчет сохранен: {output}", err=True)
+
+
 @cli.group()
 def ens():
     """Команды для работы с ЕСН"""

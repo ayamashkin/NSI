@@ -41,11 +41,11 @@ class ProcessingResult:
 
     @property
     def ens_params(self) -> Optional[Dict[str, Any]]:
-        """Параметры из ENS записи (если есть match), иначе fallback на params."""
-        if self.ens_match and 'params' in self.ens_match and self.ens_match['params']:
+        """Параметры из ENS записи (только при наличии ens_code)."""
+        if (self.ens_match and self.ens_match.get('code')
+                and 'params' in self.ens_match and self.ens_match['params']):
             return self.ens_match['params']
-        # Fallback: возвращаем извлеченные params даже без ENS match
-        return self.params if self.params else None
+        return None
 
 
 class AutomatedParametricProcessor:

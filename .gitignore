@@ -50,7 +50,8 @@ logs/
 results/
 output/
 *.json
-prompts/debug
+prompts/debug/
+prompts/debug/*.*
 
 # OS
 .DS_Store
@@ -63,3 +64,4 @@ Thumbs.db
 /cache/
 /models/
 /logs/
+/prompts/debug/
