@@ -441,23 +441,46 @@ class ParametricENSClient:
                     except (ValueError, TypeError):
                         required = []
 
-                match_result = self._find_in_ens(extracted_params, required, standard=standard)
+                match_result = self._find_in_ens(extracted_params, required, standard=standard, text=text, item_type=item_type)
 
                 if match_result:
+                    # Извлекаем данные из ENS
+                    ens_code = match_result.get('код')
+                    ens_name = match_result.get('полное_наименование') or match_result.get('наименование')
+                    ens_params_from_index = {k: v for k, v in match_result.items() if k not in ['_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд']}
+
+                    # Парсим ens_name той же маской → ens_params_mask
+                    ens_params_mask = None
+                    if ens_name:
+                        try:
+                            ens_params_mask = self._apply_mask(relaxed_pattern, str(ens_name), standard=effective_standard)
+                        except Exception as e:
+                            logger.debug(f"[match] Failed to parse ens_name='{ens_name}': {e}")
+
+                    # Новая логика сопоставления
+                    final_score, match_type, details = self._calculate_match_score_v2(
+                        text=text,
+                        ens_name=ens_name,
+                        params=extracted_params,
+                        ens_params=ens_params_from_index,
+                        ens_params_mask=ens_params_mask,
+                        required=required
+                    )
+
                     return ParametricMatch(
-                        ens_code=match_result.get('код'),
-                        ens_name=match_result.get('полное_наименование') or match_result.get('наименование'),
+                        ens_code=ens_code,
+                        ens_name=ens_name,
                         mdm_key=match_result.get('mdm_key'),
                         matched_params=extracted_params,
-                        score=match_result.get('_match_score', 0.0),
-                        match_type=match_result.get('_match_type', 'exact'),
-                        confidence=self._calculate_confidence(
-                            extracted_params,
-                            getattr(effective_mask, 'required', [])
-                        ),
+                        ens_params=ens_params_from_index,
+                        ens_params_mask=ens_params_mask or {},
+                        score=final_score,
+                        match_type=match_type,
+                        confidence=final_score,
                         details={
                             'mask_id': getattr(effective_mask, 'id', None),
-                            'pattern': getattr(effective_mask, 'pattern', None)
+                            'pattern': getattr(effective_mask, 'pattern', None),
+                            **details
                         }
                     )
                 # Если ЕСН не нашёл - всё равно возвращаем extracted params
