@@ -9,7 +9,7 @@ LAST_FIX: 2026-05-06 22:05 — confidence=final_score; ens_params + ens_params_m
 
 import logging
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -31,19 +31,25 @@ class ProcessingLevel(Enum):
 @dataclass
 class ProcessingResult:
     """Результат обработки."""
-    text: str
-    level: ProcessingLevel
-    success: bool
-    params: Dict[str, Any]
-    ens_match: Optional[Dict[str, Any]]
-    confidence: float
-    processing_time_ms: float
-    details: Dict[str, Any]
+    text: str = ''
+    level: ProcessingLevel = ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH
+    success: bool = False
+    params: Dict[str, Any] = field(default_factory=dict)
+    ens_params: Dict[str, Any] = field(default_factory=dict)
+    ens_params_mask: Dict[str, Any] = field(default_factory=dict)
+    ens_match: Optional[Dict[str, Any]] = None
+    confidence: float = 0.0
+    processing_time_ms: float = 0.0
+    details: Dict[str, Any] = field(default_factory=dict)
     item_type: str = ''
     standard: str = ''
 
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
     @property
-    def ens_params(self) -> Optional[Dict[str, Any]]:
+    def ens_params_from_match(self) -> Optional[Dict[str, Any]]:
         """Параметры из ENS записи (только при наличии ens_code)."""
         if (self.ens_match and self.ens_match.get('code')
                 and 'params' in self.ens_match and self.ens_match['params']):
