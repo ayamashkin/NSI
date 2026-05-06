@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 21:05 — V2 scoring via generic pattern + _calculate_match_score_v2; display remap for JSON; confidence=final_score
+LAST_FIX: 2026-05-07 21:10 — V2 scoring after final_ens_name resolved; generic pattern + _calculate_match_score_v2; confidence=final_score
 """
 
 import logging
@@ -688,6 +688,23 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
 
+        # Используем лучший результат (fuzzy или обычный)
+        final_ens_code = match_result.ens_code or fuzzy_ens_code
+        final_ens_name = match_result.ens_name
+        final_mdm_key = match_result.mdm_key if match_result.ens_code else None
+
+        # Если есть ens_code но нет имени — получим name из ENS индекса
+        if final_ens_code and not final_ens_name:
+            try:
+                ens_item = self._get_ens_by_code(final_ens_code)
+                if ens_item:
+                    final_ens_name = ens_item.get('наименование') or ens_item.get('name')
+                    if not final_mdm_key:
+                        final_mdm_key = ens_item.get('mdm_key')
+                    logger.debug(f"[PARAM_MATCH] ENS name resolved: '{final_ens_name}'")
+            except Exception as e:
+                logger.warning(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
+
         # НОВАЯ ЛОГИКА: generic pattern → parse ens_name → _calculate_match_score_v2
         v2_score = 0.0
         v2_match_type = None
@@ -712,29 +729,13 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] V2 scoring error: {e}")
 
-        # Используем лучший результат (V2, fuzzy или обычный)
-        final_ens_code = match_result.ens_code or fuzzy_ens_code
+        # Финальный score
         if v2_score >= 0.99:
             final_score = v2_score
-            # Принудительно обновляем match_type
             if v2_match_type:
                 match_result.match_type = v2_match_type
         else:
             final_score = max(match_result.score, fuzzy_score)
-
-        # Если есть ens_code но нет имени — получим name из ENS индекса
-        final_ens_name = match_result.ens_name or final_ens_name
-        final_mdm_key = match_result.mdm_key if match_result.ens_code else None
-        if final_ens_code and not final_ens_name:
-            try:
-                ens_item = self._get_ens_by_code(final_ens_code)
-                if ens_item:
-                    final_ens_name = ens_item.get('наименование') or ens_item.get('name')
-                    if not final_mdm_key:
-                        final_mdm_key = ens_item.get('mdm_key')
-                    logger.debug(f"[PARAM_MATCH] ENS name resolved: '{final_ens_name}'")
-            except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
 
         # Получаем параметры из ENS записи (не из текста!)
         ens_params_from_index = None
