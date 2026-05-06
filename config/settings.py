@@ -1,6 +1,8 @@
 """
 Configuration Module
 Единый источник настроек с загрузкой API ключей из внешних файлов.
+
+VERSION: 2026-05-07 20:15 — LoggingConfig + setup_logging with RotatingFileHandler
 """
 
 import yaml

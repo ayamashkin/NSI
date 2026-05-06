@@ -2,7 +2,7 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2025-05-06-fix7 (double-dollar-fix)
+VERSION: 2026-05-07 20:15 — skip_params in _compare_param_sets; M-optional; strict exact match; ens_params_mask
 """
 
 import re

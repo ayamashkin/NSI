@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 22:05 — confidence=final_score; ens_params + ens_params_mask; coating normalization; strict exact
+LAST_FIX: 2026-05-07 20:15 — skip_params fix; ens_params_mask fallback via generic pattern; confidence=final_score; strict exact
 """
 
 import logging

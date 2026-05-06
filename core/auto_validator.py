@@ -1,7 +1,7 @@
 """
 AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
-LAST_FIX: 2026-05-06 21:15 — strict extracted vs expected check; coating token-similarity; mismatches report
+LAST_FIX: 2026-05-07 20:15 — strict extracted vs expected check; coating token-similarity; mismatches report
 """
 
 import re
