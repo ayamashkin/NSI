@@ -752,14 +752,24 @@ class AutomatedParametricProcessor:
 
         # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
-        if not ens_params_mask and final_ens_name and mask and mask.pattern:
+        if not ens_params_mask and final_ens_name:
             try:
                 import re
-                relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
-                if m:
-                    ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                    logger.debug(f"[PARAM_MATCH] ENS params mask (fallback): {ens_params_mask}")
+                # Пробуем маску БД (с релаксацией)
+                if mask and mask.pattern:
+                    relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                    m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
+                    if m:
+                        ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                        logger.debug(f"[PARAM_MATCH] ENS params mask (from mask): {ens_params_mask}")
+                # Если не сработало — пробуем generic pattern (учитывает (исполнение) и другие варианты)
+                if not ens_params_mask and mask:
+                    generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                    if generic:
+                        m = re.search(generic, str(final_ens_name), re.IGNORECASE)
+                        if m:
+                            ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                            logger.debug(f"[PARAM_MATCH] ENS params mask (from generic): {ens_params_mask}")
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] Failed to parse ens_name with mask: {e}")
 
