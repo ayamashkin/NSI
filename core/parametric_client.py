@@ -3,7 +3,7 @@ Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 15:15 — STRICT EXACT MATCH with coating permutation: exact for all params, fuzzy for покрытие (token reorder), score=1.0 or 0.0
+LAST_FIX: 2026-05-06 15:30 — STRICT EXACT MATCH + name fallback: exact params match, fuzzy coating permutation, fallback to full name exact match
 """
 
 import re
@@ -416,7 +416,7 @@ class ParametricENSClient:
                     except (ValueError, TypeError):
                         required = []
 
-                match_result = self._find_in_ens(extracted_params, required, standard=standard)
+                match_result = self._find_in_ens(extracted_params, required, standard=standard, text=text)
 
                 if match_result:
                     return ParametricMatch(
@@ -493,8 +493,8 @@ class ParametricENSClient:
 
         return None
 
-    def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Поиск по параметрам в индексе ЕСН."""
+    def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Поиск по параметрам в индексе ЕСН. Fallback: точное совпадение наименования."""
         if not self._ens_index or 'items' not in self._ens_index:
             return None
 
@@ -511,21 +511,45 @@ class ParametricENSClient:
                 item_std = item.get('нтд') or item.get('standard')
                 item_std_norm = self._normalize_standard(item_std) if item_std else None
                 if item_std_norm and query_std_norm != item_std_norm:
-                    continue  # Пропускаем записи с другим стандартом
+                    continue
 
             score = self._calculate_match_score(params, required, item)
 
             if score > best_score:
                 best_score = score
                 best_match = item
-                best_match['_match_score'] = score
-                best_match['_match_type'] = 'exact' if score > 0.9 else 'partial'
 
-        # Minimum threshold
+        # Fallback: точное совпадение наименования (если params поиск не дал 1.0)
+        if best_score < 0.99 and text:
+            text_norm = self._normalize_name(text)
+            for item in items:
+                if query_std_norm:
+                    item_std = item.get('нтд') or item.get('standard')
+                    item_std_norm = self._normalize_standard(item_std) if item_std else None
+                    if item_std_norm and query_std_norm != item_std_norm:
+                        continue
+                for name_field in ['полное_наименование', 'наименование']:
+                    item_name = item.get(name_field)
+                    if item_name and self._normalize_name(str(item_name)) == text_norm:
+                        best_match = item
+                        best_score = 1.0
+                        break
+                if best_score >= 0.99:
+                    break
+
+        if best_match:
+            best_match['_match_score'] = best_score
+            best_match['_match_type'] = 'exact' if best_score > 0.9 else 'partial'
+
         if best_score < 0.7:
             return None
 
         return best_match
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Нормализация наименования для сравнения: убираем пробелы, приводим к нижнему регистру."""
+        return re.sub(r'\s+', '', str(name).lower().strip())
 
     @staticmethod
     def _normalize_standard(std: Optional[str]) -> str:
