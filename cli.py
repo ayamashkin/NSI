@@ -450,6 +450,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             'ens_code': result.ens_match.get('code') if result.ens_match else None,
             'ens_name': result.ens_match.get('name') if result.ens_match else None,
             'ens_params': result.ens_params,
+            'ens_params_mask': result.ens_params_mask,
             'confidence': result.confidence,
             'processing_time_ms': result.processing_time_ms,
             'item_type': result.item_type,

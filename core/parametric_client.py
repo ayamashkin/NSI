@@ -662,8 +662,27 @@ class ParametricENSClient:
         required: List[str],
         ens_item: Dict[str, Any]
     ) -> float:
-        """LEGACY: use _calculate_match_score_v2 via match()"""
-        return 0.0
+        """
+        Сравнение params с ENS записью через _compare_param_sets.
+        Используем только required поля для поиска кандидатов.
+        """
+        # Извлекаем параметры из ENS записи (без служебных полей)
+        skip_fields = {
+            '_match_score', '_match_type', 'код', 'полное_наименование',
+            'наименование', 'mdm_key', 'нтд', 'тип_изделия', 'наименование_типа',
+            'item_type', 'standard'
+        }
+        ens_params = {k: v for k, v in ens_item.items()
+                      if k not in skip_fields and not k.startswith('_')}
+
+        # Берём только required поля из params
+        if not required:
+            return 0.0
+        subset = {k: params[k] for k in required if k in params and params[k] is not None}
+        if not subset:
+            return 0.0
+
+        return self._compare_param_sets(subset, ens_params)
 
     def _calculate_match_score_v2(
         self,
