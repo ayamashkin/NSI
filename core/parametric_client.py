@@ -3,6 +3,7 @@ Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
+LAST_FIX: 2026-05-06 12:00 — confidence fix: use _match_score instead of required-fields fill ratio
 """
 
 import re
@@ -425,10 +426,7 @@ class ParametricENSClient:
                         matched_params=extracted_params,
                         score=match_result.get('_match_score', 0.0),
                         match_type=match_result.get('_match_type', 'exact'),
-                        confidence=self._calculate_confidence(
-                            extracted_params,
-                            getattr(effective_mask, 'required', [])
-                        ),
+                        confidence=match_result.get('_match_score', 0.0),
                         details={
                             'mask_id': getattr(effective_mask, 'id', None),
                             'pattern': getattr(effective_mask, 'pattern', None)
