@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 15:15 — STRICT EXACT MATCH with coating permutation: exact for all params, fuzzy token-sim for покрытие; success only on full match
+LAST_FIX: 2026-05-06 20:00 — FIXED: _fuzzy_match_ens strict exact match (was old weighted code)
 """
 
 import logging
@@ -368,6 +368,7 @@ class AutomatedParametricProcessor:
         """
         STRICT EXACT MATCH: все извлечённые параметры должны точно совпадать с ENS.
         Score = 1.0 если все совпали, иначе 0.0. Threshold = 1.0.
+        Покрытие допускает fuzzy с перестановкой токенов (sim >= 0.8).
         """
         best_match = None
 
@@ -385,7 +386,6 @@ class AutomatedParametricProcessor:
                 checked += 1
                 norm_extracted = self._normalize_value_types(extracted_val)
                 norm_candidate = self._normalize_value_types(candidate_val)
-                # Для покрытия допускаем перестановку токенов
                 if param_name == 'покрытие':
                     sim = self._token_similarity(str(norm_extracted), str(norm_candidate))
                     if sim < 0.8:
@@ -433,6 +433,22 @@ class AutomatedParametricProcessor:
                 logger.debug(f"[REMAP] {wrong} → {correct}: {value}")
 
         return remapped
+
+    def _normalize_gost_7795_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Нормализация специфичная для ГОСТ 7795-70:
+        - группа_класс_прочности: '58' → '5.8' (две цифры без точки)
+        - объединение покрытие/покрытие2 (альтернативные regex-группы)
+        """
+        result = dict(params)
+        g = result.get('группа_класс_прочности')
+        if g and isinstance(g, str) and len(g) == 2 and g.isdigit():
+            result['группа_класс_прочности'] = f"{g[0]}.{g[1]}"
+        if 'покрытие2' in result and 'покрытие' not in result:
+            result['покрытие'] = result.pop('покрытие2')
+        if 'толщина_покрытия2' in result and 'толщина_покрытия' not in result:
+            result['толщина_покрытия'] = result.pop('толщина_покрытия2')
+        return result
 
     def _get_generic_pattern(self, item_type: str, standard: str = None) -> Optional[str]:
         """
@@ -534,7 +550,7 @@ class AutomatedParametricProcessor:
             mask.standard = extracted_std
             logger.info(f"[PARAM_MATCH] Fixed mask.standard from extracted: '{extracted_std}'")
 
-        logger.info(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{effective_standard}', mask.item_type='{mask.item_type}'")
+        logger.debug(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{effective_standard}', mask.item_type='{mask.item_type}'")
 
         match_result = self.parametric_client.match(
             text=text,
@@ -542,7 +558,7 @@ class AutomatedParametricProcessor:
             item_type=mask.item_type
         )
 
-        logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}, ens_code={match_result.ens_code}")
+        logger.debug(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}, ens_code={match_result.ens_code}")
 
         # Fallback: если parametric_client вернул пустые params но score > 0,
         # извлекаем params напрямую через regex (используем re.search с IGNORECASE,
@@ -557,7 +573,7 @@ class AutomatedParametricProcessor:
                 if m:
                     fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                     if fallback_params:
-                        logger.info(f"[PARAM_MATCH] Fallback extraction: {fallback_params}")
+                        logger.debug(f"[PARAM_MATCH] Fallback extraction: {fallback_params}")
                 else:
                     logger.warning(f"[PARAM_MATCH] Fallback regex did NOT match. Pattern: {relaxed_for_fallback[:120]}")
             except Exception as e:
@@ -579,7 +595,7 @@ class AutomatedParametricProcessor:
                     if m:
                         fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         if fallback_params:
-                            logger.info(f"[PARAM_MATCH] Generic extraction: {fallback_params}")
+                            logger.debug(f"[PARAM_MATCH] Generic extraction: {fallback_params}")
                     else:
                         logger.debug(f"[PARAM_MATCH] Generic pattern did NOT match")
             except Exception as e:
@@ -614,7 +630,7 @@ class AutomatedParametricProcessor:
                         pattern=relaxed_pattern
                     )
                     if relaxed_result.score > 0:
-                        logger.info(f"[PARAM_MATCH] Relaxed pattern matched: score={relaxed_result.score}")
+                        logger.debug(f"[PARAM_MATCH] Relaxed pattern matched: score={relaxed_result.score}")
                         match_result = relaxed_result
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] Relaxed pattern error: {e}")
@@ -630,21 +646,22 @@ class AutomatedParametricProcessor:
         # Remap неправильных имён групп на корректные ENS-имена
         if final_matched_params:
             final_matched_params = self._remap_params(final_matched_params)
+            final_matched_params = self._normalize_gost_7795_params(final_matched_params)
             logger.debug(f"[PARAM_MATCH] Remapped params: {final_matched_params}")
 
         if match_result.score < 0.7 or not match_result.ens_code:
             try:
                 # Получаем кандидатов из ЕСН
                 ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
-                logger.info(f"[PARAM_MATCH] ENS candidates for fuzzy: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
+                logger.debug(f"[PARAM_MATCH] ENS candidates for fuzzy: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
                 # Сначала пробуем fuzzy match с remapped params
                 if ens_candidates and final_matched_params:
-                    logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
+                    logger.debug(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
                     fuzzy_match = self._fuzzy_match_ens(final_matched_params, ens_candidates)
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
-                        logger.info(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
+                        logger.debug(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
                     else:
                         logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
                 elif not ens_candidates:
@@ -663,7 +680,7 @@ class AutomatedParametricProcessor:
                     if manual_ens and manual_ens.get('code'):
                         fuzzy_ens_code = manual_ens['code']
                         fuzzy_score = manual_ens.get('_match_score', 0.8)
-                        logger.info(f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
+                        logger.debug(f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
 
@@ -744,7 +761,7 @@ class AutomatedParametricProcessor:
                 'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type,
                 'params': ens_params_from_index  # ← из ENS индекса, нормализованные типы
             } if final_ens_code else None,
-            confidence=max(match_result.confidence, fuzzy_score),
+            confidence=final_score,
             processing_time_ms=processing_time,
             details={
                 'mask_id': mask.id,

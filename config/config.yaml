@@ -30,7 +30,7 @@ api:
     api_key_file: "secrets/gigachat_credentials.txt"
     scope: "GIGACHAT_API_PERS"
     timeout: 120
-    default_model: "GigaChat"
+    default_model: "GigaChat-2"
 
 # =============================================================================
 # Database Configuration
@@ -74,8 +74,8 @@ logging:
 # =============================================================================
 mask_generation:
   # Сервис и модель по умолчанию для генерации масок
-  default_service: "openwebui"
-  default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
+  default_service: "gigachat"
+  default_model: "GigaChat-2"
   default_temperature: 0.1
 
   keyword_match_from_name: true

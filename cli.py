@@ -2,6 +2,7 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
+LAST_FIX: 2026-05-06 20:15 — added gigachat support to models command
 """
 
 import click
@@ -12,6 +13,10 @@ from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -28,10 +33,6 @@ def cli(ctx, config):
     else:
         logger.warning(f"Config not found: {config}")
         ctx.obj['config'] = {}
-
-    # Настройка логирования из конфига
-    from config.settings import setup_logging
-    setup_logging(config)
 
 
 # =============================================================================
@@ -254,15 +255,21 @@ def models(api_name):
                     base_url=cfg.base_url,
                     api_key=cfg.api_key
                 )
+            elif service == 'gigachat':
+                from api_clients.gigachat import GigaChatClient
+                client = GigaChatClient(
+                    base_url=cfg.base_url,
+                    api_key=cfg.api_key
+                )
             else:
                 continue
 
             model_list = client.get_models()
             if model_list:
                 click.echo(f"   Модели ({len(model_list)}):")
-                for m in model_list[:10]:
+                for m in model_list[:20]:
                     click.echo(f"      - {m}")
-                if len(model_list) > 10:
+                if len(model_list) > 20:
                     click.echo(f"      ... и еще {len(model_list)-10}")
             else:
                 click.echo("   ⚠️  Нет доступных моделей")

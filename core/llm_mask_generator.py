@@ -2,6 +2,7 @@
 LLM Mask Generator Module
 Level 2: Автоматическая генерация regex масок с помощью LLM.
 Модель/температура/system_prompt определяются автоматически по keywords из prompts.yaml.
+LAST_FIX: 2026-05-06 20:30 — _preprocess_json_text: escape ALL regex backslashes (\., \-, \[, ...) for JSON compatibility
 """
 
 import re
@@ -1038,8 +1039,9 @@ class LLMMaskGenerator:
         # Placeholder для уже двойных backslash
         placeholder = '\x00DBL\x00'
         result = text.replace('\\\\', placeholder)
-        # Экранируем одиночные regex backslash: \s -> \\s, \d -> \\d и т.д.
-        result = re.sub(r'\\([sdwSDWbB])', r'\\\\\1', result)
+        # Экранируем любой \ перед НЕ-JSON-escape символом
+        # JSON valid: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+        result = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', result)
         # Восстанавливаем двойные
         result = result.replace(placeholder, '\\\\')
         return result

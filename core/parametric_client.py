@@ -3,7 +3,7 @@ Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 15:30 — STRICT EXACT MATCH + name fallback: exact params match, fuzzy coating permutation, fallback to full name exact match
+LAST_FIX: 2026-05-06 20:15 — STRICT EXACT MATCH + text fallback + coating permutation
 """
 
 import re
@@ -549,6 +549,7 @@ class ParametricENSClient:
     @staticmethod
     def _normalize_name(name: str) -> str:
         """Нормализация наименования для сравнения: убираем пробелы, приводим к нижнему регистру."""
+        import re
         return re.sub(r'\s+', '', str(name).lower().strip())
 
     @staticmethod
@@ -592,6 +593,7 @@ class ParametricENSClient:
         - Exact match: score=1.0, иначе score=0.0 (all or nothing)
         - Поле есть в ЕНС, но нет в params - игнорируется
         - null в params и отсутствие в ЕНС - считаем совпадением
+        - Покрытие допускает fuzzy с перестановкой токенов (Окс.Фос.ЭФП ≡ Фос.Окс.ЭФП)
         """
         if not required:
             return 0.0
@@ -624,16 +626,16 @@ class ParametricENSClient:
             query_str = str(query_val).lower().strip()
             ens_str = str(ens_val).lower().strip()
 
-            # Для покрытия допускаем перестановку токенов (Окс.Фос.ЭФП ≡ Фос.Окс.ЭФП)
+            # Покрытие допускает fuzzy с перестановкой токенов
             if param == 'покрытие':
                 sim = _text_similarity(query_str, ens_str)
                 if sim >= 0.8:
-                    logger.debug(f"[_calculate_match_score] param='{param}': COATING match. sim={sim:.2f}, query='{query_str}', ens='{ens_str}'")
+                    logger.debug(f"[_calculate_match_score] param='{param}': COATING match. sim={sim:.2f}")
                 else:
-                    logger.debug(f"[_calculate_match_score] param='{param}': COATING MISMATCH. sim={sim:.2f}, query='{query_str}' != ens='{ens_str}'")
+                    logger.debug(f"[_calculate_match_score] param='{param}': COATING MISMATCH. sim={sim:.2f}, q='{query_str}' != e='{ens_str}'")
                     return 0.0
             elif query_str != ens_str:
-                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH. query='{query_str}' != ens='{ens_str}'")
+                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH. q='{query_str}' != e='{ens_str}'")
                 return 0.0
             else:
                 logger.debug(f"[_calculate_match_score] param='{param}': EXACT match. val='{query_str}'")
