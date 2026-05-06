@@ -748,7 +748,7 @@ class AutomatedParametricProcessor:
                 'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type,
                 'params': ens_params_from_index  # ← из ENS индекса, нормализованные типы
             } if final_ens_code else None,
-            confidence=final_score,
+            confidence=max(match_result.confidence, fuzzy_score),
             processing_time_ms=processing_time,
             details={
                 'mask_id': mask.id,
