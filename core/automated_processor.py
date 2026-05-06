@@ -28,25 +28,35 @@ class ProcessingLevel(Enum):
     LEVEL_8_LLM_DIRECT = "llm_direct"            # Прямой LLM вызов
 
 
-@dataclass
 class ProcessingResult:
     """Результат обработки."""
-    text: str = ''
-    level: ProcessingLevel = ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH
-    success: bool = False
-    params: Dict[str, Any] = field(default_factory=dict)
-    ens_params: Dict[str, Any] = field(default_factory=dict)
-    ens_params_mask: Dict[str, Any] = field(default_factory=dict)
-    ens_match: Optional[Dict[str, Any]] = None
-    confidence: float = 0.0
-    processing_time_ms: float = 0.0
-    details: Dict[str, Any] = field(default_factory=dict)
-    item_type: str = ''
-    standard: str = ''
-
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+    def __init__(
+        self,
+        text: str = '',
+        level: ProcessingLevel = ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
+        success: bool = False,
+        params: Optional[Dict[str, Any]] = None,
+        ens_params: Optional[Dict[str, Any]] = None,
+        ens_params_mask: Optional[Dict[str, Any]] = None,
+        ens_match: Optional[Dict[str, Any]] = None,
+        confidence: float = 0.0,
+        processing_time_ms: float = 0.0,
+        details: Optional[Dict[str, Any]] = None,
+        item_type: str = '',
+        standard: str = ''
+    ):
+        self.text = text
+        self.level = level
+        self.success = success
+        self.params = params or {}
+        self.ens_params = ens_params or {}
+        self.ens_params_mask = ens_params_mask or {}
+        self.ens_match = ens_match
+        self.confidence = confidence
+        self.processing_time_ms = processing_time_ms
+        self.details = details or {}
+        self.item_type = item_type
+        self.standard = standard
 
     @property
     def ens_params_from_match(self) -> Optional[Dict[str, Any]]:
