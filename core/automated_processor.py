@@ -750,6 +750,19 @@ class AutomatedParametricProcessor:
             ens_params_from_index = self._normalize_params(ens_params_from_index)
             logger.debug(f"[PARAM_MATCH] Normalized ens_params: {ens_params_from_index}")
 
+        # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
+        ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
+        if not ens_params_mask and final_ens_name and mask and mask.pattern:
+            try:
+                import re
+                relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
+                if m:
+                    ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                    logger.debug(f"[PARAM_MATCH] ENS params mask (fallback): {ens_params_mask}")
+            except Exception as e:
+                logger.debug(f"[PARAM_MATCH] Failed to parse ens_name with mask: {e}")
+
         processing_time = (time.time() - start_time) * 1000
 
         return ProcessingResult(
@@ -767,7 +780,7 @@ class AutomatedParametricProcessor:
             } if final_ens_code else None,
             confidence=final_score,
             ens_params=ens_params_from_index,
-            ens_params_mask=match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {},
+            ens_params_mask=ens_params_mask,
             processing_time_ms=processing_time,
             details={
                 'mask_id': mask.id,
