@@ -2,7 +2,7 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07 20:15 — skip_params in _compare_param_sets; M-optional; strict exact match; ens_params_mask
+VERSION: 2026-05-07 20:45 — _remap_params before _find_in_ens; skip_params; M-optional; strict exact match; ens_params_mask
 """
 
 import re
@@ -448,6 +448,10 @@ class ParametricENSClient:
                     except (ValueError, TypeError):
                         required = []
 
+                # Remap кривых имён групп → ENS-имена перед поиском
+                extracted_params = self._remap_params(extracted_params)
+                logger.debug(f"[match] Remapped params: {extracted_params}")
+
                 match_result = self._find_in_ens(extracted_params, required, standard=standard, text=text, item_type=item_type)
 
                 if match_result:
@@ -456,11 +460,13 @@ class ParametricENSClient:
                     ens_name = match_result.get('полное_наименование') or match_result.get('наименование')
                     ens_params_from_index = {k: v for k, v in match_result.items() if k not in ['_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд']}
 
-                    # Парсим ens_name той же маской → ens_params_mask
+                    # Парсим ens_name той же маской → ens_params_mask (затем remap)
                     ens_params_mask = None
                     if ens_name:
                         try:
-                            ens_params_mask = self._apply_mask(relaxed_pattern, str(ens_name), standard=effective_standard)
+                            raw_ens_mask = self._apply_mask(relaxed_pattern, str(ens_name), standard=effective_standard)
+                            if raw_ens_mask:
+                                ens_params_mask = self._remap_params(raw_ens_mask)
                         except Exception as e:
                             logger.debug(f"[match] Failed to parse ens_name='{ens_name}': {e}")
 
@@ -549,6 +555,32 @@ class ParametricENSClient:
             logger.error(f"Invalid mask pattern: {e}. Pattern (first 200 chars): {pattern[:200]!r}")
 
         return None
+
+    @staticmethod
+    def _remap_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Переименование неправильных имён групп из LLM-генерированных масок
+        в корректные ENS-имена параметров.
+        """
+        if not params:
+            return params
+        remapped = dict(params)
+        aliases = {
+            'наружный_диаметр_диаметр_вписа': 'номинальный_диаметр_резьбы',
+            'наружный_диаметр': 'номинальный_диаметр_резьбы',
+            'диаметр_вписанной_окружности': 'номинальный_диаметр_резьбы',
+            'd_вп': 'номинальный_диаметр_резьбы',
+            'наружный_диаметр_головки': 'диаметр_головки',
+            'диаметр_резьбы': 'номинальный_диаметр_резьбы',
+        }
+        for wrong, correct in aliases.items():
+            if wrong in remapped:
+                value = remapped.pop(wrong)
+                if correct in remapped and correct == 'номинальный_диаметр_резьбы':
+                    remapped['длина'] = remapped[correct]
+                remapped[correct] = value
+                logger.debug(f"[REMAP] {wrong} → {correct}: {value}")
+        return remapped
 
     def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Поиск по параметрам в индексе ЕНС. Fallback: точное совпадение наименования с проверкой типа."""
