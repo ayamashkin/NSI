@@ -287,27 +287,22 @@ def setup_logging(config_path: str = "config/config.yaml") -> None:
 
     level = getattr(logging, logging_cfg.level.upper(), logging.INFO)
 
-    # Создаем директорию для логов
     log_path = Path(logging_cfg.file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Корневой логгер
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # Убираем старые handlers чтобы избежать дублирования при повторном вызове
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
     formatter = logging.Formatter(logging_cfg.format)
 
-    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
-    # File handler с ротацией
     max_bytes = _parse_size(logging_cfg.max_size)
     file_handler = logging.handlers.RotatingFileHandler(
         logging_cfg.file,

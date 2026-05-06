@@ -13,10 +13,8 @@ from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+from config.settings import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +31,12 @@ def cli(ctx, config):
     else:
         logger.warning(f"Config not found: {config}")
         ctx.obj['config'] = {}
+
+    # Настройка логирования из config.yaml
+    try:
+        setup_logging(str(config_path))
+    except Exception as e:
+        logger.warning(f"Failed to setup logging from config: {e}")
 
 
 # =============================================================================
@@ -270,7 +274,7 @@ def models(api_name):
                 for m in model_list[:10]:
                     click.echo(f"      - {m}")
                 if len(model_list) > 10:
-                    click.echo(f"      ... и еще {len(model_list)-10}")
+                    click.echo(f"      ... и еще {len(model_list) - 10}")
             else:
                 click.echo("   ⚠️  Нет доступных моделей")
 
@@ -564,9 +568,9 @@ def diagnose(text, db, ens_index, llm, coating_map):
         settings=settings
     )
 
-    click.echo(f"\n{'='*60}")
+    click.echo(f"\n{'=' * 60}")
     click.echo(f"🔍 ДИАГНОСТИКА: {text}")
-    click.echo(f"{'='*60}")
+    click.echo(f"{'=' * 60}")
 
     # Step 0: Standard extraction
     extracted = processor.standard_extractor.extract_all(text)
@@ -651,7 +655,7 @@ def diagnose(text, db, ens_index, llm, coating_map):
     if result.details:
         click.echo(f"   details: {result.details}")
 
-    click.echo(f"\n{'='*60}")
+    click.echo(f"\n{'=' * 60}")
 
 
 @cli.group()
@@ -712,8 +716,8 @@ def analyze(excel_file, index, sample):
     stats = analyze_nomenclature(excel_file, index, sample_size=sample)
 
     click.echo(f"📊 Анализ (выборка {sample}):")
-    click.echo(f"   Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0)/sample*100:.1f}%)")
-    click.echo(f"   Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0)/sample*100:.1f}%)")
+    click.echo(f"   Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
+    click.echo(f"   Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
 
     if 'estimated_regex_parsed' in stats:
         total = stats.get('total', 0)
