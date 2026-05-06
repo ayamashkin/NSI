@@ -692,3 +692,10 @@ class ParametricENSClient:
     def _normalize_name(self, name: str) -> str:
         """Нормализация наименования: убираем пробелы, нижний регистр."""
         return re.sub(r'\s+', '', str(name).lower().strip())
+
+    def _tfidf_fallback(self, text: str) -> 'ParametricMatch':
+        """TF-IDF fallback — возвращает пустой результат."""
+        return ParametricMatch(
+            ens_code=None, ens_name=None, mdm_key=None,
+            score=0.0, match_type='failed', confidence=0.0
+        )
