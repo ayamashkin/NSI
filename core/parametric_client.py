@@ -3,7 +3,7 @@ Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 20:15 — STRICT EXACT MATCH + text fallback + coating permutation
+LAST_FIX: 2026-05-06 20:45 — STRICT EXACT MATCH: all params (not only required), coating permutation, text fallback
 """
 
 import re
@@ -589,17 +589,18 @@ class ParametricENSClient:
         ens_item: Dict[str, Any]
     ) -> float:
         """
-        STRICT EXACT MATCH: все required-параметры должны точно совпадать.
+        STRICT EXACT MATCH: ВСЕ извлечённые params должны точно совпадать с ENS.
         - Exact match: score=1.0, иначе score=0.0 (all or nothing)
         - Поле есть в ЕНС, но нет в params - игнорируется
         - null в params и отсутствие в ЕНС - считаем совпадением
         - Покрытие допускает fuzzy с перестановкой токенов (Окс.Фос.ЭФП ≡ Фос.Окс.ЭФП)
         """
-        if not required:
+        if not params:
             return 0.0
 
         total = 0
-        for param in required:
+        # Проверяем ВСЕ извлечённые params, не только required
+        for param in params:
             query_val_raw = params.get(param)
             ens_val_raw = ens_item.get(param)
 

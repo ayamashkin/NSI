@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 20:00 — FIXED: _fuzzy_match_ens strict exact match (was old weighted code)
+LAST_FIX: 2026-05-06 20:45 — STRICT EXACT MATCH: all params (not only required), coating permutation, ГОСТ 7795-70 dot-separator, full-name fallback
 """
 
 import logging
