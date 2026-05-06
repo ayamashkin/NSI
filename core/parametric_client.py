@@ -108,10 +108,36 @@ class ParametricMatch:
     ens_name: Optional[str]
     mdm_key: Optional[str]
     matched_params: Dict[str, Any]
+    ens_params: Dict[str, Any]        # параметры из индекса ENS
+    ens_params_mask: Dict[str, Any]   # параметры из ens_name по маске
     score: float
     match_type: str  # 'exact', 'partial', 'fuzzy'
     confidence: float
     details: Dict[str, Any]
+
+    def __init__(
+        self,
+        ens_code: Optional[str] = None,
+        ens_name: Optional[str] = None,
+        mdm_key: Optional[str] = None,
+        matched_params: Optional[Dict[str, Any]] = None,
+        ens_params: Optional[Dict[str, Any]] = None,
+        ens_params_mask: Optional[Dict[str, Any]] = None,
+        score: float = 0.0,
+        match_type: str = 'failed',
+        confidence: float = 0.0,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        self.ens_code = ens_code
+        self.ens_name = ens_name
+        self.mdm_key = mdm_key
+        self.matched_params = matched_params or {}
+        self.ens_params = ens_params or {}
+        self.ens_params_mask = ens_params_mask or {}
+        self.score = score
+        self.match_type = match_type
+        self.confidence = confidence
+        self.details = details or {}
 
 
 class ParametricENSClient:
@@ -463,8 +489,10 @@ class ParametricENSClient:
                     )
 
         # Fallback: TF-IDF поиск
-        if self.use_tfidf_fallback and self._ens_index:
-            return self._tfidf_fallback(text)
+        # NOTE: _tfidf_fallback не реализован в ParametricENSClient,
+        # используйте automated_processor для TF-IDF fallback
+        # if self.use_tfidf_fallback and self._ens_index:
+        #     return self._tfidf_fallback(text)
 
         return ParametricMatch(
             ens_code=None,
