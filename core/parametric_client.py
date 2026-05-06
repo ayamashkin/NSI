@@ -3,7 +3,7 @@ Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-06 12:00 — confidence fix: use _match_score instead of required-fields fill ratio
+LAST_FIX: 2026-05-06 15:15 — STRICT EXACT MATCH with coating permutation: exact for all params, fuzzy for покрытие (token reorder), score=1.0 or 0.0
 """
 
 import re
@@ -426,7 +426,10 @@ class ParametricENSClient:
                         matched_params=extracted_params,
                         score=match_result.get('_match_score', 0.0),
                         match_type=match_result.get('_match_type', 'exact'),
-                        confidence=match_result.get('_match_score', 0.0),
+                        confidence=self._calculate_confidence(
+                            extracted_params,
+                            getattr(effective_mask, 'required', [])
+                        ),
                         details={
                             'mask_id': getattr(effective_mask, 'id', None),
                             'pattern': getattr(effective_mask, 'pattern', None)
@@ -561,75 +564,59 @@ class ParametricENSClient:
         ens_item: Dict[str, Any]
     ) -> float:
         """
-        Строгое сопоставление параметров с ЕНС:
-        - Точное совпадение для числовых/технических полей
-        - Fuzzy (Jaccard >= 0.6) только для определённых текстовых полей
-        - Поле есть в ЕНС, но нет в params - игнорируется (не штрафуем)
+        STRICT EXACT MATCH: все required-параметры должны точно совпадать.
+        - Exact match: score=1.0, иначе score=0.0 (all or nothing)
+        - Поле есть в ЕНС, но нет в params - игнорируется
         - null в params и отсутствие в ЕНС - считаем совпадением
         """
         if not required:
             return 0.0
 
-        FUZZY_FIELDS = {'покрытие', 'марка_материала', 'марка_стали', 'материал'}
-
-        matches = 0.0
         total = 0
-
         for param in required:
-            # Получаем значения
             query_val_raw = params.get(param)
             ens_val_raw = ens_item.get(param)
 
-            # Приводим к None если пусто
             query_val = None if query_val_raw is None or str(query_val_raw).strip() == '' else query_val_raw
             ens_val = None if ens_val_raw is None or str(ens_val_raw).strip() == '' else ens_val_raw
 
-            # Случай 1: null ≡ null (нет ни в params, ни в ЕНС)
+            # Случай 1: null ≡ null - OK
             if query_val is None and ens_val is None:
-                matches += 1.0
-                total += 1
                 continue
 
-            # Случай 2: поле есть в ЕНС, но нет в params - игнорируем
+            # Случай 2: поле в ЕНС, но не в params - игнорируем
             if query_val is None and ens_val is not None:
                 continue
 
-            # Случай 3: поле есть в params, но нет в ЕНС - mismatch
+            # Случай 3: поле в params, но не в ЕНС - mismatch
             if query_val is not None and ens_val is None:
-                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH (not in ENS). query_val={query_val}")
-                total += 1
-                continue
+                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH (not in ENS)")
+                return 0.0
 
-            # Случай 4: оба не None - сравниваем
+            # Случай 4: оба не None - требуем точное совпадение
             total += 1
-
-            # Нормализация типов перед сравнением (2.0 → 2)
             query_val = self._normalize_ens_value(query_val)
             ens_val = self._normalize_ens_value(ens_val)
-
             query_str = str(query_val).lower().strip()
             ens_str = str(ens_val).lower().strip()
 
-            # Точное совпадение
-            if query_str == ens_str:
-                matches += 1.0
-                logger.debug(f"[_calculate_match_score] param='{param}': EXACT match. val={query_str}")
-            elif param in FUZZY_FIELDS:
-                # Fuzzy только для разрешённых полей
+            # Для покрытия допускаем перестановку токенов (Окс.Фос.ЭФП ≡ Фос.Окс.ЭФП)
+            if param == 'покрытие':
                 sim = _text_similarity(query_str, ens_str)
-                if sim >= 0.6:
-                    matches += sim
-                    logger.debug(f"[_calculate_match_score] param='{param}': FUZZY match. sim={sim:.2f}, query={query_str}, ens={ens_str}")
+                if sim >= 0.8:
+                    logger.debug(f"[_calculate_match_score] param='{param}': COATING match. sim={sim:.2f}, query='{query_str}', ens='{ens_str}'")
                 else:
-                    logger.debug(f"[_calculate_match_score] param='{param}': FUZZY LOW sim={sim:.2f}, query={query_str}, ens={ens_str}")
+                    logger.debug(f"[_calculate_match_score] param='{param}': COATING MISMATCH. sim={sim:.2f}, query='{query_str}' != ens='{ens_str}'")
+                    return 0.0
+            elif query_str != ens_str:
+                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH. query='{query_str}' != ens='{ens_str}'")
+                return 0.0
             else:
-                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH. query={query_str}, ens={ens_str}")
+                logger.debug(f"[_calculate_match_score] param='{param}': EXACT match. val='{query_str}'")
 
-        final_score = matches / total if total > 0 else 0.0
-        logger.debug(f"[_calculate_match_score] final_score={final_score:.3f}, matches={matches}, total={total}")
-        return final_score
-
-        return matches / total if total > 0 else 0.0
+        score = 1.0 if total >= 0 else 0.0
+        logger.debug(f"[_calculate_match_score] ALL MATCHED, score=1.0, checked={total}")
+        return score
 
     def _calculate_confidence(self, params: Dict[str, Any], required: List[str]) -> float:
         """Расчет уверенности в извлечении."""

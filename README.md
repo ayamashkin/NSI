@@ -23,6 +23,7 @@
 - [Keyword-based маршрутизация](#keyword-based-маршрутизация)
 - [Генерация regex-масок через LLM](#генерация-regex-масок-через-llm)
 - [Fuzzy Matching](#fuzzy-matching)
+- [Валидация покрытий](#валидация-покрытий)
 - [API клиенты](#api-клиенты)
 - [Troubleshooting](#troubleshooting)
 - [Требования](#требования)
@@ -50,7 +51,9 @@ nomenclature-processor/
 │   ├── auto_validator.py        # Валидация масок
 │   ├── mask_database.py         # БД regex-масок (SQLite)
 │   ├── standard_extractor.py    # Извлечение стандарта и типа
-│   └── integration.py           # Интеграция с существующей БД и API
+│   ├── integration.py           # Интеграция с существующей БД и API
+│   ├── coating_indexer.py       # Индексация (марка→покрытия) из ЕСН
+│   └── coating_llm_client.py    # LLM-запрос правил покрытий
 ├── api_clients/
 │   ├── __init__.py
 │   ├── base.py                  # Абстрактный класс клиента
@@ -123,7 +126,14 @@ Level 6: ParametricENSClient
       (покрытие, материал) - учитывает перестановку токенов
     |- Score: взвешенное совпадение required-параметров
 
-Level 7: TF-IDF Fallback
+Level 8: CoatingValidation
+    |- Проверка покрытия по марке стали из ENS
+    |- Источник правил: ENS-индекс + LLM (coating_indexer.py, coating_llm_client.py)
+    |- "Бп"/"без покрытия"/пустое → skip validation
+    |- Авто-замена: Кд → Н.Кд для коррозионно-стойких сталей
+    |- Strict mode: reject match если покрытие не допустимо
+
+Level 9: TF-IDF Fallback
     |- Char-ngram (2-4) TF-IDF векторизация
     |- Cosine similarity по ЕСН
     |- Всегда success=False (параметры не извлечены)
@@ -201,6 +211,19 @@ database:
 processing:
   default_workers: 4
   retry_attempts: 3
+
+coating_rules:
+  material_coating_map:
+    "14Х17Н2":  ["Н.Кд", "Хим.Пас", "Н.Пас"]
+    "12Х18Н10Т": ["Н.Кд", "Хим.Пас", "Н.Пас"]
+    "30ХГСА":   ["Кд", "Цд", "Окс", "Фос", "Бп"]
+  auto_substitution:
+    - material_pattern: "^(14Х17Н2|12Х18Н10Т)$"
+      wrong_coating: "Кд"
+      correct_coating: "Н.Кд"
+  similarity_threshold: 0.8
+  strict_mode: true
+  auto_substitution_enabled: true
 ```
 
 ### config/prompts.yaml
@@ -297,7 +320,30 @@ python cli.py ens build-index "data/ENS_Крепеж.xlsx" -o models/hardware/en
   💡 Добавьте в ens_column_mapping.yaml если содержат полезные данные
 ```
 
-### 2. Сгенерировать маски
+### 2. Построить правила покрытий (опционально, для валидации)
+
+```python
+python -c "
+from coating_indexer import build_coating_rules_for_standard
+from coating_llm_client import CoatingLLMClient
+from llm_mask_generator import LLMMaskGenerator
+from config.settings import get_settings
+
+settings = get_settings()
+generator = LLMMaskGenerator(settings.api, settings)
+llm_client = CoatingLLMClient(generator)
+
+rules, llm_used = build_coating_rules_for_standard(
+    standard='ОСТ 1 31509-80',
+    item_type='винт',
+    llm_generator=llm_client
+)
+print(f'LLM used: {llm_used}')
+print(f'Rules: {rules}')
+"
+```
+
+### 3. Сгенерировать маски
 
 Один стандарт для теста:
 ```bash
@@ -314,7 +360,7 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.p
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 ```
 
-### 3. Обработать файл
+### 4. Обработать файл
 
 ```bash
 # Все записи
@@ -327,7 +373,7 @@ python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json --include-details
 ```
 
-### 4. Анализ качества распознавания
+### 5. Анализ качества распознавания
 
 ```bash
 # JSON в stdout + сохранение в файл
@@ -610,6 +656,99 @@ prompts/debug/
 
 ---
 
+## Валидация покрытий
+
+Гибридная система валидации покрытий: **фактические данные из ЕСН + LLM-дополнение**.
+
+### Проблема
+
+Покрытие в номенклатуре (`"Кд"`) может семантически не совпадать с покрытием в ЕСН (`"Хим.Пас"`), хотя fuzzy similarity высокий (общий токен). Для коррозионно-стойких сталей (`14Х17Н2`) простое кадмиевое покрытие `"Кд"` некорректно — требуется `"Н.Кд"` (никелевый подслой).
+
+### Архитектура валидации
+
+```
+Level 6: ParametricMatch
+    └─ ENS найден, параметры извлечены
+        |
+        v
+    Level 8: CoatingValidation
+        1. Извлекаем покрытие из текста + марку стали из ENS
+        2. Если покрытие = "" / "Бп" / "без покрытия" → skip (валидно)
+        3. Загружаем coating_rules из config.yaml
+        4. Проверяем: покрытие допустимо для марки?
+           ├── Да → match подтвержден
+           ├── Нет, но есть auto_substitution → заменяем в params
+           └── Нет, strict_mode=true → REJECT match (success=false)
+```
+
+### Построение правил (гибридный подход)
+
+**Phase 1 — Индексация ЕСН** (`coating_indexer.py`):
+```python
+from coating_indexer import build_coating_rules_for_standard
+
+rules, llm_used = build_coating_rules_for_standard(
+    standard="ОСТ 1 31509-80",
+    item_type="винт",
+    llm_generator=coating_llm_client  # None для offline-режима
+)
+# Результат: {"14Х17Н2": ["Н.Кд", "Хим.Пас", "Н.Пас"]}
+```
+
+**Phase 2 — LLM-дополнение** (`coating_llm_client.py`):
+- Активируется, если в ЕСН < 2 примеров на марку
+- LLM получает: стандарт + марки стали + контекст
+- Возвращает: допустимые покрытия с пояснениями
+- ENS-данные имеют приоритет над LLM
+
+**Phase 3 — Валидация при сопоставлении** (`automated_processor.py`):
+```python
+# Пример: "Винт 3-6-Кд" + ENS "Винт 3-6-Н.Кд" (14Х17Н2)
+# "Кд" не в списке допустимых для 14Х17Н2
+# → auto_substitution: "Кд" → "Н.Кд" в params
+# → match подтвержден с исправленным покрытием
+```
+
+### Специальные значения "без покрытия"
+
+Следующие значения покрытия пропускают валидацию (валидны для любой марки):
+- `""` (пустая строка)
+- `"Бп"`, `"бп"`, `"без покрытия"`
+- `"нет"`, `"-"`, `"none"`, `"н/п"`
+
+### Конфигурация coating_rules
+
+```yaml
+coating_rules:
+  # Марка → допустимые покрытия (из ЕСН + LLM)
+  material_coating_map:
+    "14Х17Н2":  ["Н.Кд", "Хим.Пас", "Н.Пас"]
+    "12Х18Н10Т": ["Н.Кд", "Хим.Пас", "Н.Пас"]
+    "30ХГСА":   ["Кд", "Цд", "Окс", "Фос", "Бп"]
+
+  # Авто-замена: wrong → correct (если матчит material_pattern)
+  auto_substitution:
+    - material_pattern: "^(14Х17Н2|12Х18Н10Т|08Х18Н10Т)$"
+      wrong_coating: "Кд"
+      correct_coating: "Н.Кд"
+
+  similarity_threshold: 0.8    # порог fuzzy-match
+  strict_mode: true            # true=reject, false=penalty
+  auto_substitution_enabled: true
+```
+
+### Результаты для типовых кейсов
+
+| Входная строка | ENS | Марка | Результат |
+|---|---|---|---|
+| `Винт 3-6-Кд` | `Винт 3-6-Н.Кд` | `14Х17Н2` | **AUTO-SUBSTITUTION** Кд→Н.Кд |
+| `Винт 3-6-Кд` | `Винт 2,5-6-Хим.Пас` | `14Х17Н2` | **REJECTED** — Кд не допустимо |
+| `Винт 3-6-Бп` | `Винт 3-6-Н.Кд` | `14Х17Н2` | **OK** — "без покрытия" валидно |
+| `Винт 3-6-` | `Винт 3-6-Н.Кд` | `14Х17Н2` | **OK** — пустое покрытие валидно |
+| `Болт 12-44-Кд` | `Болт 12-44-Кд` | `30ХГСА` | **OK** — Кд допустимо для конструкционной стали |
+
+---
+
 ## API клиенты
 
 | Провайдер | Аутентификация | Модели |
@@ -657,6 +796,21 @@ LLM генерирует `\s`, `\d`, `\w` внутри JSON-строки pattern
 Fuzzy matching автоматически обрабатывает перестановку токенов. Если не срабатывает:
 - Проверьте `--include-details` в выводе — там будет `fuzzy_used: true/false`
 - Убедитесь что `parametric_match score < 0.7` (триггер fuzzy)
+
+### Coating validation REJECTED корректный match
+Если в логах `[PARAM_MATCH] REJECTED: coating ... not allowed for material`:
+- Проверьте `config.yaml → coating_rules.material_coating_map` — марка есть в справочнике?
+- Запустите индексацию: `python -c "from coating_indexer import build_coating_rules_for_standard; build_coating_rules_for_standard('СТАНДАРТ', 'ТИП')"`
+- Временно отключите strict_mode: `coating_rules.strict_mode: false`
+
+### "Бп" (без покрытия) отклоняется
+Убедитесь что значение покрытия в номенклатуре точно `"Бп"` — без пробелов, без дополнительных символов. Система распознает: `Бп`, `бп`, `без покрытия`, `""`, `-`, `нет`.
+
+### Кд не заменяется на Н.Кд для 14Х17Н2
+Проверьте в логах `[PARAM_MATCH] Coating auto-substitution`. Если не срабатывает:
+- Проверьте `coating_rules.auto_substitution` — material_pattern покрывает вашу марку?
+- Проверьте `coating_rules.auto_substitution_enabled: true`
+- Марка стали должна быть в ENS-записи (поле `марка_материала` или `марка_стали`)
 
 ### Низкое качество распознавания
 Используйте `analyze-quality` для диагностики:
@@ -706,17 +860,34 @@ python cli.py stats
 
 ---
 
-## Требования
-
-- Python 3.9+
-- SQLite 3.35+ (WAL mode)
-- Зависимости: `pandas`, `openpyxl`, `scikit-learn`, `pyyaml`, `click`, `tqdm`, `numpy`, `requests`, `pydantic`
-- API-ключи (опционально, для LLM-генерации масок)
-
----
-
 ## Логирование
 
 Логи сохраняются в `logs/processor.log` и выводятся в консоль:
 - Уровень логирования настраивается в `config.yaml` (`logging.level`)
 - Ротация логов: 5 файлов по 10MB каждый
+
+### Уровни логирования по модулям
+
+| Модуль | INFO | DEBUG |
+|---|---|---|
+| `automated_processor` | Инициализация, `Processing:`, `REJECTED:` | `[PARAM_MATCH]`, `[FUZZY]`, coating checks |
+| `parametric_client` | — | `[_calculate_match_score]` fuzzy details |
+| `coating_indexer` | `Built map for`, `LLM augmented` | Сканирование ENS |
+
+При `level: "INFO"` в логе не будет пер-айтемных записей (каждый кандидат, каждый match). Только ключевые события: REJECTED, auto-substitution, итоговый score.
+
+```yaml
+logging:
+  level: "INFO"        # INFO или DEBUG
+  file: "logs/processor.log"
+  max_size: "10MB"
+  backup_count: 5
+```
+
+---
+
+## Требования
+
+- Python 3.9+
+- SQLite 3.35+ (WAL mode)
+- Зависимости: `pandas`, `openpyxl`, `scikit-learn`, `pyyaml`, `click`, `tqdm`, `numpy`, `requests`, `pydantic`
