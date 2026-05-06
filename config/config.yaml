@@ -64,7 +64,7 @@ prompts:
 # Logging Configuration
 # =============================================================================
 logging:
-  level: "DEBUG"
+  level: "INFO"
   file: "logs/processor.log"
   max_size: "10MB"
   backup_count: 5
