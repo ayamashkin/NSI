@@ -267,9 +267,9 @@ def models(api_name):
             model_list = client.get_models()
             if model_list:
                 click.echo(f"   Модели ({len(model_list)}):")
-                for m in model_list[:20]:
+                for m in model_list[:10]:
                     click.echo(f"      - {m}")
-                if len(model_list) > 20:
+                if len(model_list) > 10:
                     click.echo(f"      ... и еще {len(model_list)-10}")
             else:
                 click.echo("   ⚠️  Нет доступных моделей")
