@@ -2,7 +2,7 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
-LAST_FIX: 2026-05-06 20:15 — added gigachat support to models command
+LAST_FIX: 2026-05-06 21:00 — added gigachat support; save_mask replace_existing=True prevents duplicates
 """
 
 import click
@@ -817,7 +817,7 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
                         required=mask['required'], auto_score=0.0,
                         is_active=True, source='llm'  # Активируем сразу
                     )
-                    mask_db.save_mask(temp_mask, auto_activate=True)
+                    mask_db.save_mask(temp_mask, auto_activate=True, replace_existing=True)
                     stats['generated'] += 1
                     if temp_mask.auto_score >= min_score:
                         stats['activated'] += 1

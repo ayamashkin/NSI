@@ -1,6 +1,7 @@
 """
 AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
+LAST_FIX: 2026-05-06 21:15 — strict extracted vs expected check; coating token-similarity; mismatches report
 """
 
 import re
@@ -73,6 +74,32 @@ class AutoValidator:
 
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
+
+    @staticmethod
+    def _token_similarity(a: str, b: str) -> float:
+        """Token-based Jaccard similarity для покрытий."""
+        import re
+        if not a or not b:
+            return 0.0
+        a_str = str(a).lower().strip()
+        b_str = str(b).lower().strip()
+        if a_str == b_str:
+            return 1.0
+        def _extract_tokens(text):
+            raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
+            cleaned = []
+            for t in raw:
+                letters = re.sub(r'[0-9]', '', t)
+                if letters:
+                    cleaned.append(letters)
+            return set(cleaned)
+        tokens_a = _extract_tokens(a_str)
+        tokens_b = _extract_tokens(b_str)
+        if not tokens_a or not tokens_b:
+            return 0.0
+        intersection = tokens_a & tokens_b
+        union = tokens_a | tokens_b
+        return len(intersection) / len(union) if union else 0.0
 
     def _load_ens_index(self):
         """Загрузка индекса ЕСН."""
@@ -246,12 +273,38 @@ class AutoValidator:
             elif extracted_val is None or extracted_val == '':
                 missing.append(param)
 
-        success = len(missing) == 0
+        # === STRICT CHECK: extracted vs expected values ===
+        mismatches = []
+        for param, extracted_val in extracted.items():
+            if extracted_val is None or str(extracted_val).strip() == '':
+                continue
+            expected_val = expected.get(param)
+            if expected_val is None or str(expected_val).strip() == '':
+                continue
+
+            extracted_str = str(extracted_val).lower().strip()
+            expected_str = str(expected_val).lower().strip()
+
+            if param == 'покрытие':
+                sim = self._token_similarity(extracted_str, expected_str)
+                if sim < 0.8:
+                    mismatches.append(f"{param}: '{extracted_val}' vs '{expected_val}' (sim={sim:.2f})")
+            elif extracted_str != expected_str:
+                try:
+                    extracted_num = float(extracted_str.replace(',', '.'))
+                    expected_num = float(expected_str.replace(',', '.'))
+                    if extracted_num != expected_num:
+                        mismatches.append(f"{param}: {extracted_val} vs {expected_val}")
+                except ValueError:
+                    mismatches.append(f"{param}: '{extracted_val}' vs '{expected_val}'")
+
+        success = len(missing) == 0 and len(mismatches) == 0
 
         return {
-            'text': text[:100],  # Только первые 100 символов
+            'text': text[:100],
             'success': success,
             'missing_params': missing,
+            'mismatches': mismatches,
             'extracted': extracted,
             'expected': {k: v for k, v in expected.items() if k in required}
         }
