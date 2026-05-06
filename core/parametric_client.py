@@ -584,6 +584,19 @@ class ParametricENSClient:
                 return val.strip()
         return val
 
+    def _calculate_confidence(self, params: Dict[str, Any], required: List[str]) -> float:
+        """Расчет уверенности в извлечении (заполненность required-полей)."""
+        if isinstance(required, str):
+            try:
+                import json as _json
+                required = _json.loads(required)
+            except (ValueError, TypeError):
+                required = []
+        if not required:
+            return 0.0
+        found = sum(1 for p in required if p in params and params[p] is not None)
+        return found / len(required)
+
     def _calculate_match_score(
         self,
         params: Dict[str, Any],
