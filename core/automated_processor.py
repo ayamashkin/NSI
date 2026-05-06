@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 21:10 — V2 scoring after final_ens_name resolved; generic pattern + _calculate_match_score_v2; confidence=final_score
+LAST_FIX: 2026-05-07 21:15 — v2_computed flag: trust V2 score (0.0 for mismatch); no fuzzy fallback after V2; generic pattern + _calculate_match_score_v2
 """
 
 import logging
@@ -708,6 +708,7 @@ class AutomatedParametricProcessor:
         # НОВАЯ ЛОГИКА: generic pattern → parse ens_name → _calculate_match_score_v2
         v2_score = 0.0
         v2_match_type = None
+        v2_computed = False  # был ли V2 score вычислен
         if final_ens_name and final_matched_params:
             try:
                 import re
@@ -725,12 +726,13 @@ class AutomatedParametricProcessor:
                             ens_params_mask=generic_ens_mask,
                             required=list(final_matched_params.keys())
                         )
+                        v2_computed = True
                         logger.debug(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] V2 scoring error: {e}")
 
-        # Финальный score
-        if v2_score >= 0.99:
+        # Финальный score: если V2 вычислен — доверяем ему (1.0 или 0.0)
+        if v2_computed:
             final_score = v2_score
             if v2_match_type:
                 match_result.match_type = v2_match_type
