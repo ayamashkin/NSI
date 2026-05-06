@@ -242,7 +242,16 @@ class ParametricENSClient:
         relaxed = relaxed.replace(r'$\s*)', r'\)\s*)')
         # Дополнительно: $\s*(?P< → \)\s*(?P< (если после $ идет следующая группа)
         relaxed = relaxed.replace(r'$\s*(?P<', r'\)\s*(?P<')
-        # Если после \) идет \s* -- заменить на [-\s]* (чтобы съедать и дефис)
+
+        # 9c. \$\$?\s*) → \)\s*) — LLM использует \$ вместо \) (закрывающая скобка)
+        relaxed = relaxed.replace(r'\$\$?\s*)', r'\)\s*)')
+        # 9d. \$\$?(?P< → \((?P< — LLM использует \$ вместо \( (открывающая скобка)
+        relaxed = relaxed.replace(r'\$\$?(?P<', r'\((?P<')
+        # 9e. Оставшийся \$(?P< → \((?P< (одиночный экранированный $)
+        relaxed = relaxed.replace(r'\$(?P<', r'\((?P<')
+
+        # 9f. После всех замен $ → скобки, применяем [-\s]* к \)\s*
+        #     (должно идти ПОСЛЕ 9c/d/e, т.к. они создают новые \)\s*)
         relaxed = relaxed.replace(r'\)\s*', r'\)[-\s]*')
 
         # 9b. Любой оставшийся $ в середине паттерна (не anchor) — заменить на \)
@@ -256,10 +265,11 @@ class ParametricENSClient:
         # 14. Разделители между параметрами: \s+ → [-\s]+
         #     LLM иногда генерирует пробелы между числами, но в тексте дефисы
         #     "Болт 2 12 44" vs "Болт 2-12-44"
-        #     Заменяем )\s+ перед (?P< на )[-\s]+
-        relaxed = re.sub(r'\)\\s\+(?=\(\?P<)', lambda m: r')[-\s]+', relaxed)
+        #     Используем .replace() вместо re.sub чтобы избежать regex escaping hell
+        #     Заменяем )\s+(?P< на )[-\s]+(?P<
+        relaxed = relaxed.replace(r')\s+(?P<', r')[-\s]+(?P<')
         #     Также \d+\s+\d+ → \d+[-\s]+\d+ (между двумя числовыми группами)
-        relaxed = re.sub(r'(\d)\\s\+(\d)', lambda m: r'\1[-\s]+\2', relaxed)
+        relaxed = relaxed.replace(r'\d+\s+\d+', r'\d+[-\s]+\d+')
 
         # 10. Метрическая резьба: добавить опциональный шаг (x1,25)
         #     "M12x1,25" -> M12 + x1,25
@@ -525,6 +535,27 @@ class ParametricENSClient:
         s = re.sub(r'ОСТ\s*1', 'ОСТ1', s)
         return s
 
+    @staticmethod
+    def _normalize_ens_value(val: Any) -> Any:
+        """Нормализация значения для сравнения с ENS:
+        - float 2.0 → int 2
+        - str '2.0' → int 2
+        - str 'abc' → str 'abc'
+        """
+        if isinstance(val, float):
+            if val == int(val):
+                return int(val)
+            return val
+        if isinstance(val, str):
+            try:
+                f = float(val)
+                if f == int(f):
+                    return int(f)
+                return f
+            except ValueError:
+                return val.strip()
+        return val
+
     def _calculate_match_score(
         self,
         params: Dict[str, Any],
@@ -567,23 +598,38 @@ class ParametricENSClient:
 
             # Случай 3: поле есть в params, но нет в ЕНС - mismatch
             if query_val is not None and ens_val is None:
+                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH (not in ENS). query_val={query_val}")
                 total += 1
                 continue
 
             # Случай 4: оба не None - сравниваем
             total += 1
+
+            # Нормализация типов перед сравнением (2.0 → 2)
+            query_val = self._normalize_ens_value(query_val)
+            ens_val = self._normalize_ens_value(ens_val)
+
             query_str = str(query_val).lower().strip()
             ens_str = str(ens_val).lower().strip()
 
             # Точное совпадение
             if query_str == ens_str:
                 matches += 1.0
+                logger.debug(f"[_calculate_match_score] param='{param}': EXACT match. val={query_str}")
             elif param in FUZZY_FIELDS:
                 # Fuzzy только для разрешённых полей
                 sim = _text_similarity(query_str, ens_str)
                 if sim >= 0.6:
                     matches += sim
-            # else: mismatch для не-fuzzy полей
+                    logger.debug(f"[_calculate_match_score] param='{param}': FUZZY match. sim={sim:.2f}, query={query_str}, ens={ens_str}")
+                else:
+                    logger.debug(f"[_calculate_match_score] param='{param}': FUZZY LOW sim={sim:.2f}, query={query_str}, ens={ens_str}")
+            else:
+                logger.debug(f"[_calculate_match_score] param='{param}': MISMATCH. query={query_str}, ens={ens_str}")
+
+        final_score = matches / total if total > 0 else 0.0
+        logger.debug(f"[_calculate_match_score] final_score={final_score:.3f}, matches={matches}, total={total}")
+        return final_score
 
         return matches / total if total > 0 else 0.0
 

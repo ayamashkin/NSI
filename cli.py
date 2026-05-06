@@ -12,10 +12,6 @@ from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +28,10 @@ def cli(ctx, config):
     else:
         logger.warning(f"Config not found: {config}")
         ctx.obj['config'] = {}
+
+    # Настройка логирования из конфига
+    from config.settings import setup_logging
+    setup_logging(config)
 
 
 # =============================================================================

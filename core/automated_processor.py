@@ -17,14 +17,14 @@ logger = logging.getLogger(__name__)
 
 class ProcessingLevel(Enum):
     """Уровни обработки."""
-    LEVEL_0_EXTRACT = "standard_extraction"  # Извлечение стандарта
-    LEVEL_1_MASK_LOOKUP = "mask_lookup"  # Проверка MaskDatabase
-    LEVEL_2_LLM_GENERATE = "llm_generation"  # Генерация маски
-    LEVEL_3_VALIDATE = "auto_validation"  # Авто-валидация
-    LEVEL_5_SAVE = "save_mask"  # Сохранение маски
+    LEVEL_0_EXTRACT = "standard_extraction"      # Извлечение стандарта
+    LEVEL_1_MASK_LOOKUP = "mask_lookup"          # Проверка MaskDatabase
+    LEVEL_2_LLM_GENERATE = "llm_generation"      # Генерация маски
+    LEVEL_3_VALIDATE = "auto_validation"         # Авто-валидация
+    LEVEL_5_SAVE = "save_mask"                   # Сохранение маски
     LEVEL_6_PARAMETRIC_MATCH = "parametric_match"  # Параметрическое сопоставление
-    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"  # TF-IDF fallback
-    LEVEL_8_LLM_DIRECT = "llm_direct"  # Прямой LLM вызов
+    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"    # TF-IDF fallback
+    LEVEL_8_LLM_DIRECT = "llm_direct"            # Прямой LLM вызов
 
 
 @dataclass
@@ -66,14 +66,14 @@ class AutomatedParametricProcessor:
     """
 
     def __init__(
-            self,
-            mask_db,
-            llm_clients: Optional[Dict[str, Any]] = None,
-            ens_index_path: Optional[str] = None,
-            min_mask_score: float = 0.85,
-            max_llm_retries: int = 3,
-            use_llm_generation: bool = True,
-            settings: Optional[Any] = None
+        self,
+        mask_db,
+        llm_clients: Optional[Dict[str, Any]] = None,
+        ens_index_path: Optional[str] = None,
+        min_mask_score: float = 0.85,
+        max_llm_retries: int = 3,
+        use_llm_generation: bool = True,
+        settings: Optional[Any] = None
     ):
         """
         Инициализация процессора.
@@ -236,11 +236,11 @@ class AutomatedParametricProcessor:
         return self._tfidf_fallback(text, extracted, start_time)
 
     def _generate_mask(
-            self,
-            standard: str,
-            item_type: str,
-            text: str = "",
-            standard_info: Optional[Any] = None
+        self,
+        standard: str,
+        item_type: str,
+        text: str = "",
+        standard_info: Optional[Any] = None
     ) -> Optional[Dict[str, Any]]:
         """Генерация маски через LLM с каскадным keyword resolution."""
         if not self.llm_generator:
@@ -280,10 +280,10 @@ class AutomatedParametricProcessor:
         return None
 
     def _validate_mask(
-            self,
-            mask: Dict[str, Any],
-            standard: str,
-            item_type: str
+        self,
+        mask: Dict[str, Any],
+        standard: str,
+        item_type: str
     ) -> Any:
         """Валидация сгенерированной маски."""
         from database.mask_database import MaskRecord
@@ -343,7 +343,6 @@ class AutomatedParametricProcessor:
         import re
         if not a or not b:
             return 0.0
-
         # Извлекаем токены, убираем цифры (для покрытий/материалов они не значимы)
         def _extract_tokens(text):
             raw_tokens = re.findall(r'[a-zA-Zа-яА-Я0-9]+', str(text).lower())
@@ -397,11 +396,16 @@ class AutomatedParametricProcessor:
 
             if total_weight > 0:
                 score = matched_weight / total_weight
+                logger.info(f"[FUZZY] Candidate '{candidate.get('наименование', 'N/A')[:40]}': score={score:.3f}, weight={total_weight:.1f}, matched={matched_weight:.1f}")
                 if score > best_score:
                     best_score = score
                     best_match = {**candidate, '_fuzzy_score': best_score}
+            else:
+                logger.info(f"[FUZZY] Candidate '{candidate.get('наименование', 'N/A')[:40]}': no comparable params (weight=0)")
 
+        logger.info(f"[FUZZY] Best score: {best_score:.3f}, threshold: 0.6, matched: {best_match is not None and best_score >= 0.6}")
         return best_match if best_score >= 0.6 else None
+
 
     def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -516,11 +520,11 @@ class AutomatedParametricProcessor:
         return None
 
     def _parametric_match(
-            self,
-            text: str,
-            mask,
-            extracted: Dict[str, Any],
-            start_time: float
+        self,
+        text: str,
+        mask,
+        extracted: Dict[str, Any],
+        start_time: float
     ) -> ProcessingResult:
         """Параметрическое сопоставление."""
         import time
@@ -534,8 +538,7 @@ class AutomatedParametricProcessor:
             mask.standard = extracted_std
             logger.info(f"[PARAM_MATCH] Fixed mask.standard from extracted: '{extracted_std}'")
 
-        logger.info(
-            f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{effective_standard}', mask.item_type='{mask.item_type}'")
+        logger.info(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{effective_standard}', mask.item_type='{mask.item_type}'")
 
         match_result = self.parametric_client.match(
             text=text,
@@ -543,8 +546,7 @@ class AutomatedParametricProcessor:
             item_type=mask.item_type
         )
 
-        logger.info(
-            f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}, ens_code={match_result.ens_code}")
+        logger.info(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}, ens_code={match_result.ens_code}")
 
         # Fallback: если parametric_client вернул пустые params но score > 0,
         # извлекаем params напрямую через regex (используем re.search с IGNORECASE,
@@ -575,8 +577,7 @@ class AutomatedParametricProcessor:
                 generic_pattern = self._get_generic_pattern(mask.item_type, effective_standard)
                 if generic_pattern:
                     # Применяем те же relax-правила к generic pattern
-                    relaxed_generic = self.parametric_client._relax_pattern(generic_pattern,
-                                                                            standard=effective_standard)
+                    relaxed_generic = self.parametric_client._relax_pattern(generic_pattern, standard=effective_standard)
                     logger.debug(f"[PARAM_MATCH] Generic pattern: {relaxed_generic[:200]}")
                     m = re.search(relaxed_generic, text, re.IGNORECASE)
                     if m:
@@ -639,14 +640,21 @@ class AutomatedParametricProcessor:
             try:
                 # Получаем кандидатов из ЕСН
                 ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
+                logger.info(f"[PARAM_MATCH] ENS candidates for fuzzy: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
                 # Сначала пробуем fuzzy match с remapped params
                 if ens_candidates and final_matched_params:
+                    logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
                     fuzzy_match = self._fuzzy_match_ens(final_matched_params, ens_candidates)
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
-                        logger.info(
-                            f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
+                        logger.info(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
+                    else:
+                        logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
+                elif not ens_candidates:
+                    logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
+                elif not final_matched_params:
+                    logger.warning(f"[PARAM_MATCH] Fuzzy fallback: empty final_matched_params")
                 # Если fuzzy не сработал и есть remapped params — пробуем parametric ENS search
                 if not fuzzy_ens_code and final_matched_params:
                     # Фильтруем None значения
@@ -659,8 +667,7 @@ class AutomatedParametricProcessor:
                     if manual_ens and manual_ens.get('code'):
                         fuzzy_ens_code = manual_ens['code']
                         fuzzy_score = manual_ens.get('_match_score', 0.8)
-                        logger.info(
-                            f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
+                        logger.info(f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
 
@@ -793,10 +800,10 @@ class AutomatedParametricProcessor:
         return None
 
     def _tfidf_fallback(
-            self,
-            text: str,
-            extracted: Dict[str, Any],
-            start_time: float
+        self,
+        text: str,
+        extracted: Dict[str, Any],
+        start_time: float
     ) -> ProcessingResult:
         """TF-IDF fallback — всегда success=False, т.к. параметры не извлечены."""
         import time
@@ -821,8 +828,7 @@ class AutomatedParametricProcessor:
                 'extracted': extracted
             },
             item_type=extracted.get('item_type', ''),
-            standard=extracted.get('standard_info', {}).get('standard', '') if isinstance(
-                extracted.get('standard_info'), dict) else ''
+            standard=extracted.get('standard_info', {}).get('standard', '') if isinstance(extracted.get('standard_info'), dict) else ''
         )
 
     def _llm_direct_process(self, text: str, start_time: float) -> ProcessingResult:

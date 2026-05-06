@@ -5,11 +5,35 @@ Configuration Module
 
 import yaml
 import logging
+import logging.handlers
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+
+def _parse_size(size_str: str) -> int:
+    """Парсит строку размера в байты: '10MB' -> 10485760."""
+    size_str = size_str.strip().upper()
+    multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3}
+    for suffix, mult in sorted(multipliers.items(), key=lambda x: -len(x[0])):
+        if size_str.endswith(suffix):
+            return int(float(size_str[:-len(suffix)].strip()) * mult)
+    return int(size_str)
+
+
+@dataclass
+class LoggingConfig:
+    """Конфигурация логирования."""
+    level: str = "INFO"
+    file: str = "logs/processor.log"
+    max_size: str = "10MB"
+    backup_count: int = 5
+    format: str = DEFAULT_LOG_FORMAT
 
 
 @dataclass
@@ -146,6 +170,7 @@ class Settings:
     prompts: Dict[str, PromptConfig] = field(default_factory=dict)
     mask_generation: MaskGenerationConfig = field(default_factory=MaskGenerationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @classmethod
     def load(cls, config_path: str = "config/config.yaml",
@@ -196,7 +221,8 @@ class Settings:
             processing=ProcessingConfig(**config_data.get('processing', {})),
             prompts=prompt_configs,
             mask_generation=MaskGenerationConfig(**config_data.get('mask_generation', {})),
-            output=OutputConfig(**config_data.get('output', {}))
+            output=OutputConfig(**config_data.get('output', {})),
+            logging=LoggingConfig(**config_data.get('logging', {}))
         )
 
     @staticmethod
@@ -249,6 +275,53 @@ class Settings:
         for config in self.api.values():
             config.load_credentials()
         logger.info("API keys and credentials reloaded")
+
+
+def setup_logging(config_path: str = "config/config.yaml") -> None:
+    """
+    Настройка логирования из конфигурационного файла.
+    Создает консольный и файловый handler с ротацией.
+    """
+    config_data = Settings._load_yaml(config_path)
+    logging_cfg = LoggingConfig(**config_data.get('logging', {}))
+
+    level = getattr(logging, logging_cfg.level.upper(), logging.INFO)
+
+    # Создаем директорию для логов
+    log_path = Path(logging_cfg.file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Корневой логгер
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Убираем старые handlers чтобы избежать дублирования при повторном вызове
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    formatter = logging.Formatter(logging_cfg.format)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # File handler с ротацией
+    max_bytes = _parse_size(logging_cfg.max_size)
+    file_handler = logging.handlers.RotatingFileHandler(
+        logging_cfg.file,
+        maxBytes=max_bytes,
+        backupCount=logging_cfg.backup_count,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    logging.getLogger("config.settings").info(
+        f"Logging configured: level={logging_cfg.level}, file={logging_cfg.file}"
+    )
 
 
 # Глобальный singleton
