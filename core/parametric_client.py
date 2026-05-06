@@ -741,7 +741,12 @@ class ParametricENSClient:
         if not params_a or not params_b:
             return 0.0
 
+        # Параметры, которые не участвуют в сравнении (метаданные/служебные)
+        skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
+
         for param, val_a in params_a.items():
+            if param in skip_params:
+                continue
             if val_a is None or str(val_a).strip() == '':
                 continue
             val_b = params_b.get(param)
