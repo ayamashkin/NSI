@@ -438,6 +438,11 @@ class AutomatedParametricProcessor:
         if 'покрытие' in extracted_params:
             coating_variants = self._get_coating_variants(extracted_params['покрытие'])
 
+        # Debug: выводим извлечённые параметры
+        extracted_str = ", ".join(f"{k}={v}" for k, v in extracted_params.items() if v is not None)
+        logger.debug(f"[FUZZY] Extracted params: {extracted_str}")
+        logger.debug(f"[FUZZY] Total candidates to check: {len(ens_candidates) if ens_candidates else 0}")
+
         for candidate in ens_candidates:
             total_weight = 0.0
             matched_weight = 0.0
@@ -493,6 +498,15 @@ class AutomatedParametricProcessor:
                 candidate_debug['weight'] = round(total_weight, 1)
                 candidate_debug['matched_weight'] = round(matched_weight, 1)
                 logger.debug(f"[FUZZY] Candidate '{candidate_debug['name'][:50]}': score={score:.3f}, weight={total_weight:.1f}, matched={matched_weight:.1f}")
+                # Подробный debug: параметры кандидата из ЕНС
+                ens_params_str = ", ".join(f"{k}={v}" for k, v in key_ens_params.items())
+                logger.debug(f"[FUZZY]   ENS params: {ens_params_str}")
+                if candidate_debug['params_matched']:
+                    matched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_matched'].items())
+                    logger.debug(f"[FUZZY]   MATCHED: {matched_str}")
+                if candidate_debug['params_mismatched']:
+                    mismatched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_mismatched'].items())
+                    logger.debug(f"[FUZZY]   MISMATCHED: {mismatched_str}")
                 if score > best_score:
                     best_score = score
                     best_match = {**candidate, '_fuzzy_score': best_score}
@@ -506,6 +520,15 @@ class AutomatedParametricProcessor:
         # Сортируем по score убыванию
         debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
 
+        # Итоговый debug: top candidates
+        if debug_candidates:
+            top_n = min(5, len(debug_candidates))
+            logger.debug(f"[FUZZY] Top {top_n} candidates:")
+            for i, cd in enumerate(debug_candidates[:top_n], 1):
+                logger.debug(f"[FUZZY]   #{i}: '{cd.get('name','')[:50]}' score={cd.get('score',0)}, code={cd.get('ens_code','N/A')}")
+                if cd.get('params_mismatched'):
+                    for pk, pv in cd['params_mismatched'].items():
+                        logger.debug(f"[FUZZY]       mismatch: {pk}: {pv}")
         logger.debug(f"[FUZZY] Best score: {best_score:.3f}, threshold: 0.6, matched: {best_match is not None and best_score >= 0.6}")
         return (best_match if best_score >= 0.6 else None), debug_candidates
 
