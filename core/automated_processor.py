@@ -477,8 +477,11 @@ class AutomatedParametricProcessor:
                     else:
                         candidate_debug['params_mismatched'][param_name] = f"'{extracted_val}' vs '{candidate_val}' (sim={sim:.2f})"
                 else:
-                    # Числовые параметры — точное совпадение
-                    matched = str(extracted_val).strip() == str(candidate_val).strip()
+                    # Числовые параметры — точное совпадение (нормализуем int vs float)
+                    try:
+                        matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
+                    except (ValueError, TypeError):
+                        matched = str(extracted_val).strip() == str(candidate_val).strip()
                     if matched:
                         matched_weight += weight
                         candidate_debug['params_matched'][param_name] = f"{extracted_val} == {candidate_val}"
