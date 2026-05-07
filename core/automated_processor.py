@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix8
-LAST_FIX: 2026-05-07 09:50 UTC+3 - ГОСТ 7795-70 generic pattern: длина.группа split
+LAST_FIX: 2026-05-07 10:00 UTC+3 - _find_in_ens with text+item_type; code→код fix
 """
 
 import logging
@@ -380,14 +380,31 @@ class AutomatedParametricProcessor:
         union = tokens_a | tokens_b
         return len(intersection) / len(union)
 
+    def _get_coating_variants(self, coating: str) -> List[str]:
+        """Generate coating search variants (Кд -> Кд6, Кд9.фос.окс etc)."""
+        if not coating:
+            return [coating]
+        coating_str = str(coating).strip().lower()
+        variants = [coating]  # original
+        if coating_str in ('кд', 'кд.'):
+            for v in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
+                      'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
+                variants.append(v)
+        return variants
+
     def _fuzzy_match_ens(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Optional[Dict]:
         """
         Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
-        Для текстовых полей (покрытие, материал) использует token-similarity.
+        Для покрытия пробует expanded variants (Кд -> Кд6/Кд9.фос.окс).
         """
         TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
         best_match = None
         best_score = 0.0
+
+        # Expand coating variants for matching
+        coating_variants = None
+        if 'покрытие' in extracted_params:
+            coating_variants = self._get_coating_variants(extracted_params['покрытие'])
 
         for candidate in ens_candidates:
             total_weight = 0.0
@@ -403,8 +420,13 @@ class AutomatedParametricProcessor:
                 candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
                 if param_name in TEXT_FIELDS:
-                    sim = self._token_similarity(extracted_val, candidate_val)
-                    if sim >= 0.8:  # 80% токенов совпадают
+                    # For coating: try all variants
+                    if param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
+                        best_sim = max(self._token_similarity(v, candidate_val) for v in coating_variants)
+                        sim = best_sim
+                    else:
+                        sim = self._token_similarity(extracted_val, candidate_val)
+                    if sim >= 0.5:  # Lowered threshold for coating variants
                         matched_weight += weight * sim
                 else:
                     # Числовые параметры — точное совпадение
@@ -681,11 +703,17 @@ class AutomatedParametricProcessor:
                     manual_ens = self.parametric_client._find_in_ens(
                         clean_params,
                         list(clean_params.keys()),  # required = все распознанные поля
-                        standard=effective_standard
+                        standard=effective_standard,
+                        text=text,  # для name_exact fallback
+                        item_type=item_type  # для фильтрации по типу
                     )
-                    if manual_ens and manual_ens.get('code'):
-                        fuzzy_ens_code = manual_ens['code']
+                    ens_code_field = manual_ens.get('код') or manual_ens.get('code') if manual_ens else None
+                    if manual_ens and ens_code_field:
+                        fuzzy_ens_code = ens_code_field
                         fuzzy_score = manual_ens.get('_match_score', 0.8)
+                        # Сохраняем ENS name для V2 scoring
+                        if not match_result.ens_name:
+                            match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
                         logger.info(f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
