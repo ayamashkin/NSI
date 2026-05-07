@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:50 UTC+3 — Винт generic pattern: [-\s]* after (исполнение); V2 debug logging; v2_computed
+LAST_FIX: 2026-05-07 08:55 UTC+3 - V2 scoring works for screws; confidence=final_score; v2_computed flag
 """
 
 import logging
