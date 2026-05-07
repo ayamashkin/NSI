@@ -152,7 +152,7 @@ matching:
   # для каждого кандидата из ЕНС (matched/mismatched со значениями).
   # Полезно для отладки почему fuzzy выбрал одну запись вместо другой.
   # false = только итоговый score кандидата (краткий режим).
-  debug_per_parameter: true
+  debug_per_parameter: false
 
 # =============================================================================
 # Prompts Configuration
