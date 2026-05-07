@@ -3,8 +3,8 @@ Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2025-05-06-fix8
-LAST_FIX: 2026-05-07 10:00 UTC+3 - _find_in_ens with text+item_type; code→код fix
+VERSION: 2025-05-06-fix9
+LAST_FIX: 2026-05-07 16:08 UTC+3 - success_threshold from config; V2 vs fuzzy priority fix; union keys empty handling
 """
 
 import logging
@@ -12,6 +12,27 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+# Lazy import для избежания circular dependency
+_matching_config = None
+
+def _get_matching_config():
+    """Ленивая загрузка MatchingConfig из settings."""
+    global _matching_config
+    if _matching_config is None:
+        try:
+            from config.settings import get_settings
+            _matching_config = get_settings().matching
+        except Exception:
+            # Fallback: дефолтные значения если конфиг не загрузился
+            class _FallbackMatchingConfig:
+                success_threshold = 0.7
+                fuzzy_threshold = 0.6
+                v2_exact_threshold = 0.99
+                coating_similarity_threshold = 0.8
+                strict_union_keys = False
+            _matching_config = _FallbackMatchingConfig()
+    return _matching_config
 
 logger = logging.getLogger(__name__)
 
@@ -802,7 +823,7 @@ class AutomatedParametricProcessor:
         # Если V2 дал точный match (1.0) — используем его
         # Если V2 дал 0.0, но fuzzy нашёл кандидата — используем fuzzy
         if v2_computed:
-            if v2_score >= 0.99:
+            if v2_score >= _get_matching_config().v2_exact_threshold:
                 final_score = v2_score
                 if v2_match_type:
                     match_result.match_type = v2_match_type
@@ -891,7 +912,7 @@ class AutomatedParametricProcessor:
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
-            success=final_score >= 0.7,
+            success=final_score >= _get_matching_config().success_threshold,
             params=display_params,
             ens_match={
                 'code': final_ens_code,

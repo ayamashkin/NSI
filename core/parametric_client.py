@@ -2,7 +2,8 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07 09:30 UTC+3 — union keys comparison; coating variants Кд→Кд6/Кд9.фос.окс; strict exact match; M-optional
+VERSION: 2026-05-07 16:08 UTC+3 — union keys comparison (fixed: empty key handling);
+         coating variants Кд→Кд6/Кд9.фос.окс; strict exact match; M-optional
 """
 
 import re

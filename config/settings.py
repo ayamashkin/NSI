@@ -2,7 +2,7 @@
 Configuration Module
 Единый источник настроек с загрузкой API ключей из внешних файлов.
 
-VERSION: 2026-05-07 08:28 UTC+3 — LoggingConfig + setup_logging with RotatingFileHandler
+VERSION: 2026-05-07 16:08 UTC+3 — MatchingConfig (success_threshold, fuzzy_threshold, v2_exact_threshold, strict_union_keys)
 """
 
 import yaml
@@ -113,6 +113,16 @@ class ProcessingConfig:
 
 
 @dataclass
+class MatchingConfig:
+    """Конфигурация порогов сопоставления."""
+    success_threshold: float = 0.7           # Порог для считать match успешным
+    fuzzy_threshold: float = 0.6             # Порог fuzzy matching кандидатов
+    v2_exact_threshold: float = 0.99         # Порог V2 exact match
+    coating_similarity_threshold: float = 0.8 # Порог similarity покрытия
+    strict_union_keys: bool = False          # Union keys comparison mode
+
+
+@dataclass
 class PromptConfig:
     """Конфигурация промпта."""
     id: str
@@ -133,7 +143,6 @@ class PromptConfig:
     def get_api_config(self, settings: 'Settings') -> 'APIConfig':
         """Получает конфиг API для этого промпта."""
         return settings.api[self.service]
-
 
 
 
@@ -169,6 +178,7 @@ class Settings:
     api: Dict[str, APIConfig] = field(default_factory=dict)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
+    matching: MatchingConfig = field(default_factory=MatchingConfig)
     prompts: Dict[str, PromptConfig] = field(default_factory=dict)
     mask_generation: MaskGenerationConfig = field(default_factory=MaskGenerationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -221,6 +231,7 @@ class Settings:
             api=api_configs,
             database=DatabaseConfig(**config_data.get('database', {})),
             processing=ProcessingConfig(**config_data.get('processing', {})),
+            matching=MatchingConfig(**config_data.get('matching', {})),
             prompts=prompt_configs,
             mask_generation=MaskGenerationConfig(**config_data.get('mask_generation', {})),
             output=OutputConfig(**config_data.get('output', {})),

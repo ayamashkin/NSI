@@ -54,6 +54,28 @@ processing:
   retry_ignored: true         # ← Перепроверять ignored
 
 # =============================================================================
+# Matching Configuration
+# =============================================================================
+matching:
+  # Порог для считать parametric match успешным (0.0..1.0)
+  # 1.0 = только идеальное совпадение всех параметров
+  # 0.7 = fuzzy match с совпадением ключевых параметров
+  success_threshold: 0.7
+
+  # Порог для fuzzy matching кандидатов из ЕНС
+  fuzzy_threshold: 0.6
+
+  # Порог для V2 exact matching (params vs ens_params_mask)
+  v2_exact_threshold: 0.99
+
+  # Порог similarity для покрытия (token-based Jaccard)
+  coating_similarity_threshold: 0.8
+
+  # Union keys comparison: false = сравнивать по пересечению ключей
+  # true = по объединению (keys из ОБОИХ наборов), mismatch если key missing
+  strict_union_keys: false
+
+# =============================================================================
 # Prompts Configuration
 # =============================================================================
 prompts:
