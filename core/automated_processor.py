@@ -6,7 +6,7 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
-  2026-05-07 12:10 UTC+3 — config.yaml: material_coating_map + auto_substitution для Д1П (алюминий)
+  2026-05-07 13:25 UTC+3 — coating_substitution: полное логирование; проверка всех return paths
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
   2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
@@ -1220,6 +1220,9 @@ class AutomatedParametricProcessor:
         display_ens_params_mask = self._remap_params(ens_params_mask) if ens_params_mask else {}
 
         processing_time = (time.time() - start_time) * 1000
+
+        # Логирование coating_substitution перед возвратом
+        logger.info(f"[PARAM_MATCH] RETURN substitution_info={'SET' if substitution_info else 'NONE'}: {substitution_info}")
 
         return ProcessingResult(
             text=text,

@@ -178,7 +178,7 @@ logging:
   file: "logs/processor.log"
 
   # Максимальный размер одного файла логов
-  max_size: "100MB"
+  max_size: "50MB"
 
   # Количество ротированных файлов (backup)
   backup_count: 20
