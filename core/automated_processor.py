@@ -521,11 +521,13 @@ class AutomatedParametricProcessor:
             Tuple[extracted_params (возможно изменённые), substitution_info или None]
             substitution_info содержит: original, corrected, material, reason, rule_note
         """
+        logger.debug(f"[COATING_SUBST] Called with coating={extracted_params.get('покрытие')}, candidates={len(ens_candidates)}")
+
         # Загружаем coating rules напрямую из YAML (не через settings, т.к.
         # оригинальный settings.py может не иметь поля coating_rules)
         coating_rules = self._load_coating_rules()
         if not coating_rules:
-            logger.debug("[COATING_SUBST] No coating_rules in config, skipping substitution")
+            logger.warning("[COATING_SUBST] No coating_rules in config, skipping substitution")
             return extracted_params, None
 
         # Проверяем включена ли auto_substitution
@@ -539,20 +541,15 @@ class AutomatedParametricProcessor:
             logger.debug("[COATING_SUBST] No candidates for trial match, skipping")
             return extracted_params, None
 
-        # Определяем марку материала из лучшего кандидата
+        # Определяем марку материала из кандидатов
         material = None
         if trial_match:
             material = trial_match.get('марка_материала') or trial_match.get('марка_стали')
-        # Если лучший match не дал марку — пробуем других кандидатов
+        # Если лучший match не дал марку — берем из key_ens_params первых кандидатов
         if not material and trial_debug:
             for cd in trial_debug[:5]:
-                # Находим ens_params с маркой
-                for candidate in ens_candidates:
-                    cand_name = candidate.get('наименование', candidate.get('полное_наименование', ''))
-                    if cand_name and cd.get('name') and cand_name[:50] == cd['name'][:50]:
-                        material = candidate.get('марка_материала') or candidate.get('марка_стали')
-                        if material:
-                            break
+                key_params = cd.get('key_ens_params', {})
+                material = key_params.get('марка_материала') or key_params.get('марка_стали')
                 if material:
                     break
 
@@ -968,14 +965,25 @@ class AutomatedParametricProcessor:
         # Используем raw_params (fallback или matched, до remap).
         raw_params = fallback_params if fallback_params else match_result.matched_params
         substitution_info = None
+        logger.debug(f"[PARAM_MATCH] Coating substitution check: raw_params={raw_params}")
         if raw_params and raw_params.get('покрытие'):
+            logger.debug(f"[PARAM_MATCH] Coating substitution: has покрытие='{raw_params.get('покрытие')}', calling _apply_coating_substitution")
             try:
                 # Загружаем кандидатов для определения марки материала
                 ens_candidates_sub = self._get_cached_ens_candidates(effective_standard, mask.item_type)
+                logger.debug(f"[PARAM_MATCH] Coating substitution: got {len(ens_candidates_sub)} candidates")
                 if ens_candidates_sub:
                     _, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
+                    if substitution_info:
+                        logger.info(f"[PARAM_MATCH] Coating substitution result: {substitution_info}")
+                    else:
+                        logger.debug(f"[PARAM_MATCH] Coating substitution: no substitution applied")
+                else:
+                    logger.debug(f"[PARAM_MATCH] Coating substitution: no candidates, skipping")
             except Exception as e:
-                logger.debug(f"[PARAM_MATCH] Coating substitution error: {e}")
+                logger.warning(f"[PARAM_MATCH] Coating substitution error: {e}", exc_info=True)
+        else:
+            logger.debug(f"[PARAM_MATCH] Coating substitution: no покрытие in raw_params, skipping")
 
         # Debug: собираем информацию о всех проверенных кандидатах
         debug_candidates = []
