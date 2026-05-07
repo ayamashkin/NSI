@@ -88,8 +88,8 @@ prompts:
 logging:
   level: "DEBUG"
   file: "logs/processor.log"
-  max_size: "10MB"
-  backup_count: 20
+  max_size: "50MB"
+  backup_count: 10
 
 # =============================================================================
 # Mask Generation Configuration
