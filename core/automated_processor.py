@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix8
-LAST_FIX: 2026-05-07 09:30 UTC+3 - washer generic pattern; coating alias Кд→Кд6/Кд9.фос.окс
+LAST_FIX: 2026-05-07 09:50 UTC+3 - ГОСТ 7795-70 generic pattern: длина.группа split
 """
 
 import logging
@@ -470,14 +470,16 @@ class AutomatedParametricProcessor:
         if item_upper in ('БОЛТ', 'БОЛ' + _ru_t, 'BOLT'):
             # Metric bolt: Болт 2M12x1,25-6gx100.58 ГОСТ 7795-70
             if standard and '7795' in standard:
+                # ГОСТ 7795-70: Болт 2M12x1,25-6gx100.58 ГОСТ 7795-70
+                # Точка в "100.58" — разделитель: длина=100, группа=5.8
                 return (
                     r'^Болт\s*(?:(?P<исполнение>\d+)\s*)?'
                     r'(?:M(?P<номинальный_диаметр_резьбы>\d+)'
                     r'(?:[xX×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?'
                     r'[-\s]*(?P<класс_поле_допуска>\d+[a-zA-Z])'
-                    r'[-\s]*[xX×]?(?P<длина>\d+(?:[.,]\d+)?))'
+                    r'[xX×](?P<длина>\d+)\.(?P<группа_класс_прочности>\d+(?:\.\d+)?))'
                     r'(?:[-\s]*(?P<покрытие>[\w.]+))?'
-                    r'\s*$'
+                    r'\s*ГОСТ\s*7795-70\s*$'
                 )
             # Standard bolt: Болт (2)-8-26-Кд-ОСТ 1 31133-80
             pattern = (
