@@ -2,7 +2,7 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07 08:28 UTC+3 — raw params; raw ens_params_mask; strict exact via matching key names; M-optional
+VERSION: 2026-05-07 08:57 UTC+3 — union keys comparison (not intersection); mismatch if key missing; strict exact match; M-optional
 """
 
 import re
@@ -762,7 +762,8 @@ class ParametricENSClient:
     def _compare_param_sets(self, params_a: Dict[str, Any], params_b: Dict[str, Any]) -> float:
         """
         Сравнение двух наборов параметров.
-        Score=1.0 если все непустые параметры совпадают, иначе 0.0.
+        Score=1.0 если все параметры из ОБОИХ наборов совпадают (union of keys).
+        Если ключ есть только в одном наборе — mismatch (return 0.0).
         """
         if not params_a or not params_b:
             return 0.0
@@ -770,18 +771,26 @@ class ParametricENSClient:
         # Параметры, которые не участвуют в сравнении (метаданные/служебные)
         skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
 
-        for param, val_a in params_a.items():
+        # Уровень 0: сравниваем по ОБЪЕДИНЕНИЮ ключей (union), не пересечению
+        all_keys = set(params_a.keys()) | set(params_b.keys())
+        for param in all_keys:
             if param in skip_params:
                 continue
-            if val_a is None or str(val_a).strip() == '':
-                continue
+            val_a = params_a.get(param)
             val_b = params_b.get(param)
-            if val_b is None or str(val_b).strip() == '':
+            str_a = str(val_a).lower().strip() if val_a is not None else ''
+            str_b = str(val_b).lower().strip() if val_b is not None else ''
+
+            # Если оба пустые — пропускаем
+            if not str_a and not str_b:
+                continue
+
+            # Если один пустой (None/''), а другой нет — mismatch!
+            if not str_a or not str_b:
+                logger.debug(f"[_compare] KEY MISSING: {param} = '{val_a}' vs '{val_b}'")
                 return 0.0
 
-            str_a = str(val_a).lower().strip()
-            str_b = str(val_b).lower().strip()
-
+            # Сравниваем значения
             if param == 'покрытие':
                 norm_a = self._normalize_coating(str_a)
                 norm_b = self._normalize_coating(str_b)
