@@ -5,8 +5,8 @@ Level 6: Параметрическое сопоставление с испол
 VERSION: 2026-05-07
 
 LAST_FIXES:
-  2026-05-07 12:10 UTC+3 — settings.coating_rules: чтение из корня конфига (не matching)
-  2026-05-07 11:56 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
+  2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
+  2026-05-07 12:10 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
   2026-05-07 11:45 UTC+3 — ленивая загрузка MatchingConfig через _get_matching_config()
   2026-05-07 11:30 UTC+3 — union keys comparison: корректная обработка пустых ключей
   2026-05-07 11:15 UTC+3 — _find_in_ens_debug: подробный вывод кандидатов в лог
@@ -197,6 +197,9 @@ class ParametricENSClient:
         self.ens_index_path = ens_index_path
         self.use_tfidf_fallback = use_tfidf_fallback
         self._ens_index = None
+
+        # Кэш для _find_in_ens по хешу (params, standard, item_type)
+        self._find_in_ens_cache: Dict[str, Any] = {}
 
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
@@ -642,6 +645,14 @@ class ParametricENSClient:
             logger.warning(f"[_find_in_ens] ENS index not loaded!")
             return None, debug_candidates
 
+        # === КЭШИРОВАНИЕ ===
+        # Кэшируем результат по хешу (params, required, standard, item_type)
+        cache_key = f"{hash(str(sorted(params.items())))}:{hash(str(required))}:{standard}:{item_type}"
+        if cache_key in self._find_in_ens_cache:
+            cached = self._find_in_ens_cache[cache_key]
+            logger.debug(f"[_find_in_ens] Cache hit for {standard}/{item_type}")
+            return cached['match'], cached['debug']
+
         items = self._ens_index['items']
         best_match = None
         best_score = 0.0
@@ -752,6 +763,12 @@ class ParametricENSClient:
             logger.info(f"[_find_in_ens] RETURNING match: score={best_score:.2f}, name={best_match.get('наименование','')[:50]}")
         else:
             logger.info(f"[_find_in_ens] No match found (best_score={best_score:.2f} < 0.7 threshold)")
+
+        # Сохраняем в кэш перед возвратом
+        self._find_in_ens_cache[cache_key] = {
+            'match': best_match if best_score >= 0.7 else None,
+            'debug': debug_candidates
+        }
 
         if best_score < 0.7:
             return None, debug_candidates

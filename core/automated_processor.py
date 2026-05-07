@@ -6,11 +6,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
-  2026-05-07 12:10 UTC+3 — _load_coating_rules: чтение YAML напрямую (без settings.py)
+  2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
+  2026-05-07 12:10 UTC+3 — _load_coating_rules: чтение YAML напрямую + поиск по CWD
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
   2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
   2026-05-07 11:50 UTC+3 — debug_per_parameter: скрытие лога _compare_param_sets
-  2026-05-07 11:35 UTC+3 — coating auto_substitution в fuzzy matching pipeline
 """
 
 import logging
@@ -422,6 +422,21 @@ class AutomatedParametricProcessor:
     # Кэш для coating_rules (читаем один раз за сессию)
     _coating_rules_cache: Optional[Dict] = None
 
+    # Кэш для ENS candidates по (standard, item_type) — не грузить повторно
+    _ens_candidates_cache: Dict[Tuple[str, str], List[Dict]] = {}
+
+    def _get_cached_ens_candidates(self, standard: str, item_type: str) -> List[Dict]:
+        """Кэшированная загрузка ENS candidates по (standard, item_type)."""
+        key = (standard.upper(), item_type.upper())
+        if key not in self._ens_candidates_cache:
+            candidates = self.validator._get_ens_examples(standard, item_type) or []
+            self._ens_candidates_cache[key] = candidates
+            logger.debug(f"[ENS_CACHE] Loaded {len(candidates)} candidates for {key} (cache miss)")
+        else:
+            candidates = self._ens_candidates_cache[key]
+            logger.debug(f"[ENS_CACHE] Using {len(candidates)} cached candidates for {key} (cache hit)")
+        return candidates
+
     def _load_coating_rules(self) -> Optional[Dict]:
         """Загрузка coating_rules из config/config.yaml напрямую (без settings.py)."""
         if self._coating_rules_cache is not None:
@@ -429,8 +444,47 @@ class AutomatedParametricProcessor:
 
         import yaml
         from pathlib import Path
+        import inspect
+        import os
 
-        config_paths = ["config/config.yaml", "../config/config.yaml", "../../config/config.yaml"]
+        # Собираем все возможные пути к config.yaml
+        config_paths = []
+
+        # 1. Относительно текущей рабочей директории
+        config_paths.extend(["config/config.yaml", "../config/config.yaml", "../../config/config.yaml"])
+
+        # 2. Относительно расположения automated_processor.py
+        try:
+            script_dir = Path(os.path.dirname(os.path.abspath(inspect.getfile(self.__class__))))
+            config_paths.extend([
+                str(script_dir / ".." / "config" / "config.yaml"),
+                str(script_dir / ".." / ".." / "config" / "config.yaml"),
+                str(script_dir / "config" / "config.yaml"),
+            ])
+        except Exception:
+            pass
+
+        # 3. Абсолютные пути (типичные для Docker/CI)
+        config_paths.extend([
+            "/app/config/config.yaml",
+            "/workspace/config/config.yaml",
+            "/project/config/config.yaml",
+        ])
+
+        # 4. Относительно CWD с поиском вверх по дереву (до 5 уровней)
+        try:
+            cwd = Path.cwd()
+            for level in range(6):
+                config_paths.append(str(cwd / "config" / "config.yaml"))
+                cwd = cwd.parent
+        except Exception:
+            pass
+
+        # 5. Переменная окружения
+        env_config = os.environ.get('NSI_CONFIG_PATH')
+        if env_config:
+            config_paths.insert(0, env_config)
+
         for path_str in config_paths:
             path = Path(path_str)
             if path.exists():
@@ -440,17 +494,17 @@ class AutomatedParametricProcessor:
                     coating_rules = config.get('coating_rules')
                     if coating_rules:
                         self._coating_rules_cache = coating_rules
-                        logger.debug(f"[COATING_SUBST] Loaded coating_rules from {path}: {list(coating_rules.keys())}")
+                        logger.info(f"[COATING_SUBST] Loaded coating_rules from {path}")
                         return coating_rules
                     else:
-                        logger.debug(f"[COATING_SUBST] coating_rules not found in {path}")
+                        logger.debug(f"[COATING_SUBST] coating_rules key not found in {path}")
                         self._coating_rules_cache = {}
                         return None
                 except Exception as e:
                     logger.debug(f"[COATING_SUBST] Error reading {path}: {e}")
                     continue
 
-        logger.debug("[COATING_SUBST] config.yaml not found in any known path")
+        logger.warning("[COATING_SUBST] config.yaml not found in any known path")
         self._coating_rules_cache = {}
         return None
 
@@ -916,8 +970,8 @@ class AutomatedParametricProcessor:
         if match_result.score < 0.7 or not match_result.ens_code:
             try:
                 # Получаем кандидатов из ЕСН
-                ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
-                logger.info(f"[PARAM_MATCH] ENS candidates: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
+                ens_candidates = self._get_cached_ens_candidates(effective_standard, mask.item_type)
+                logger.info(f"[PARAM_MATCH] ENS candidates: count={len(ens_candidates)}, standard={effective_standard}, item_type={mask.item_type}")
 
                 # === COATING AUTO-SUBSTITUTION (ДО exact/fuzzy match) ===
                 # Применяем auto_substitution из coating_rules ПЕРЕД поиском.
