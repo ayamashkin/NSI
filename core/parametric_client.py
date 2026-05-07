@@ -602,9 +602,18 @@ class ParametricENSClient:
 
     def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Поиск по параметрам в индексе ЕНС. Fallback: точное совпадение наименования с проверкой типа."""
+        match, _ = self._find_in_ens_debug(params, required, standard, text, item_type)
+        return match
+
+    def _find_in_ens_debug(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], List[Dict]]:
+        """
+        Поиск по параметрам в индексе ЕНС с подробным debug-выводом.
+        Возвращает: (best_match, debug_candidates_list)
+        """
+        debug_candidates = []
         if not self._ens_index or 'items' not in self._ens_index:
             logger.warning(f"[_find_in_ens] ENS index not loaded!")
-            return None
+            return None, debug_candidates
 
         items = self._ens_index['items']
         best_match = None
@@ -619,6 +628,9 @@ class ParametricENSClient:
 
         for try_params in param_variants:
             for item in items:
+                item_name = item.get('наименование', item.get('полное_наименование', 'N/A'))
+                item_code = item.get('код', item.get('mdm_key', 'N/A'))
+
                 # Фильтр по стандарту (нтд) - обязательное совпадение
                 if query_std_norm:
                     item_std = item.get('нтд') or item.get('standard')
@@ -634,11 +646,29 @@ class ParametricENSClient:
 
                 score = self._calculate_match_score(try_params, required, item)
 
+                # Собираем debug info
+                skip_fields = {'_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд', 'тип_изделия', 'наименование_типа'}
+                ens_params = {k: v for k, v in item.items() if k not in skip_fields and not k.startswith('_') and v is not None and str(v).strip()}
+
+                debug_entry = {
+                    'stage': 'parametric',
+                    'name': item_name[:60] if isinstance(item_name, str) else str(item_name)[:60],
+                    'ens_code': str(item_code),
+                    'score': round(score, 3),
+                    'source_params': {k: str(v) for k, v in try_params.items() if v is not None},
+                    'ens_params': {k: str(v)[:50] for k, v in list(ens_params.items())[:8]},
+                    'method': '_calculate_match_score',
+                }
+
+                if score > 0:
+                    debug_candidates.append(debug_entry)
+
                 if score > best_score:
                     best_score = score
                     best_match = item
 
         # Fallback: точное совпадение наименования (с проверкой типа)
+        fallback_matched = False
         if best_score < 0.99 and text:
             text_norm = self._normalize_name(text)
             for item in items:
@@ -647,7 +677,6 @@ class ParametricENSClient:
                     item_std_norm = self._normalize_standard(item_std) if item_std else None
                     if item_std_norm and query_std_norm != item_std_norm:
                         continue
-                # Проверка типа в fallback
                 if query_type:
                     item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
                     if item_type_field and item_type_field != query_type:
@@ -657,11 +686,24 @@ class ParametricENSClient:
                     if item_name and self._normalize_name(str(item_name)) == text_norm:
                         best_match = item
                         best_score = 1.0
+                        fallback_matched = True
+                        debug_candidates.append({
+                            'stage': 'name_fallback',
+                            'name': str(item_name)[:60],
+                            'ens_code': str(item.get('код', item.get('mdm_key', 'N/A'))),
+                            'score': 1.0,
+                            'method': 'name_exact',
+                            'matched_name': str(item_name)[:60],
+                        })
                         break
                 if best_score >= 0.99:
                     break
 
+        # Сортируем по score убыванию
+        debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
+
         if best_match:
+            best_match = dict(best_match)
             best_match['_match_score'] = best_score
             best_match['_match_type'] = 'exact' if best_score > 0.9 else 'partial'
             logger.info(f"[_find_in_ens] RETURNING match: score={best_score:.2f}, name={best_match.get('наименование','')[:50]}")
@@ -669,9 +711,9 @@ class ParametricENSClient:
             logger.info(f"[_find_in_ens] No match found (best_score={best_score:.2f} < 0.7 threshold)")
 
         if best_score < 0.7:
-            return None
+            return None, debug_candidates
 
-        return best_match
+        return best_match, debug_candidates
 
     @staticmethod
     def _normalize_name(name: str) -> str:

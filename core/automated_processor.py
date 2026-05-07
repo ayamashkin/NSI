@@ -4,11 +4,11 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix9
-LAST_FIX: 2026-05-07 16:08 UTC+3 - success_threshold from config; V2 vs fuzzy priority fix; union keys empty handling
+LAST_FIX: 2026-05-07 17:05 UTC+3 — debug_candidates in fuzzy/_find_in_ens; V2 vs fuzzy priority fix; success_threshold from config
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -417,10 +417,21 @@ class AutomatedParametricProcessor:
         """
         Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
         Для покрытия пробует expanded variants (Кд -> Кд6/Кд9.фос.окс).
+        Возвращает best_match или None. Для debug используйте _fuzzy_match_ens_debug.
+        """
+        best_match, _ = self._fuzzy_match_ens_debug(extracted_params, ens_candidates)
+        return best_match
+
+    def _fuzzy_match_ens_debug(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Optional[Dict], List[Dict]]:
+        """
+        Fuzzy matching с подробным debug-выводом всех кандидатов.
+        Возвращает: (best_match, debug_candidates_list)
+        Каждый элемент debug_candidates_list содержит: name, score, matched_params, key_params
         """
         TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
         best_match = None
         best_score = 0.0
+        debug_candidates = []
 
         # Expand coating variants for matching
         coating_variants = None
@@ -430,6 +441,13 @@ class AutomatedParametricProcessor:
         for candidate in ens_candidates:
             total_weight = 0.0
             matched_weight = 0.0
+            candidate_debug = {
+                'name': candidate.get('наименование', candidate.get('полное_наименование', 'N/A')),
+                'ens_code': candidate.get('код', candidate.get('mdm_key', 'N/A')),
+                'params_matched': {},
+                'params_mismatched': {},
+                'params_missing': [],
+            }
 
             for param_name, extracted_val in extracted_params.items():
                 if not extracted_val:
@@ -447,24 +465,49 @@ class AutomatedParametricProcessor:
                         sim = best_sim
                     else:
                         sim = self._token_similarity(extracted_val, candidate_val)
-                    if sim >= 0.5:  # Lowered threshold for coating variants
+                    matched = sim >= 0.5
+                    if matched:
                         matched_weight += weight * sim
+                        candidate_debug['params_matched'][param_name] = f"'{extracted_val}' ~ '{candidate_val}' (sim={sim:.2f})"
+                    else:
+                        candidate_debug['params_mismatched'][param_name] = f"'{extracted_val}' vs '{candidate_val}' (sim={sim:.2f})"
                 else:
                     # Числовые параметры — точное совпадение
-                    if str(extracted_val).strip() == str(candidate_val).strip():
+                    matched = str(extracted_val).strip() == str(candidate_val).strip()
+                    if matched:
                         matched_weight += weight
+                        candidate_debug['params_matched'][param_name] = f"{extracted_val} == {candidate_val}"
+                    else:
+                        candidate_debug['params_mismatched'][param_name] = f"{extracted_val} != {candidate_val}"
+
+            # Дополнительно: найдём ключевые ENS-параметры кандидата для debug
+            key_ens_params = {}
+            for key_field in ['длина', 'номинальный_диаметр_резьбы', 'исполнение', 'покрытие', 'марка_материала', 'шаг_резьбы', 'тип_резьбы']:
+                if key_field in candidate and candidate[key_field] is not None and str(candidate[key_field]).strip():
+                    key_ens_params[key_field] = candidate[key_field]
+            candidate_debug['key_ens_params'] = key_ens_params
 
             if total_weight > 0:
                 score = matched_weight / total_weight
-                logger.debug(f"[FUZZY] Candidate '{candidate.get('наименование', 'N/A')[:40]}': score={score:.3f}, weight={total_weight:.1f}, matched={matched_weight:.1f}")
+                candidate_debug['score'] = round(score, 3)
+                candidate_debug['weight'] = round(total_weight, 1)
+                candidate_debug['matched_weight'] = round(matched_weight, 1)
+                logger.debug(f"[FUZZY] Candidate '{candidate_debug['name'][:50]}': score={score:.3f}, weight={total_weight:.1f}, matched={matched_weight:.1f}")
                 if score > best_score:
                     best_score = score
                     best_match = {**candidate, '_fuzzy_score': best_score}
             else:
-                logger.debug(f"[FUZZY] Candidate '{candidate.get('наименование', 'N/A')[:40]}': no comparable params (weight=0)")
+                candidate_debug['score'] = 0.0
+                candidate_debug['reason'] = 'no comparable params (weight=0)'
+                logger.debug(f"[FUZZY] Candidate '{candidate_debug['name'][:50]}': no comparable params (weight=0)")
+
+            debug_candidates.append(candidate_debug)
+
+        # Сортируем по score убыванию
+        debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
 
         logger.debug(f"[FUZZY] Best score: {best_score:.3f}, threshold: 0.6, matched: {best_match is not None and best_score >= 0.6}")
-        return best_match if best_score >= 0.6 else None
+        return (best_match if best_score >= 0.6 else None), debug_candidates
 
 
     def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -698,6 +741,9 @@ class AutomatedParametricProcessor:
             final_matched_params = self._remap_params(final_matched_params)
             logger.debug(f"[PARAM_MATCH] Remapped params: {final_matched_params}")
 
+        # Debug: собираем информацию о всех проверенных кандидатах
+        debug_candidates = []
+
         if match_result.score < 0.7 or not match_result.ens_code:
             try:
                 # Получаем кандидатов из ЕСН
@@ -706,13 +752,15 @@ class AutomatedParametricProcessor:
                 # СНАЧАЛА пробуем exact match через _find_in_ens (coating expansion + name_exact)
                 if final_matched_params:
                     clean_params = {k: v for k, v in final_matched_params.items() if v is not None}
-                    manual_ens = self.parametric_client._find_in_ens(
+                    manual_ens, find_debug = self.parametric_client._find_in_ens_debug(
                         clean_params,
                         list(clean_params.keys()),
                         standard=effective_standard,
                         text=text,
                         item_type=mask.item_type if mask else None
                     )
+                    if find_debug:
+                        debug_candidates.extend(find_debug[:10])  # top-10 parametric candidates
                     ens_code_field = manual_ens.get('код') or manual_ens.get('code') if manual_ens else None
                     if manual_ens and ens_code_field:
                         fuzzy_ens_code = ens_code_field
@@ -724,7 +772,9 @@ class AutomatedParametricProcessor:
                 # ЗАТЕМ fuzzy match (только если exact не сработал)
                 if not fuzzy_ens_code and ens_candidates and final_matched_params:
                     logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
-                    fuzzy_match = self._fuzzy_match_ens(final_matched_params, ens_candidates)
+                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
+                    if fuzzy_debug:
+                        debug_candidates.extend(fuzzy_debug[:10])  # top-10 fuzzy candidates
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
@@ -931,7 +981,12 @@ class AutomatedParametricProcessor:
                 'mask_pattern': mask.pattern,
                 'extracted_standard': extracted.get('standard_info'),
                 'extracted_type': extracted.get('item_type'),
-                'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code
+                'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,
+                'debug_candidates': debug_candidates[:15] if debug_candidates else [],
+                'fuzzy_score': round(fuzzy_score, 3) if fuzzy_score else 0,
+                'match_result_score': round(match_result.score, 3) if match_result else 0,
+                'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
+                'v2_computed': v2_computed if 'v2_computed' in locals() else False,
             },
             item_type=mask.item_type,
             standard=mask.standard
