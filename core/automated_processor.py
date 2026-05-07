@@ -4,7 +4,13 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix9
-LAST_FIX: 2026-05-07 17:45 UTC+3 — debug_per_parameter fixed (top candidates block); coating auto_substitution; V2 vs fuzzy priority fix
+
+LAST_FIXES:
+  2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
+  2026-05-07 11:50 UTC+3 — debug_per_parameter: скрытие лога _compare_param_sets
+  2026-05-07 11:35 UTC+3 — coating auto_substitution в fuzzy matching pipeline
+  2026-05-07 11:15 UTC+3 — детальный debug per-parameter в лог (ENS params, MATCHED/MISMATCHED)
+  2026-05-07 11:00 UTC+3 — V2 vs fuzzy priority fix; success_threshold из конфига
 """
 
 import logging
@@ -868,10 +874,23 @@ class AutomatedParametricProcessor:
             try:
                 # Получаем кандидатов из ЕСН
                 ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
-                logger.info(f"[PARAM_MATCH] ENS candidates for fuzzy: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
-                # СНАЧАЛА пробуем exact match через _find_in_ens (coating expansion + name_exact)
-                if final_matched_params:
-                    clean_params = {k: v for k, v in final_matched_params.items() if v is not None}
+                logger.info(f"[PARAM_MATCH] ENS candidates: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
+
+                # === COATING AUTO-SUBSTITUTION (ДО exact/fuzzy match) ===
+                # Применяем auto_substitution из coating_rules ПЕРЕД поиском.
+                # Например: Кд → Н.Кд для коррозионно-стойких сталей (14Х17Н2).
+                # Без этого exact match не найдёт запись, т.к. в ЕНС покрытие = "Н.Кд",
+                # а в тексте "Кд" — _compare_param_sets даст mismatch.
+                search_params = final_matched_params
+                if final_matched_params and ens_candidates:
+                    substituted_params = self._apply_coating_substitution(final_matched_params, ens_candidates)
+                    if substituted_params != final_matched_params:
+                        search_params = substituted_params
+                        logger.info(f"[PARAM_MATCH] Using substituted params for search: {search_params}")
+
+                # СНАЧАЛА exact match через _find_in_ens (coating expansion + name_exact)
+                if search_params:
+                    clean_params = {k: v for k, v in search_params.items() if v is not None}
                     manual_ens, find_debug = self.parametric_client._find_in_ens_debug(
                         clean_params,
                         list(clean_params.keys()),
@@ -890,24 +909,17 @@ class AutomatedParametricProcessor:
                         logger.info(f"[PARAM_MATCH] Exact ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
 
                 # ЗАТЕМ fuzzy match (только если exact не сработал)
-                if not fuzzy_ens_code and ens_candidates and final_matched_params:
-                    logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
+                if not fuzzy_ens_code and ens_candidates and search_params:
+                    logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {search_params}")
 
-                    # === COATING AUTO-SUBSTITUTION ===
-                    # Пробуем применить auto_substitution из coating_rules
-                    # (например, Кд → Н.Кд для коррозионно-стойких сталей)
-                    substituted_params = self._apply_coating_substitution(final_matched_params, ens_candidates)
-                    use_substituted = substituted_params != final_matched_params
-
-                    # Первый fuzzy pass (с исходными или исправленными params)
-                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(substituted_params, ens_candidates)
+                    # Первый fuzzy pass (с already-substituted params)
+                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(search_params, ens_candidates)
                     if fuzzy_debug:
                         debug_candidates.extend(fuzzy_debug[:10])
 
-                    # Если substitution применена — сравниваем результаты
-                    if use_substituted and not fuzzy_match:
-                        # Substitution не помогла — пробуем исходные params
-                        logger.info(f"[PARAM_MATCH] Substitution did not help, trying original params")
+                    # Если substitution была применена и не помогла — пробуем исходные params
+                    if not fuzzy_match and search_params != final_matched_params:
+                        logger.info(f"[PARAM_MATCH] Substituted params didn't match, trying original: {final_matched_params}")
                         fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
                         if fuzzy_debug:
                             debug_candidates.extend(fuzzy_debug[:10])
@@ -920,8 +932,8 @@ class AutomatedParametricProcessor:
                         logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
                 elif not ens_candidates:
                     logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
-                elif not final_matched_params:
-                    logger.warning(f"[PARAM_MATCH] Fuzzy fallback: empty final_matched_params")
+                elif not search_params:
+                    logger.warning(f"[PARAM_MATCH] Fuzzy fallback: empty search_params")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
 

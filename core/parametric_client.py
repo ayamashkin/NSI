@@ -2,8 +2,14 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07 16:08 UTC+3 — union keys comparison (fixed: empty key handling);
-         coating variants Кд→Кд6/Кд9.фос.окс; strict exact match; M-optional
+VERSION: 2026-05-07
+
+LAST_FIXES:
+  2026-05-07 11:56 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
+  2026-05-07 11:45 UTC+3 — ленивая загрузка MatchingConfig через _get_matching_config()
+  2026-05-07 11:30 UTC+3 — union keys comparison: корректная обработка пустых ключей
+  2026-05-07 11:15 UTC+3 — _find_in_ens_debug: подробный вывод кандидатов в лог
+  2026-05-07 11:00 UTC+3 — coating variants Кд→Кд6/Кд9.фос.окс; strict exact match
 """
 
 import re
@@ -876,10 +882,12 @@ class ParametricENSClient:
         Score=1.0 если все НЕ-ПУСТЫЕ параметры из ОБОИХ наборов совпадают.
         Ключи, пустые в ОБОИХ наборах — игнорируются.
         Ключ, пустой только в одном наборе — mismatch (return 0.0).
-        Ключ, отсутствующий в одном наборе (None) и непустой в другом — mismatch.
         """
         if not params_a or not params_b:
             return 0.0
+
+        # Проверяем debug_per_parameter из конфига
+        debug_detail = _get_matching_config().debug_per_parameter
 
         # Параметры, которые не участвуют в сравнении (метаданные/служебные)
         skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
@@ -904,7 +912,8 @@ class ParametricENSClient:
 
             # Если один пустой (None/''), а другой нет — mismatch!
             if not str_a or not str_b:
-                logger.debug(f"[_compare] KEY MISSING: {param} = '{val_a}' vs '{val_b}'")
+                if debug_detail:
+                    logger.debug(f"[_compare] KEY MISSING: {param} = '{val_a}' vs '{val_b}'")
                 return 0.0
 
             checked += 1
@@ -915,7 +924,8 @@ class ParametricENSClient:
                 norm_b = self._normalize_coating(str_b)
                 sim = _text_similarity(norm_a, norm_b)
                 if sim < 0.8:
-                    logger.debug(f"[_compare] COATING MISMATCH: '{norm_a}' vs '{norm_b}' (sim={sim:.2f})")
+                    if debug_detail:
+                        logger.debug(f"[_compare] COATING MISMATCH: '{norm_a}' vs '{norm_b}' (sim={sim:.2f})")
                     return 0.0
                 matched += 1
             else:
@@ -923,12 +933,14 @@ class ParametricENSClient:
                     num_a = float(str_a.replace(',', '.'))
                     num_b = float(str_b.replace(',', '.'))
                     if num_a != num_b:
-                        logger.debug(f"[_compare] NUM MISMATCH: {val_a} vs {val_b}")
+                        if debug_detail:
+                            logger.debug(f"[_compare] NUM MISMATCH: {val_a} vs {val_b}")
                         return 0.0
                     matched += 1
                 except ValueError:
                     if str_a != str_b:
-                        logger.debug(f"[_compare] STR MISMATCH: '{val_a}' vs '{val_b}'")
+                        if debug_detail:
+                            logger.debug(f"[_compare] STR MISMATCH: '{val_a}' vs '{val_b}'")
                         return 0.0
                     matched += 1
 
