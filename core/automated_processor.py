@@ -682,8 +682,26 @@ class AutomatedParametricProcessor:
                 # Получаем кандидатов из ЕСН
                 ens_candidates = self.validator._get_ens_examples(effective_standard, mask.item_type)
                 logger.info(f"[PARAM_MATCH] ENS candidates for fuzzy: count={len(ens_candidates) if ens_candidates else 0}, standard={effective_standard}, item_type={mask.item_type}")
-                # Сначала пробуем fuzzy match с remapped params
-                if ens_candidates and final_matched_params:
+                # СНАЧАЛА пробуем exact match через _find_in_ens (coating expansion + name_exact)
+                if final_matched_params:
+                    clean_params = {k: v for k, v in final_matched_params.items() if v is not None}
+                    manual_ens = self.parametric_client._find_in_ens(
+                        clean_params,
+                        list(clean_params.keys()),
+                        standard=effective_standard,
+                        text=text,
+                        item_type=mask.item_type if mask else None
+                    )
+                    ens_code_field = manual_ens.get('код') or manual_ens.get('code') if manual_ens else None
+                    if manual_ens and ens_code_field:
+                        fuzzy_ens_code = ens_code_field
+                        fuzzy_score = manual_ens.get('_match_score', 0.8)
+                        if not match_result.ens_name:
+                            match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
+                        logger.info(f"[PARAM_MATCH] Exact ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
+
+                # ЗАТЕМ fuzzy match (только если exact не сработал)
+                if not fuzzy_ens_code and ens_candidates and final_matched_params:
                     logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
                     fuzzy_match = self._fuzzy_match_ens(final_matched_params, ens_candidates)
                     if fuzzy_match:
@@ -696,25 +714,6 @@ class AutomatedParametricProcessor:
                     logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
                 elif not final_matched_params:
                     logger.warning(f"[PARAM_MATCH] Fuzzy fallback: empty final_matched_params")
-                # Если fuzzy не сработал и есть remapped params — пробуем parametric ENS search
-                if not fuzzy_ens_code and final_matched_params:
-                    # Фильтруем None значения
-                    clean_params = {k: v for k, v in final_matched_params.items() if v is not None}
-                    manual_ens = self.parametric_client._find_in_ens(
-                        clean_params,
-                        list(clean_params.keys()),  # required = все распознанные поля
-                        standard=effective_standard,
-                        text=text,  # для name_exact fallback
-                        item_type=item_type  # для фильтрации по типу
-                    )
-                    ens_code_field = manual_ens.get('код') or manual_ens.get('code') if manual_ens else None
-                    if manual_ens and ens_code_field:
-                        fuzzy_ens_code = ens_code_field
-                        fuzzy_score = manual_ens.get('_match_score', 0.8)
-                        # Сохраняем ENS name для V2 scoring
-                        if not match_result.ens_name:
-                            match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
-                        logger.info(f"[PARAM_MATCH] Manual ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
 
