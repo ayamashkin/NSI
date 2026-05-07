@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 21:15 — v2_computed flag: trust V2 score (0.0 for mismatch); no fuzzy fallback after V2; generic pattern + _calculate_match_score_v2
+LAST_FIX: 2026-05-07 21:20 — ens_params_mask fallback via generic pattern restored; v2_computed flag; confidence=final_score
 """
 
 import logging
@@ -785,16 +785,29 @@ class AutomatedParametricProcessor:
 
         # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
-        if not ens_params_mask and final_ens_name and mask and mask.pattern:
-            try:
-                import re
-                relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
-                if m:
-                    ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                    logger.debug(f"[PARAM_MATCH] ENS params mask (fallback): {ens_params_mask}")
-            except Exception as e:
-                logger.debug(f"[PARAM_MATCH] Failed to parse ens_name with mask: {e}")
+        if not ens_params_mask and final_ens_name:
+            # Fallback 1: маска БД с релаксацией
+            if mask and mask.pattern:
+                try:
+                    import re
+                    relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                    m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
+                    if m:
+                        ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                        logger.debug(f"[PARAM_MATCH] ENS params mask (from mask): {ens_params_mask}")
+                except Exception as e:
+                    logger.debug(f"[PARAM_MATCH] Failed to parse ens_name with mask: {e}")
+            # Fallback 2: generic pattern (если маска БД не сработала)
+            if not ens_params_mask and mask:
+                try:
+                    generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                    if generic:
+                        m = re.search(generic, str(final_ens_name), re.IGNORECASE)
+                        if m:
+                            ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                            logger.debug(f"[PARAM_MATCH] ENS params mask (from generic): {ens_params_mask}")
+                except Exception as e:
+                    logger.debug(f"[PARAM_MATCH] Generic pattern parse error: {e}")
 
         # Для JSON вывода: remap params и ens_params_mask на правильные ENS-имена
         display_params = self._remap_params(final_matched_params) if final_matched_params else {}
