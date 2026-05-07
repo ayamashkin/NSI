@@ -8,7 +8,7 @@ VERSION: 2025-05-06-fix9
 LAST_FIXES:
   2026-05-07 12:10 UTC+3 — config.yaml: material_coating_map + auto_substitution для Д1П (алюминий)
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
-  2026-05-07 12:10 UTC+3 — _load_coating_rules: fallback settings→YAML (если settings.py не обновлен)
+  2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
   2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
 """
@@ -973,14 +973,13 @@ class AutomatedParametricProcessor:
                 logger.info(f"[PARAM_MATCH] ENS candidates: count={len(ens_candidates)}, standard={effective_standard}, item_type={mask.item_type}")
 
                 # === COATING AUTO-SUBSTITUTION (ДО exact/fuzzy match) ===
-                # Применяем auto_substitution из coating_rules ПЕРЕД поиском.
-                # Например: Кд → Н.Кд для коррозионно-стойких сталей (14Х17Н2).
-                # Без этого exact match не найдет запись, т.к. в ЕНС покрытие = "Н.Кд",
-                # а в тексте "Кд" — _compare_param_sets дает mismatch.
+                # Используем params ДО remap (fallback_params или match_result.matched_params),
+                # т.к. _remap_params может очистить dict → final_matched_params = {}.
+                raw_params = fallback_params if fallback_params else match_result.matched_params
                 search_params = final_matched_params
-                if final_matched_params and ens_candidates:
-                    substituted_params, substitution_info = self._apply_coating_substitution(final_matched_params, ens_candidates)
-                    if substituted_params != final_matched_params:
+                if raw_params and ens_candidates:
+                    substituted_params, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates)
+                    if substituted_params != raw_params:
                         search_params = substituted_params
                         logger.info(f"[PARAM_MATCH] Using substituted params for search: {search_params}")
 
