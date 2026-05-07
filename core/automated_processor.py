@@ -6,8 +6,8 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
+  2026-05-07 12:10 UTC+3 — _load_coating_rules: чтение YAML напрямую (без settings.py)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
-  2026-05-07 12:10 UTC+3 — settings.coating_rules: чтение из корня конфига (не matching)
   2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
   2026-05-07 11:50 UTC+3 — debug_per_parameter: скрытие лога _compare_param_sets
   2026-05-07 11:35 UTC+3 — coating auto_substitution в fuzzy matching pipeline
@@ -419,6 +419,41 @@ class AutomatedParametricProcessor:
                 variants.append(v)
         return variants
 
+    # Кэш для coating_rules (читаем один раз за сессию)
+    _coating_rules_cache: Optional[Dict] = None
+
+    def _load_coating_rules(self) -> Optional[Dict]:
+        """Загрузка coating_rules из config/config.yaml напрямую (без settings.py)."""
+        if self._coating_rules_cache is not None:
+            return self._coating_rules_cache
+
+        import yaml
+        from pathlib import Path
+
+        config_paths = ["config/config.yaml", "../config/config.yaml", "../../config/config.yaml"]
+        for path_str in config_paths:
+            path = Path(path_str)
+            if path.exists():
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        config = yaml.safe_load(f) or {}
+                    coating_rules = config.get('coating_rules')
+                    if coating_rules:
+                        self._coating_rules_cache = coating_rules
+                        logger.debug(f"[COATING_SUBST] Loaded coating_rules from {path}: {list(coating_rules.keys())}")
+                        return coating_rules
+                    else:
+                        logger.debug(f"[COATING_SUBST] coating_rules not found in {path}")
+                        self._coating_rules_cache = {}
+                        return None
+                except Exception as e:
+                    logger.debug(f"[COATING_SUBST] Error reading {path}: {e}")
+                    continue
+
+        logger.debug("[COATING_SUBST] config.yaml not found in any known path")
+        self._coating_rules_cache = {}
+        return None
+
     def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Dict[str, str], Optional[Dict]]:
         """
         Применить auto_substitution из coating_rules к extracted_params.
@@ -433,19 +468,9 @@ class AutomatedParametricProcessor:
             Tuple[extracted_params (возможно изменённые), substitution_info или None]
             substitution_info содержит: original, corrected, material, reason, rule_note
         """
-        # Загружаем coating rules из конфига (корневой ключ coating_rules, не matching)
-        coating_rules = None
-        try:
-            from config.settings import get_settings
-            settings = get_settings()
-            coating_rules = getattr(settings, 'coating_rules', None)
-            if coating_rules:
-                logger.debug(f"[COATING_SUBST] Loaded coating_rules from config: {list(coating_rules.keys())}")
-            else:
-                logger.debug("[COATING_SUBST] coating_rules is empty or not configured")
-        except Exception as e:
-            logger.debug(f"[COATING_SUBST] Failed to load coating_rules: {e}")
-
+        # Загружаем coating rules напрямую из YAML (не через settings, т.к.
+        # оригинальный settings.py может не иметь поля coating_rules)
+        coating_rules = self._load_coating_rules()
         if not coating_rules:
             logger.debug("[COATING_SUBST] No coating_rules in config, skipping substitution")
             return extracted_params, None
