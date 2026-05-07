@@ -602,6 +602,7 @@ class ParametricENSClient:
     def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Поиск по параметрам в индексе ЕНС. Fallback: точное совпадение наименования с проверкой типа."""
         if not self._ens_index or 'items' not in self._ens_index:
+            logger.warning(f"[_find_in_ens] ENS index not loaded!")
             return None
 
         items = self._ens_index['items']
@@ -662,6 +663,9 @@ class ParametricENSClient:
         if best_match:
             best_match['_match_score'] = best_score
             best_match['_match_type'] = 'exact' if best_score > 0.9 else 'partial'
+            logger.info(f"[_find_in_ens] RETURNING match: score={best_score:.2f}, name={best_match.get('наименование','')[:50]}")
+        else:
+            logger.info(f"[_find_in_ens] No match found (best_score={best_score:.2f} < 0.7 threshold)")
 
         if best_score < 0.7:
             return None
