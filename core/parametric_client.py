@@ -730,8 +730,8 @@ class ParametricENSClient:
         # Сортируем по score убыванию
         debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
 
-        # Итоговый debug: top candidates
-        if debug_candidates:
+        # Итоговый debug: top candidates (только при debug_per_parameter=true)
+        if debug_candidates and _get_matching_config().debug_per_parameter:
             top_n = min(5, len(debug_candidates))
             logger.debug(f"[_find_in_ens] Top {top_n} parametric candidates:")
             for i, cd in enumerate(debug_candidates[:top_n], 1):

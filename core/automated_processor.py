@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix9
-LAST_FIX: 2026-05-07 17:35 UTC+3 — coating auto_substitution in fuzzy matching; debug_candidates; V2 vs fuzzy priority fix
+LAST_FIX: 2026-05-07 17:45 UTC+3 — debug_per_parameter fixed (top candidates block); coating auto_substitution; V2 vs fuzzy priority fix
 """
 
 import logging
@@ -617,8 +617,8 @@ class AutomatedParametricProcessor:
         # Сортируем по score убыванию
         debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
 
-        # Итоговый debug: top candidates
-        if debug_candidates:
+        # Итоговый debug: top candidates (только при debug_per_parameter=true)
+        if debug_candidates and _get_matching_config().debug_per_parameter:
             top_n = min(5, len(debug_candidates))
             logger.debug(f"[FUZZY] Top {top_n} candidates:")
             for i, cd in enumerate(debug_candidates[:top_n], 1):
