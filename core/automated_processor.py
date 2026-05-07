@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix9
-LAST_FIX: 2026-05-07 17:05 UTC+3 — debug_candidates in fuzzy/_find_in_ens; V2 vs fuzzy priority fix; success_threshold from config
+LAST_FIX: 2026-05-07 17:35 UTC+3 — coating auto_substitution in fuzzy matching; debug_candidates; V2 vs fuzzy priority fix
 """
 
 import logging
@@ -413,6 +413,99 @@ class AutomatedParametricProcessor:
                 variants.append(v)
         return variants
 
+    def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Dict[str, str]:
+        """
+        Применить auto_substitution из coating_rules к extracted_params.
+
+        Логика:
+        1. Делаем пробный fuzzy pass для определения марки материала
+        2. Если марка требует substitution (например, 14Х17Н2 → Н.Кд вместо Кд)
+           → заменяем покрытие в params
+        3. Возвращаем (возможно изменённые) params
+
+        Returns:
+            Возможно изменённые extracted_params с исправленным покрытием
+        """
+        # Загружаем coating rules из конфига
+        coating_rules = None
+        try:
+            from config.settings import get_settings
+            settings = get_settings()
+            if hasattr(settings, 'coating_rules') and settings.coating_rules:
+                coating_rules = settings.coating_rules
+        except Exception:
+            pass
+
+        if not coating_rules:
+            logger.debug("[COATING_SUBST] No coating_rules in config, skipping substitution")
+            return extracted_params
+
+        # Проверяем включена ли auto_substitution
+        if not coating_rules.get('auto_substitution_enabled', False):
+            logger.debug("[COATING_SUBST] auto_substitution_enabled=false, skipping")
+            return extracted_params
+
+        # Пробный fuzzy pass для определения марки материала
+        trial_match, trial_debug = self._fuzzy_match_ens_debug(extracted_params, ens_candidates)
+        if not trial_match and not trial_debug:
+            logger.debug("[COATING_SUBST] No candidates for trial match, skipping")
+            return extracted_params
+
+        # Определяем марку материала из лучшего кандидата
+        material = None
+        if trial_match:
+            material = trial_match.get('марка_материала') or trial_match.get('марка_стали')
+        # Если лучший match не дал марку — пробуем других кандидатов
+        if not material and trial_debug:
+            for cd in trial_debug[:5]:
+                # Находим ens_params с маркой
+                for candidate in ens_candidates:
+                    cand_name = candidate.get('наименование', candidate.get('полное_наименование', ''))
+                    if cand_name and cd.get('name') and cand_name[:50] == cd['name'][:50]:
+                        material = candidate.get('марка_материала') or candidate.get('марка_стали')
+                        if material:
+                            break
+                if material:
+                    break
+
+        if not material:
+            logger.debug("[COATING_SUBST] Could not determine material from candidates")
+            return extracted_params
+
+        logger.debug(f"[COATING_SUBST] Detected material: '{material}'")
+
+        # Применяем auto_substitution правила
+        import re
+        coating = extracted_params.get('покрытие', '')
+        if not coating:
+            return extracted_params
+
+        for rule in coating_rules.get('auto_substitution', []):
+            material_pattern = rule.get('material_pattern', '')
+            wrong_coating = rule.get('wrong_coating', '')
+            correct_coating = rule.get('correct_coating', '')
+
+            # Проверяем material_pattern
+            if not re.search(material_pattern, str(material), re.IGNORECASE):
+                continue
+
+            # Проверяем wrong_coating (fuzzy match)
+            wrong_sim = self._token_similarity(coating, wrong_coating)
+            if wrong_sim < 0.5:
+                continue
+
+            # Substitution применима!
+            new_params = dict(extracted_params)
+            new_params['покрытие'] = correct_coating
+            logger.info(
+                f"[COATING_SUBST] Applied: '{coating}' → '{correct_coating}' "
+                f"(material='{material}', rule={rule.get('note', '')})"
+            )
+            return new_params
+
+        logger.debug(f"[COATING_SUBST] No matching rule for coating='{coating}', material='{material}'")
+        return extracted_params
+
     def _fuzzy_match_ens(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Optional[Dict]:
         """
         Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
@@ -799,9 +892,26 @@ class AutomatedParametricProcessor:
                 # ЗАТЕМ fuzzy match (только если exact не сработал)
                 if not fuzzy_ens_code and ens_candidates and final_matched_params:
                     logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {final_matched_params}")
-                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
+
+                    # === COATING AUTO-SUBSTITUTION ===
+                    # Пробуем применить auto_substitution из coating_rules
+                    # (например, Кд → Н.Кд для коррозионно-стойких сталей)
+                    substituted_params = self._apply_coating_substitution(final_matched_params, ens_candidates)
+                    use_substituted = substituted_params != final_matched_params
+
+                    # Первый fuzzy pass (с исходными или исправленными params)
+                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(substituted_params, ens_candidates)
                     if fuzzy_debug:
-                        debug_candidates.extend(fuzzy_debug[:10])  # top-10 fuzzy candidates
+                        debug_candidates.extend(fuzzy_debug[:10])
+
+                    # Если substitution применена — сравниваем результаты
+                    if use_substituted and not fuzzy_match:
+                        # Substitution не помогла — пробуем исходные params
+                        logger.info(f"[PARAM_MATCH] Substitution did not help, trying original params")
+                        fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
+                        if fuzzy_debug:
+                            debug_candidates.extend(fuzzy_debug[:10])
+
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
