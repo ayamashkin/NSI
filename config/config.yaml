@@ -64,10 +64,10 @@ prompts:
 # Logging Configuration
 # =============================================================================
 logging:
-  level: "INFO"
+  level: "DEBUG"
   file: "logs/processor.log"
   max_size: "10MB"
-  backup_count: 5
+  backup_count: 20
 
 # =============================================================================
 # Mask Generation Configuration

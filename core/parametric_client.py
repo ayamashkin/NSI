@@ -793,8 +793,10 @@ class ParametricENSClient:
     def _compare_param_sets(self, params_a: Dict[str, Any], params_b: Dict[str, Any]) -> float:
         """
         Сравнение двух наборов параметров.
-        Score=1.0 если все параметры из ОБОИХ наборов совпадают (union of keys).
-        Если ключ есть только в одном наборе — mismatch (return 0.0).
+        Score=1.0 если все НЕ-ПУСТЫЕ параметры из ОБОИХ наборов совпадают.
+        Ключи, пустые в ОБОИХ наборах — игнорируются.
+        Ключ, пустой только в одном наборе — mismatch (return 0.0).
+        Ключ, отсутствующий в одном наборе (None) и непустой в другом — mismatch.
         """
         if not params_a or not params_b:
             return 0.0
@@ -802,17 +804,21 @@ class ParametricENSClient:
         # Параметры, которые не участвуют в сравнении (метаданные/служебные)
         skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
 
-        # Уровень 0: сравниваем по ОБЪЕДИНЕНИЮ ключей (union), не пересечению
+        # Сравниваем по ОБЪЕДИНЕНИЮ ключей, но с корректной обработкой отсутствующих
         all_keys = set(params_a.keys()) | set(params_b.keys())
+        checked = 0
+        matched = 0
+
         for param in all_keys:
             if param in skip_params:
                 continue
+
             val_a = params_a.get(param)
             val_b = params_b.get(param)
             str_a = str(val_a).lower().strip() if val_a is not None else ''
             str_b = str(val_b).lower().strip() if val_b is not None else ''
 
-            # Если оба пустые — пропускаем
+            # Если оба пустые — пропускаем (не влияет на score)
             if not str_a and not str_b:
                 continue
 
@@ -820,6 +826,8 @@ class ParametricENSClient:
             if not str_a or not str_b:
                 logger.debug(f"[_compare] KEY MISSING: {param} = '{val_a}' vs '{val_b}'")
                 return 0.0
+
+            checked += 1
 
             # Сравниваем значения
             if param == 'покрытие':
@@ -829,6 +837,7 @@ class ParametricENSClient:
                 if sim < 0.8:
                     logger.debug(f"[_compare] COATING MISMATCH: '{norm_a}' vs '{norm_b}' (sim={sim:.2f})")
                     return 0.0
+                matched += 1
             else:
                 try:
                     num_a = float(str_a.replace(',', '.'))
@@ -836,10 +845,16 @@ class ParametricENSClient:
                     if num_a != num_b:
                         logger.debug(f"[_compare] NUM MISMATCH: {val_a} vs {val_b}")
                         return 0.0
+                    matched += 1
                 except ValueError:
                     if str_a != str_b:
                         logger.debug(f"[_compare] STR MISMATCH: '{val_a}' vs '{val_b}'")
                         return 0.0
+                    matched += 1
+
+        # Если нечего сравнивать (все поля пустые) — mismatch
+        if checked == 0:
+            return 0.0
 
         return 1.0
 

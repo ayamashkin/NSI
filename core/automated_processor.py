@@ -797,11 +797,18 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.info(f"[PARAM_MATCH] V2 scoring error: {e}")
 
-        # Финальный score: если V2 вычислен — доверяем ему (1.0 или 0.0)
+        # Финальный score: V2 + fuzzy — берём лучший результат
+        # V2 scoring строгий (1.0 или 0.0), fuzzy — мягкий (0.0..1.0)
+        # Если V2 дал точный match (1.0) — используем его
+        # Если V2 дал 0.0, но fuzzy нашёл кандидата — используем fuzzy
         if v2_computed:
-            final_score = v2_score
-            if v2_match_type:
-                match_result.match_type = v2_match_type
+            if v2_score >= 0.99:
+                final_score = v2_score
+                if v2_match_type:
+                    match_result.match_type = v2_match_type
+            else:
+                # V2 не подтвердил match — доверяем fuzzy/parametric результату
+                final_score = max(match_result.score, fuzzy_score)
         else:
             final_score = max(match_result.score, fuzzy_score)
 
@@ -884,7 +891,7 @@ class AutomatedParametricProcessor:
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
-            success=final_score >= 0.99,
+            success=final_score >= 0.7,
             params=display_params,
             ens_match={
                 'code': final_ens_code,
