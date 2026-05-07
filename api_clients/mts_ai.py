@@ -60,6 +60,14 @@ class MTSAIClient(BaseLLMClient):
             "Content-Type": "application/json"
         }
 
+    def complete(self, prompt: str, **kwargs) -> Optional[str]:
+        """
+        Реализация abstract method из BaseLLMClient.
+        Принимает строку prompt, отправляет как single-turn chat completion.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        return self.chat_completion(messages, **kwargs)
+
     def chat_completion(
         self,
         messages: List[Dict[str, str]],

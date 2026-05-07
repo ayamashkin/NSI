@@ -62,6 +62,14 @@ class APIConfig:
 
     def load_credentials(self) -> None:
         """Загружает ключи, пароли и учетные данные из указанных файлов."""
+        # Дополнительная нормализация (на случай если __post_init__ не сработал)
+        if self.base_url:
+            self.base_url = self.base_url.strip()
+        if self.api_key_file:
+            self.api_key_file = self.api_key_file.strip()
+        if self.password_file:
+            self.password_file = self.password_file.strip()
+
         logger.debug(f"Loading credentials for {self.base_url}")
         logger.debug(f"  username: {self.username}")
         logger.debug(f"  api_key_file: {self.api_key_file}")
