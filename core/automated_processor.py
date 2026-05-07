@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 21:20 — ens_params_mask fallback via generic pattern restored; v2_computed flag; confidence=final_score
+LAST_FIX: 2026-05-07 08:28 UTC+3 — final_matched_params from generic on text; ens_name from fuzzy_ens_code; v2_computed; confidence=final_score
 """
 
 import logging
@@ -783,10 +783,24 @@ class AutomatedParametricProcessor:
             ens_params_from_index = self._normalize_params(ens_params_from_index)
             logger.debug(f"[PARAM_MATCH] Normalized ens_params: {ens_params_from_index}")
 
+        # Fallback 1: если final_matched_params пуст — парсим text через generic pattern
+        if not final_matched_params and final_ens_name and mask:
+            try:
+                import re
+                generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic:
+                    m = re.search(generic, text, re.IGNORECASE)
+                    if m:
+                        final_matched_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                        final_matched_params = self._normalize_params(final_matched_params)
+                        logger.debug(f"[PARAM_MATCH] Params from generic on text: {final_matched_params}")
+            except Exception as e:
+                logger.debug(f"[PARAM_MATCH] Generic parse on text error: {e}")
+
         # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
         if not ens_params_mask and final_ens_name:
-            # Fallback 1: маска БД с релаксацией
+            # Fallback A: маска БД с релаксацией
             if mask and mask.pattern:
                 try:
                     import re
@@ -797,7 +811,7 @@ class AutomatedParametricProcessor:
                         logger.debug(f"[PARAM_MATCH] ENS params mask (from mask): {ens_params_mask}")
                 except Exception as e:
                     logger.debug(f"[PARAM_MATCH] Failed to parse ens_name with mask: {e}")
-            # Fallback 2: generic pattern (если маска БД не сработала)
+            # Fallback B: generic pattern (если маска БД не сработала)
             if not ens_params_mask and mask:
                 try:
                     generic = self._get_generic_pattern(mask.item_type, effective_standard)

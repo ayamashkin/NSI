@@ -2,7 +2,7 @@
 LLM Mask Generator Module
 Level 2: Автоматическая генерация regex масок с помощью LLM.
 Модель/температура/system_prompt определяются автоматически по keywords из prompts.yaml.
-LAST_FIX: 2026-05-07 20:15 — _preprocess_json_text: escape ALL regex backslashes (\., \-, \[, ...) for JSON compatibility
+LAST_FIX: 2026-05-07 08:28 UTC+3 — _preprocess_json_text: escape ALL regex backslashes (\., \-, \[, ...) for JSON compatibility
 """
 
 import re

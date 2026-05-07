@@ -2,7 +2,7 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07 20:55 — raw params (no remap before _find_in_ens); raw ens_params_mask; strict exact via matching key names
+VERSION: 2026-05-07 08:28 UTC+3 — raw params; raw ens_params_mask; strict exact via matching key names; M-optional
 """
 
 import re
