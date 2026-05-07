@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:31 UTC+3 — generic extraction BEFORE V2 scoring; v2_computed; confidence=final_score
+LAST_FIX: 2026-05-07 08:35 UTC+3 — V2 uses generic_params fallback; always extract generic from text; v2_computed; confidence=final_score
 """
 
 import logging
@@ -705,17 +705,21 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
 
-        # Fallback: если final_matched_params пуст — парсим text через generic pattern
-        if not final_matched_params and mask:
+        # Fallback: парсим text через generic pattern (всегда, для V2 scoring)
+        generic_params = None
+        if mask:
             try:
                 import re
                 generic = self._get_generic_pattern(mask.item_type, effective_standard)
                 if generic:
                     m = re.search(generic, text, re.IGNORECASE)
                     if m:
-                        final_matched_params = {k: v for k, v in m.groupdict().items() if v is not None}
-                        final_matched_params = self._normalize_params(final_matched_params)
-                        logger.info(f"[PARAM_MATCH] Params from generic on text: {final_matched_params}")
+                        generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                        generic_params = self._normalize_params(generic_params)
+                        logger.info(f"[PARAM_MATCH] Params from generic on text: {generic_params}")
+                        # Если final_matched_params пуст — используем generic
+                        if not final_matched_params:
+                            final_matched_params = generic_params
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] Generic parse on text error: {e}")
 
@@ -723,7 +727,8 @@ class AutomatedParametricProcessor:
         v2_score = 0.0
         v2_match_type = None
         v2_computed = False  # был ли V2 score вычислен
-        if final_ens_name and final_matched_params:
+        params_for_v2 = final_matched_params or generic_params
+        if final_ens_name and params_for_v2:
             try:
                 import re
                 generic = self._get_generic_pattern(mask.item_type, effective_standard)
@@ -735,10 +740,10 @@ class AutomatedParametricProcessor:
                         v2_score, v2_match_type, v2_details = self.parametric_client._calculate_match_score_v2(
                             text=text,
                             ens_name=final_ens_name,
-                            params=final_matched_params,
+                            params=params_for_v2,
                             ens_params={},  # не используем ens_params из индекса
                             ens_params_mask=generic_ens_mask,
-                            required=list(final_matched_params.keys())
+                            required=list(params_for_v2.keys())
                         )
                         v2_computed = True
                         logger.info(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
