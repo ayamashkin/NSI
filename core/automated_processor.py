@@ -6,11 +6,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
+  2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
   2026-05-07 12:10 UTC+3 — settings.coating_rules: чтение из корня конфига (не matching)
   2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
   2026-05-07 11:50 UTC+3 — debug_per_parameter: скрытие лога _compare_param_sets
   2026-05-07 11:35 UTC+3 — coating auto_substitution в fuzzy matching pipeline
-  2026-05-07 11:15 UTC+3 — детальный debug per-parameter в лог (ENS params, MATCHED/MISMATCHED)
 """
 
 import logging
@@ -419,7 +419,7 @@ class AutomatedParametricProcessor:
                 variants.append(v)
         return variants
 
-    def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Dict[str, str]:
+    def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Dict[str, str], Optional[Dict]]:
         """
         Применить auto_substitution из coating_rules к extracted_params.
 
@@ -427,10 +427,11 @@ class AutomatedParametricProcessor:
         1. Делаем пробный fuzzy pass для определения марки материала
         2. Если марка требует substitution (например, 14Х17Н2 → Н.Кд вместо Кд)
            → заменяем покрытие в params
-        3. Возвращаем (возможно изменённые) params
+        3. Возвращаем (возможно изменённые) params + информацию о substitution
 
         Returns:
-            Возможно изменённые extracted_params с исправленным покрытием
+            Tuple[extracted_params (возможно изменённые), substitution_info или None]
+            substitution_info содержит: original, corrected, material, reason, rule_note
         """
         # Загружаем coating rules из конфига (корневой ключ coating_rules, не matching)
         coating_rules = None
@@ -447,18 +448,18 @@ class AutomatedParametricProcessor:
 
         if not coating_rules:
             logger.debug("[COATING_SUBST] No coating_rules in config, skipping substitution")
-            return extracted_params
+            return extracted_params, None
 
         # Проверяем включена ли auto_substitution
         if not coating_rules.get('auto_substitution_enabled', False):
             logger.debug("[COATING_SUBST] auto_substitution_enabled=false, skipping")
-            return extracted_params
+            return extracted_params, None
 
         # Пробный fuzzy pass для определения марки материала
         trial_match, trial_debug = self._fuzzy_match_ens_debug(extracted_params, ens_candidates)
         if not trial_match and not trial_debug:
             logger.debug("[COATING_SUBST] No candidates for trial match, skipping")
-            return extracted_params
+            return extracted_params, None
 
         # Определяем марку материала из лучшего кандидата
         material = None
@@ -479,7 +480,7 @@ class AutomatedParametricProcessor:
 
         if not material:
             logger.debug("[COATING_SUBST] Could not determine material from candidates")
-            return extracted_params
+            return extracted_params, None
 
         logger.debug(f"[COATING_SUBST] Detected material: '{material}'")
 
@@ -487,7 +488,7 @@ class AutomatedParametricProcessor:
         import re
         coating = extracted_params.get('покрытие', '')
         if not coating:
-            return extracted_params
+            return extracted_params, None
 
         for rule in coating_rules.get('auto_substitution', []):
             material_pattern = rule.get('material_pattern', '')
@@ -503,17 +504,28 @@ class AutomatedParametricProcessor:
             if wrong_sim < 0.5:
                 continue
 
-            # Substitution применима!
+            # Substitution применима! — формируем info для details
             new_params = dict(extracted_params)
             new_params['покрытие'] = correct_coating
+            substitution_info = {
+                'original': coating,
+                'corrected': correct_coating,
+                'material': str(material),
+                'reason': rule.get('note', ''),
+                'rule': {
+                    'material_pattern': material_pattern,
+                    'wrong_coating': wrong_coating,
+                    'correct_coating': correct_coating,
+                }
+            }
             logger.info(
                 f"[COATING_SUBST] Applied: '{coating}' → '{correct_coating}' "
                 f"(material='{material}', rule={rule.get('note', '')})"
             )
-            return new_params
+            return new_params, substitution_info
 
         logger.debug(f"[COATING_SUBST] No matching rule for coating='{coating}', material='{material}'")
-        return extracted_params
+        return extracted_params, None
 
     def _fuzzy_match_ens(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Optional[Dict]:
         """
@@ -763,6 +775,9 @@ class AutomatedParametricProcessor:
         """Параметрическое сопоставление."""
         import time
 
+        # Информация о coating substitution (если применена)
+        substitution_info: Optional[Dict] = None
+
         # Гарантируем что у маски есть стандарт
         extracted_std = None
         if extracted.get('standard_info'):
@@ -882,11 +897,11 @@ class AutomatedParametricProcessor:
                 # === COATING AUTO-SUBSTITUTION (ДО exact/fuzzy match) ===
                 # Применяем auto_substitution из coating_rules ПЕРЕД поиском.
                 # Например: Кд → Н.Кд для коррозионно-стойких сталей (14Х17Н2).
-                # Без этого exact match не найдёт запись, т.к. в ЕНС покрытие = "Н.Кд",
-                # а в тексте "Кд" — _compare_param_sets даст mismatch.
+                # Без этого exact match не найдет запись, т.к. в ЕНС покрытие = "Н.Кд",
+                # а в тексте "Кд" — _compare_param_sets дает mismatch.
                 search_params = final_matched_params
                 if final_matched_params and ens_candidates:
-                    substituted_params = self._apply_coating_substitution(final_matched_params, ens_candidates)
+                    substituted_params, substitution_info = self._apply_coating_substitution(final_matched_params, ens_candidates)
                     if substituted_params != final_matched_params:
                         search_params = substituted_params
                         logger.info(f"[PARAM_MATCH] Using substituted params for search: {search_params}")
@@ -1139,6 +1154,7 @@ class AutomatedParametricProcessor:
                 'match_result_score': round(match_result.score, 3) if match_result else 0,
                 'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
                 'v2_computed': v2_computed if 'v2_computed' in locals() else False,
+                'coating_substitution': substitution_info,
             },
             item_type=mask.item_type,
             standard=mask.standard
