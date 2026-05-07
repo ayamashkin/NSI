@@ -455,7 +455,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             'processing_time_ms': result.processing_time_ms,
             'item_type': result.item_type,
             'standard': result.standard,
-            'mask_pattern': result.details.get('mask_pattern') if result.details else None
+            'mask_pattern': result.details.get('mask_pattern') if result.details else None,
+            'coating_substitution': result.details.get('coating_substitution') if result.details else None
         }
         if include_details and result.details:
             row['details'] = result.details
