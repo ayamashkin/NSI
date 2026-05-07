@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:44 UTC+3 — V2 debug logging for generic pattern mismatch; resolves ens_name from code; v2_computed
+LAST_FIX: 2026-05-07 08:50 UTC+3 — Винт generic pattern: [-\s]* after (исполнение); V2 debug logging; v2_computed
 """
 
 import logging
@@ -495,7 +495,7 @@ class AutomatedParametricProcessor:
         # Generic screw pattern: Винт (исполнение)?-диаметр-длина-покрытие
         if item_upper in ('ВИНТ', 'ВИН' + _ru_t, 'SCREW'):
             pattern = (
-                r'^Винт\s*(?:\((?P<исполнение>\d+)\)\s*)?'
+                r'^Винт\s*(?:\((?P<исполнение>\d+)\)[-\s]*)?'
                 r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
                 r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
                 r'[-\s]+(?P<покрытие>[\w.]+)'
