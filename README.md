@@ -38,53 +38,117 @@
 
 ```
 nomenclature-processor/
-├── config/
+├── config/                          # Конфигурация системы
 │   ├── __init__.py
-│   ├── settings.py              # Конфигурация API и путей
-│   ├── config.yaml              # Основная конфигурация API и БД
-│   └── prompts.yaml             # Реестр промптов по категориям
-├── core/
+│   ├── settings.py                  # Python-классы конфигурации (Settings, PromptConfig, APIConfig, MatchingConfig и др.)
+│   ├── config.yaml                  # Основной конфиг: API-ключи, пороги matching, coating_rules
+│   ├── prompts.yaml                 # Реестр промптов для LLM-генерации масок (service/model опциональны)
+│   └── ens_column_mapping.yaml      # Маппинг колонок ЕНС при импорте
+├── core/                            # Ядро системы
 │   ├── __init__.py
-│   ├── models.py                # Pydantic модели данных
-│   ├── database.py              # SQLite manager с upsert
-│   ├── processor.py             # Основной движок обработки
-│   ├── automated_processor.py   # Параметрический процессор
-│   ├── parametric_client.py     # Клиент параметрического поиска
-│   ├── quality_analyzer.py      # Анализ качества распознавания
-│   ├── llm_mask_generator.py    # LLM генерация масок
-│   ├── auto_validator.py        # Валидация масок
-│   ├── mask_database.py         # БД regex-масок (SQLite)
-│   ├── standard_extractor.py    # Извлечение стандарта и типа
-│   ├── integration.py           # Интеграция с существующей БД и API
-│   ├── coating_indexer.py       # Индексация (марка→покрытия) из ЕСН
-│   └── coating_llm_client.py    # LLM-запрос правил покрытий
-├── api_clients/
+│   ├── models.py                    # Pydantic модели данных (MaskRecord, ProcessingResult и др.)
+│   ├── processor.py                 # Основной движок обработки (Level 1-5)
+│   ├── automated_processor.py       # Параметрический процессор (Level 6) — fuzzy matching, coating auto-substitution
+│   ├── parametric_client.py         # Параметрический поиск по ЕНС с кэшированием
+│   ├── database.py                  # SQLite manager — кэширование результатов и upsert
+│   ├── quality_analyzer.py          # Анализ качества распознавания (JSON-отчеты)
+│   ├── llm_mask_generator.py        # LLM генерация regex-масок через промпты
+│   ├── auto_validator.py            # Автоматическая валидация сгенерированных масок
+│   ├── mask_database.py             # БД regex-масок (SQLite) — CRUD, поиск, версионирование
+│   ├── integration.py               # Интеграция с существующей БД номенклатуры
+│   ├── coating_indexer.py           # Индексация допустимых покрытий (марка → покрытия) из ЕНС
+│   ├── coating_llm_client.py        # LLM-клиент для запроса правил покрытий
+│   ├── coating_rules.py             # Правила валидации покрытий по маркам материалов
+│   ├── coating_mapper.py            # Маппинг покрытий между текстом и ЕНС
+│   ├── registry.py                  # Реестр компонентов системы
+│   └── standard_extractor.py        # Извлечение стандарта (ГОСТ/ОСТ/ТУ) и типа изделия
+├── api_clients/                     # Клиенты для LLM-провайдеров
 │   ├── __init__.py
-│   ├── base.py                  # Абстрактный класс клиента
-│   ├── openwebui.py             # Клиент для OpenWebUI API
-│   ├── mws_gpt.py               # Клиент для MWS Cloud GPT API
-│   └── gigachat.py              # Клиенты для GigaChat API
-├── utils/
+│   ├── base.py                      # Абстрактный базовый класс для API-клиентов
+│   ├── openwebui.py                 # OpenWebUI API (JWT/API key, локальные LLM)
+│   ├── mws_gpt.py                   # MWS Cloud GPT API
+│   ├── gigachat.py                  # GigaChat API (Sber, OAuth2)
+│   └── mts_ai.py                    # MTS AI API (OpenAI-compatible, модель cotype)
+├── parsers/                         # Парсеры номенклатуры
 │   ├── __init__.py
-│   ├── excel_loader.py          # Загрузка Excel через pandas/openpyxl
-│   └── excel_loader_simple.py   # Загрузка Excel только через openpyxl
-├── parsers/
-│   ├── cascade.py               # Каскадный парсер (regex → NER → LLM)
-│   ├── regex_parser.py          # Regex уровень
-│   └── ner_adapter.py           # NER адаптер
-├── ens/
-│   ├── loader.py                # Загрузчик ЕСН с многосхемной поддержкой
-│   └── indexer.py               # TF-IDF индекс для поиска
-├── secrets/                     # Учетные данные (не в git)
-├── prompts/templates/           # Файлы промптов (.txt)
-├── prompts/debug/               # Отладочные промпты
-├── logs/                        # Директория для логов
-├── cache/                       # БД масок, результатов
-├── models/                      # Индексы ЕСН (.pkl)
-├── cli.py                       # CLI интерфейс (точка входа)
-├── results.db                   # SQLite база данных (создается автоматически)
-├── requirements.txt
-└── README.md
+│   ├── cascade.py                   # Каскадный парсер: regex → NER → LLM fallback
+│   ├── regex_parser.py              # Regex-уровень парсинга (именованные группы)
+│   ├── ner_adapter.py               # NER адаптер (именованные сущности)
+│   └── standard_extractor.py        # Извлечение ГОСТ/ОСТ/ТУ и типа изделия
+├── ens/                             # Работа с Единой Номенклатурной Системой (ЕНС)
+│   ├── __init__.py
+│   ├── loader.py                    # Загрузчик ЕНС с многосхемной поддержкой
+│   └── indexer.py                   # TF-IDF индекс для семантического поиска по ЕНС
+├── utils/                           # Утилиты
+│   ├── __init__.py
+│   ├── excel_loader.py              # Загрузка Excel через pandas/openpyxl
+│   └── excel_loader_simple.py       # Загрузка Excel только через openpyxl (без pandas)
+├── data/                            # Исходные данные (Excel)
+│   ├── nomenclature.xlsx            # Тестовая номенклатура
+│   ├── nomenclature1.xlsx           # Расширенная тестовая номенклатура
+│   └── sample_nomenclature.xlsx     # Пример данных для демо
+├── prompts/
+│   └── templates/                   # Шаблоны промптов для LLM
+│       ├── hardware.txt             # Промпт для крепежа и метизов
+│       ├── "hardware — копия.txt"   # Резервная копия hardware
+│       ├── hardware1.txt            # Альтернативная версия hardware
+│       ├── hardware2.txt            # Альтернативная версия hardware
+│       ├── hardware3.txt            # Альтернативная версия hardware
+│       ├── hardware_washer.txt      # Промпт для шайб
+│       ├── rolledmetal.txt          # Промпт для проката
+│       └── mask_generation.txt      # Базовый шаблон генерации масок
+├── test/                            # Тесты
+│   └── test_params.py               # Тесты извлечения параметров
+├── default/                         # Данные по умолчанию
+│   └── seed_default_masks.py        # Скрипт первоначального заполнения БД масок
+├── demo/                            # Демонстрационные скрипты
+│   └── demo_mask_resolution.py      # Демо разрешения масок (разбор конфликтов)
+├── fix/                             # Скрипты исправления данных
+│   ├── apply_all_fixes.py           # Применение всех фиксов
+│   ├── fix_gost_7795_db.py          # Исправление ГОСТ 7795 в БД
+│   └── fix_masks_v2.py              # Исправление масок v2
+├── cli.py                           # CLI интерфейс (Click) — точка входа
+├── run_batch.py                     # Запуск batch-обработки из скрипта
+├── requirements.txt                 # Зависимости Python
+├── tree.py                          # Генерация дерева файлов проекта
+├── mask_generation_prompt.md        # Документация по промптам для масок
+├── test_prompt1.txt                 # Тестовый промпт
+├── .gitignore                       # Исключаемые из git файлы и директории
+├── README.md                        # Этот файл
+├── README_old.md                    # Предыдущая версия README (устаревшая)
+├── ARCHITECTURE.md                  # Подробное описание архитектуры системы
+├── ANALYSIS_RESULTS.md              # Результаты анализа качества распознавания
+├── CHEATSHEET.md                    # Шпаргалка по командам и конфигурации
+└── ROADMAP.md                       # Дорожная карта развития проекта
+```
+
+### Не выгружаются в git (`.gitignore`)
+
+Следующие директории и файлы создаются автоматически при работе и не хранятся в репозитории:
+
+```
+# Данные и кэш
+secrets/           # API ключи и пароли (ключевые файлы аутентификации)
+logs/              # Логи процессора (ротируются, большой объем)
+*.log              # Отдельные лог-файлы
+output/            # JSON результаты обработки
+results/           # Резервные копии результатов
+models/            # Pickle модели TF-IDF и индексы ЕНС (большие файлы)
+cache/             # SQLite кэш: маски, результаты, статистика
+*.db               # Файлы SQLite баз данных
+prompts/debug/     # Отладочные промпты (создаются автоматически при генерации)
+
+# Python
+.venv/             # Виртуальное окружение
+venv/              # Альтернативное виртуальное окружение
+.env               # Переменные окружения
+__pycache__/       # Кэш скомпилированных Python-модулей
+*.pyc              # Скомпилированные Python-файлы
+*.pyo              # Оптимизированные Python-файлы
+*.egg-info/        # Метаданные установленных пакетов
+
+# IDE
+.idea/             # Файлы конфигурации PyCharm/IntelliJ
 ```
 
 ### Каскад обработки
@@ -200,6 +264,15 @@ api:
     default_model: "GigaChat"
     timeout: 120
 
+  mts_ai:
+    # MTS AI — OpenAI-compatible API для модели cotype_pro_2.5
+    # Веб-интерфейс: https://cotype6.dev.mts.ai/
+    # Документация: https://demo6-fundres.dev.mts.ai/
+    base_url: "https://demo6-fundres.dev.mts.ai/"
+    api_key_file: "secrets/mts_ai_key.txt"
+    default_model: "cotype_pro_2.5"
+    timeout: 120
+
 mask_generation:
   default_service: "mws"
   default_model: "qwen2.5-72b-instruct"
@@ -232,6 +305,8 @@ coating_rules:
 
 ### config/prompts.yaml
 
+`service` и `model` опциональны — если не указаны, берутся из `mask_generation.default_service` и `mask_generation.default_model`:
+
 ```yaml
 prompts:
   hardware:
@@ -239,8 +314,8 @@ prompts:
     keywords: ["болт", "гайка", "шуруп", "винт", "заклепка",
                "шпилька", "гвоздь", "штифт", "хомут", "анкер",
                "саморез", "шайба", "крепеж", "ГОСТ"]
-    service: "mws"
-    model: "qwen2.5-72b-instruct"
+    # service: "mws"      # можно не указывать — берется из mask_generation
+    # model: "qwen2.5-72b-instruct"  # можно не указывать — берется из mask_generation
     temperature: 0.1
     system_prompt: "Вы - эксперт по стандартам ГОСТ..."
     file: "prompts/templates/hardware.txt"
@@ -251,8 +326,8 @@ prompts:
     keywords: ["труба", "швеллер", "уголок", "балка", "профиль",
                "лист", "плита", "рулон", "круг", "квадрат",
                "regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\."]
-    service: "gigachat"
-    model: "GigaChat-2"
+    service: "gigachat"   # явно указан — используется gigachat вместо default
+    # model: "GigaChat-2" # можно не указывать — берется из api.gigachat.default_model
     temperature: 0.1
     system_prompt: "Вы - эксперт по стандартам ГОСТ и прокату..."
     file: "prompts/templates/rolledmetal.txt"
@@ -490,6 +565,23 @@ python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i model
 |---------|----------|
 | `prompts` | Список промптов с keywords, service, model |
 | `models [--api <name>]` | Доступные модели у API-провайдера |
+
+```bash
+# Список моделей OpenWebUI
+python cli.py models --api openwebui
+
+# Список моделей MWS
+python cli.py models --api mws
+
+# Список моделей GigaChat
+python cli.py models --api gigachat
+
+# Список моделей MTS AI
+python cli.py models --api mts_ai
+
+# Автоопределение API (из prompt_config)
+python cli.py models
+```
 | `detect <text>` | Определить категорию по keywords |
 | `export -o <json>` | Экспорт результатов |
 | `stats` | Статистика results.db |
@@ -969,14 +1061,4 @@ python cli.py stats
 logging:
   level: "INFO"        # INFO или DEBUG
   file: "logs/processor.log"
-  max_size: "10MB"
-  backup_count: 5
-```
-
----
-
-## Требования
-
-- Python 3.9+
-- SQLite 3.35+ (WAL mode)
-- Зависимости: `pandas`, `openpyxl`, `scikit-learn`, `pyyaml`, `click`, `tqdm`, `numpy`, `requests`, `pydantic`
+  m

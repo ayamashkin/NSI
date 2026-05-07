@@ -57,6 +57,23 @@ api:
     # Доступные: GigaChat, GigaChat-2, GigaChat-Pro, GigaChat-Max
     default_model: "GigaChat-2"
 
+  mts_ai:
+    # MTS AI API (cotype) — OpenAI-compatible
+    # Документация: https://demo6-fundres.dev.mts.ai/
+    # Веб-интерфейс: https://cotype6.dev.mts.ai/
+    base_url: "https://demo6-fundres.dev.mts.ai/"
+
+    # API ключ (Authorization: Bearer {API_KEY})
+    # В веб-интерфейсе https://cotype6.dev.mts.ai/ ключ вводится в поле OpenAI API-ключ
+    api_key_file: "secrets/mts_ai_key.txt"
+
+    # Таймаут запроса в секундах
+    timeout: 120
+
+    # Модель по умолчанию
+    # Доступные: cotype_pro_2.5
+    default_model: "cotype_pro_2.5"
+
 # =============================================================================
 # Database Configuration
 # Настройки SQLite базы данных для кэширования результатов
@@ -178,7 +195,7 @@ logging:
   file: "logs/processor.log"
 
   # Максимальный размер одного файла логов
-  max_size: "50MB"
+  max_size: "10MB"
 
   # Количество ротированных файлов (backup)
   backup_count: 20

@@ -2,7 +2,7 @@
 Configuration Module
 Единый источник настроек с загрузкой API ключей из внешних файлов.
 
-VERSION: 2026-05-07 16:08 UTC+3 — MatchingConfig (success_threshold, fuzzy_threshold, v2_exact_threshold, strict_union_keys)
+VERSION: 2026-05-07 14:15 UTC+3 — APIConfig.__post_init__: strip base_url/api_key_file; PromptConfig optional service/model
 """
 
 import yaml
@@ -50,6 +50,15 @@ class APIConfig:
     scope: Optional[str] = None
     timeout: int = 120
     default_model: Optional[str] = None
+
+    def __post_init__(self):
+        """Нормализация полей после инициализации."""
+        if self.base_url:
+            self.base_url = self.base_url.strip()
+        if self.api_key_file:
+            self.api_key_file = self.api_key_file.strip()
+        if self.password_file:
+            self.password_file = self.password_file.strip()
 
     def load_credentials(self) -> None:
         """Загружает ключи, пароли и учетные данные из указанных файлов."""
@@ -131,8 +140,8 @@ class PromptConfig:
     file: str  # Путь к файлу промпта (как в YAML)
     category: str
     keywords: List[str]
-    service: str  # "openwebui", "mws", "gigachat"
-    model: str
+    service: Optional[str] = None  # Если не указано — берется из mask_generation.default_service
+    model: Optional[str] = None      # Если не указано — берется из mask_generation.default_model
     temperature: float = 0.1
     system_prompt: Optional[str] = None  # Системный промпт для модели
 
@@ -141,9 +150,32 @@ class PromptConfig:
         """Свойство для совместимости (возвращает self.file)."""
         return self.file
 
+    def resolve_service(self, settings: 'Settings') -> str:
+        """Возвращает service: из промпта или из mask_generation.default_service."""
+        if self.service:
+            return self.service
+        mg = settings.mask_generation
+        if mg.default_service:
+            return mg.default_service
+        raise ValueError(f"Service not specified for prompt '{self.id}' and no mask_generation.default_service")
+
+    def resolve_model(self, settings: 'Settings') -> str:
+        """Возвращает model: из промпта → APIConfig.default_model → mask_generation.default_model."""
+        if self.model:
+            return self.model
+        service = self.resolve_service(settings)
+        api_config = settings.api.get(service)
+        if api_config and api_config.default_model:
+            return api_config.default_model
+        mg = settings.mask_generation
+        if mg.default_model:
+            return mg.default_model
+        raise ValueError(f"Model not specified for prompt '{self.id}' and no defaults configured")
+
     def get_api_config(self, settings: 'Settings') -> 'APIConfig':
-        """Получает конфиг API для этого промпта."""
-        return settings.api[self.service]
+        """Получает конфиг API для этого промпта (с учетом resolve_service)."""
+        service = self.resolve_service(settings)
+        return settings.api[service]
 
 
 

@@ -229,6 +229,7 @@ python cli.py models
 python cli.py models --api openwebui
 python cli.py models --api mws
 python cli.py models --api gigachat
+python cli.py models --api mts_ia
 ```
 
 ## 📊 Форматы данных

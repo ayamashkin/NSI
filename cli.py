@@ -2,7 +2,7 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
-LAST_FIX: 2026-05-07 08:28 UTC+3 — ens_params_mask in JSON; setup_logging from config; gigachat support; save_mask replace_existing=True
+LAST_FIX: 2026-05-07 13:35 UTC+3 — cfg.resolve_service/model() вместо прямого доступа; service/model опциональны в prompts.yaml
 """
 
 import click
@@ -54,8 +54,8 @@ def prompts():
         click.echo(f"\n🔹 {pid}")
         click.echo(f"   Название: {cfg.name}")
         click.echo(f"   Категория: {cfg.category}")
-        click.echo(f"   Сервис: {cfg.service}")
-        click.echo(f"   Модель: {cfg.model}")
+        click.echo(f"   Сервис: {cfg.resolve_service(settings)}")
+        click.echo(f"   Модель: {cfg.resolve_model(settings)}")
         click.echo(f"   Ключевые слова: {', '.join(cfg.keywords[:5])}...")
 
 
@@ -219,7 +219,7 @@ def detect(text):
 
         if matches:
             click.echo(f"✅ Совпадение: {pid} ({cfg.category})")
-            click.echo(f"   Сервис: {cfg.service}, Модель: {cfg.model}")
+            click.echo(f"   Сервис: {cfg.resolve_service(settings)}, Модель: {cfg.resolve_model(settings)}")
             return
 
     click.echo("❌ Категория не определена")
@@ -262,6 +262,12 @@ def models(api_name):
             elif service == 'gigachat':
                 from api_clients.gigachat import GigaChatClient
                 client = GigaChatClient(
+                    base_url=cfg.base_url,
+                    api_key=cfg.api_key
+                )
+            elif service == 'mts_ai':
+                from api_clients.mts_ai import MTSAIClient
+                client = MTSAIClient(
                     base_url=cfg.base_url,
                     api_key=cfg.api_key
                 )
