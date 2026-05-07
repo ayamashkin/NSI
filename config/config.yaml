@@ -172,7 +172,7 @@ logging:
   # Уровень логирования: DEBUG, INFO, WARNING, ERROR
   # DEBUG = подробные логи с per-parameter сравнением (много вывода)
   # INFO  = только ключевые события (REJECTED, auto-substitution, итоговый score)
-  level: "DEBUG"
+  level: "INFO"
 
   # Путь к файлу логов
   file: "logs/processor.log"
