@@ -6,11 +6,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
+  2026-05-07 12:10 UTC+3 — config.yaml: material_coating_map + auto_substitution для Д1П (алюминий)
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
-  2026-05-07 12:10 UTC+3 — _load_coating_rules: чтение YAML напрямую + поиск по CWD
+  2026-05-07 12:10 UTC+3 — _load_coating_rules: чтение из загруженного settings (без поиска файлов)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
   2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
-  2026-05-07 11:50 UTC+3 — debug_per_parameter: скрытие лога _compare_param_sets
 """
 
 import logging
@@ -438,75 +438,27 @@ class AutomatedParametricProcessor:
         return candidates
 
     def _load_coating_rules(self) -> Optional[Dict]:
-        """Загрузка coating_rules из config/config.yaml напрямую (без settings.py)."""
+        """Получение coating_rules из уже загруженного settings (инициализируется в cli.py)."""
         if self._coating_rules_cache is not None:
             return self._coating_rules_cache
 
-        import yaml
-        from pathlib import Path
-        import inspect
-        import os
-
-        # Собираем все возможные пути к config.yaml
-        config_paths = []
-
-        # 1. Относительно текущей рабочей директории
-        config_paths.extend(["config/config.yaml", "../config/config.yaml", "../../config/config.yaml"])
-
-        # 2. Относительно расположения automated_processor.py
         try:
-            script_dir = Path(os.path.dirname(os.path.abspath(inspect.getfile(self.__class__))))
-            config_paths.extend([
-                str(script_dir / ".." / "config" / "config.yaml"),
-                str(script_dir / ".." / ".." / "config" / "config.yaml"),
-                str(script_dir / "config" / "config.yaml"),
-            ])
-        except Exception:
-            pass
-
-        # 3. Абсолютные пути (типичные для Docker/CI)
-        config_paths.extend([
-            "/app/config/config.yaml",
-            "/workspace/config/config.yaml",
-            "/project/config/config.yaml",
-        ])
-
-        # 4. Относительно CWD с поиском вверх по дереву (до 5 уровней)
-        try:
-            cwd = Path.cwd()
-            for level in range(6):
-                config_paths.append(str(cwd / "config" / "config.yaml"))
-                cwd = cwd.parent
-        except Exception:
-            pass
-
-        # 5. Переменная окружения
-        env_config = os.environ.get('NSI_CONFIG_PATH')
-        if env_config:
-            config_paths.insert(0, env_config)
-
-        for path_str in config_paths:
-            path = Path(path_str)
-            if path.exists():
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        config = yaml.safe_load(f) or {}
-                    coating_rules = config.get('coating_rules')
-                    if coating_rules:
-                        self._coating_rules_cache = coating_rules
-                        logger.info(f"[COATING_SUBST] Loaded coating_rules from {path}")
-                        return coating_rules
-                    else:
-                        logger.debug(f"[COATING_SUBST] coating_rules key not found in {path}")
-                        self._coating_rules_cache = {}
-                        return None
-                except Exception as e:
-                    logger.debug(f"[COATING_SUBST] Error reading {path}: {e}")
-                    continue
-
-        logger.warning("[COATING_SUBST] config.yaml not found in any known path")
-        self._coating_rules_cache = {}
-        return None
+            from config.settings import get_settings
+            settings = get_settings()
+            # coating_rules — корневой ключ в config.yaml, парсится в Settings
+            coating_rules = getattr(settings, 'coating_rules', None)
+            if coating_rules:
+                self._coating_rules_cache = coating_rules
+                logger.info(f"[COATING_SUBST] Loaded coating_rules from settings")
+                return coating_rules
+            else:
+                logger.warning("[COATING_SUBST] coating_rules not in settings — update settings.py (add coating_rules field)")
+                self._coating_rules_cache = {}
+                return None
+        except Exception as e:
+            logger.warning(f"[COATING_SUBST] Failed to load from settings: {e}")
+            self._coating_rules_cache = {}
+            return None
 
     def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Dict[str, str], Optional[Dict]]:
         """
