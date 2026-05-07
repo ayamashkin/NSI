@@ -5,11 +5,11 @@ Level 6: Параметрическое сопоставление с испол
 VERSION: 2026-05-07
 
 LAST_FIXES:
+  2026-05-07 12:10 UTC+3 — settings.coating_rules: чтение из корня конфига (не matching)
   2026-05-07 11:56 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
   2026-05-07 11:45 UTC+3 — ленивая загрузка MatchingConfig через _get_matching_config()
   2026-05-07 11:30 UTC+3 — union keys comparison: корректная обработка пустых ключей
   2026-05-07 11:15 UTC+3 — _find_in_ens_debug: подробный вывод кандидатов в лог
-  2026-05-07 11:00 UTC+3 — coating variants Кд→Кд6/Кд9.фос.окс; strict exact match
 """
 
 import re

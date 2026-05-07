@@ -180,6 +180,7 @@ class Settings:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     matching: MatchingConfig = field(default_factory=MatchingConfig)
+    coating_rules: Dict[str, Any] = field(default_factory=dict)
     prompts: Dict[str, PromptConfig] = field(default_factory=dict)
     mask_generation: MaskGenerationConfig = field(default_factory=MaskGenerationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -233,6 +234,7 @@ class Settings:
             database=DatabaseConfig(**config_data.get('database', {})),
             processing=ProcessingConfig(**config_data.get('processing', {})),
             matching=MatchingConfig(**config_data.get('matching', {})),
+            coating_rules=config_data.get('coating_rules', {}),
             prompts=prompt_configs,
             mask_generation=MaskGenerationConfig(**config_data.get('mask_generation', {})),
             output=OutputConfig(**config_data.get('output', {})),

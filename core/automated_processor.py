@@ -6,11 +6,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
+  2026-05-07 12:10 UTC+3 — settings.coating_rules: чтение из корня конфига (не matching)
   2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
   2026-05-07 11:50 UTC+3 — debug_per_parameter: скрытие лога _compare_param_sets
   2026-05-07 11:35 UTC+3 — coating auto_substitution в fuzzy matching pipeline
   2026-05-07 11:15 UTC+3 — детальный debug per-parameter в лог (ENS params, MATCHED/MISMATCHED)
-  2026-05-07 11:00 UTC+3 — V2 vs fuzzy priority fix; success_threshold из конфига
 """
 
 import logging
@@ -432,15 +432,18 @@ class AutomatedParametricProcessor:
         Returns:
             Возможно изменённые extracted_params с исправленным покрытием
         """
-        # Загружаем coating rules из конфига
+        # Загружаем coating rules из конфига (корневой ключ coating_rules, не matching)
         coating_rules = None
         try:
             from config.settings import get_settings
             settings = get_settings()
-            if hasattr(settings, 'coating_rules') and settings.coating_rules:
-                coating_rules = settings.coating_rules
-        except Exception:
-            pass
+            coating_rules = getattr(settings, 'coating_rules', None)
+            if coating_rules:
+                logger.debug(f"[COATING_SUBST] Loaded coating_rules from config: {list(coating_rules.keys())}")
+            else:
+                logger.debug("[COATING_SUBST] coating_rules is empty or not configured")
+        except Exception as e:
+            logger.debug(f"[COATING_SUBST] Failed to load coating_rules: {e}")
 
         if not coating_rules:
             logger.debug("[COATING_SUBST] No coating_rules in config, skipping substitution")

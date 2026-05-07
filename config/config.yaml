@@ -152,7 +152,7 @@ matching:
   # для каждого кандидата из ЕНС (matched/mismatched со значениями).
   # Полезно для отладки почему fuzzy выбрал одну запись вместо другой.
   # false = только итоговый score кандидата (краткий режим).
-  debug_per_parameter: false
+  debug_per_parameter: true
 
 # =============================================================================
 # Prompts Configuration
@@ -178,7 +178,7 @@ logging:
   file: "logs/processor.log"
 
   # Максимальный размер одного файла логов
-  max_size: "50MB"
+  max_size: "10MB"
 
   # Количество ротированных файлов (backup)
   backup_count: 20
