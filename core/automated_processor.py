@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:38 UTC+3 — V2 works without ens_name (resolves from code); INFO logging; generic_params fallback; v2_computed
+LAST_FIX: 2026-05-07 08:44 UTC+3 — V2 debug logging for generic pattern mismatch; resolves ens_name from code; v2_computed
 """
 
 import logging
@@ -743,7 +743,9 @@ class AutomatedParametricProcessor:
                 import re
                 generic = self._get_generic_pattern(mask.item_type, effective_standard)
                 if generic and final_ens_name:
-                    m = re.search(generic, str(final_ens_name), re.IGNORECASE)
+                    ens_name_str = str(final_ens_name)
+                    logger.info(f"[PARAM_MATCH] V2 trying generic on ENS name: '{ens_name_str[:60]}', pattern: {generic[:80]}...")
+                    m = re.search(generic, ens_name_str, re.IGNORECASE)
                     if m:
                         generic_ens_mask = {k: v for k, v in m.groupdict().items() if v is not None}
                         logger.info(f"[PARAM_MATCH] Generic parsed ENS name: {generic_ens_mask}")
@@ -757,6 +759,8 @@ class AutomatedParametricProcessor:
                         )
                         v2_computed = True
                         logger.info(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
+                    else:
+                        logger.info(f"[PARAM_MATCH] V2: generic pattern did NOT match ENS name")
                 elif not final_ens_name:
                     logger.info(f"[PARAM_MATCH] V2 skipped: no ENS name for code {final_ens_code}")
                 elif not generic:
