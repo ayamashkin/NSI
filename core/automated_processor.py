@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:35 UTC+3 — V2 uses generic_params fallback; always extract generic from text; v2_computed; confidence=final_score
+LAST_FIX: 2026-05-07 08:38 UTC+3 — V2 works without ens_name (resolves from code); INFO logging; generic_params fallback; v2_computed
 """
 
 import logging
@@ -701,9 +701,9 @@ class AutomatedParametricProcessor:
                     final_ens_name = ens_item.get('наименование') or ens_item.get('name')
                     if not final_mdm_key:
                         final_mdm_key = ens_item.get('mdm_key')
-                    logger.debug(f"[PARAM_MATCH] ENS name resolved: '{final_ens_name}'")
+                    logger.info(f"[PARAM_MATCH] ENS name resolved: '{final_ens_name}'")
             except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
+                logger.info(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
 
         # Fallback: парсим text через generic pattern (всегда, для V2 scoring)
         generic_params = None
@@ -728,15 +728,25 @@ class AutomatedParametricProcessor:
         v2_match_type = None
         v2_computed = False  # был ли V2 score вычислен
         params_for_v2 = final_matched_params or generic_params
-        if final_ens_name and params_for_v2:
+        # V2 работает если есть params и есть либо ens_name, либо ens_code (для получения имени)
+        if params_for_v2 and (final_ens_name or final_ens_code):
+            # Если нет имени но есть код — попробуем получить имя ещё раз
+            if not final_ens_name and final_ens_code:
+                try:
+                    ens_item = self._get_ens_by_code(final_ens_code)
+                    if ens_item:
+                        final_ens_name = ens_item.get('наименование') or ens_item.get('name')
+                        logger.info(f"[PARAM_MATCH] ENS name resolved (V2): '{final_ens_name}'")
+                except Exception as e:
+                    logger.info(f"[PARAM_MATCH] ENS name resolution failed (V2): {e}")
             try:
                 import re
                 generic = self._get_generic_pattern(mask.item_type, effective_standard)
-                if generic:
+                if generic and final_ens_name:
                     m = re.search(generic, str(final_ens_name), re.IGNORECASE)
                     if m:
                         generic_ens_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                        logger.debug(f"[PARAM_MATCH] Generic parsed ENS name: {generic_ens_mask}")
+                        logger.info(f"[PARAM_MATCH] Generic parsed ENS name: {generic_ens_mask}")
                         v2_score, v2_match_type, v2_details = self.parametric_client._calculate_match_score_v2(
                             text=text,
                             ens_name=final_ens_name,
@@ -747,8 +757,12 @@ class AutomatedParametricProcessor:
                         )
                         v2_computed = True
                         logger.info(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
+                elif not final_ens_name:
+                    logger.info(f"[PARAM_MATCH] V2 skipped: no ENS name for code {final_ens_code}")
+                elif not generic:
+                    logger.info(f"[PARAM_MATCH] V2 skipped: no generic pattern for {mask.item_type}")
             except Exception as e:
-                logger.debug(f"[PARAM_MATCH] V2 scoring error: {e}")
+                logger.info(f"[PARAM_MATCH] V2 scoring error: {e}")
 
         # Финальный score: если V2 вычислен — доверяем ему (1.0 или 0.0)
         if v2_computed:
