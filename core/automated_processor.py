@@ -501,15 +501,16 @@ class AutomatedParametricProcessor:
                 candidate_debug['weight'] = round(total_weight, 1)
                 candidate_debug['matched_weight'] = round(matched_weight, 1)
                 logger.debug(f"[FUZZY] Candidate '{candidate_debug['name'][:50]}': score={score:.3f}, weight={total_weight:.1f}, matched={matched_weight:.1f}")
-                # Подробный debug: параметры кандидата из ЕНС
-                ens_params_str = ", ".join(f"{k}={v}" for k, v in key_ens_params.items())
-                logger.debug(f"[FUZZY]   ENS params: {ens_params_str}")
-                if candidate_debug['params_matched']:
-                    matched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_matched'].items())
-                    logger.debug(f"[FUZZY]   MATCHED: {matched_str}")
-                if candidate_debug['params_mismatched']:
-                    mismatched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_mismatched'].items())
-                    logger.debug(f"[FUZZY]   MISMATCHED: {mismatched_str}")
+                # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
+                if _get_matching_config().debug_per_parameter:
+                    ens_params_str = ", ".join(f"{k}={v}" for k, v in key_ens_params.items())
+                    logger.debug(f"[FUZZY]   ENS params: {ens_params_str}")
+                    if candidate_debug['params_matched']:
+                        matched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_matched'].items())
+                        logger.debug(f"[FUZZY]   MATCHED: {matched_str}")
+                    if candidate_debug['params_mismatched']:
+                        mismatched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_mismatched'].items())
+                        logger.debug(f"[FUZZY]   MISMATCHED: {mismatched_str}")
                 if score > best_score:
                     best_score = score
                     best_match = {**candidate, '_fuzzy_score': best_score}

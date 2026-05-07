@@ -120,6 +120,7 @@ class MatchingConfig:
     v2_exact_threshold: float = 0.99         # Порог V2 exact match
     coating_similarity_threshold: float = 0.8 # Порог similarity покрытия
     strict_union_keys: bool = False          # Union keys comparison mode
+    debug_per_parameter: bool = True         # Детальный debug per-parameter в лог
 
 
 @dataclass

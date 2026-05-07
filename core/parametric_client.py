@@ -14,6 +14,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Lazy import для доступа к MatchingConfig (избегаем circular dependency)
+_matching_config = None
+
+def _get_matching_config():
+    """Ленивая загрузка MatchingConfig из settings."""
+    global _matching_config
+    if _matching_config is None:
+        try:
+            from config.settings import get_settings
+            _matching_config = get_settings().matching
+        except Exception:
+            class _FallbackMatchingConfig:
+                success_threshold = 0.7
+                fuzzy_threshold = 0.6
+                v2_exact_threshold = 0.99
+                coating_similarity_threshold = 0.8
+                strict_union_keys = False
+                debug_per_parameter = True
+            _matching_config = _FallbackMatchingConfig()
+    return _matching_config
+
 # Кэш для empty_equivalent_values
 _empty_equiv_cache: Optional[Dict[str, List[str]]] = None
 
@@ -660,14 +681,15 @@ class ParametricENSClient:
                     'method': '_calculate_match_score',
                 }
 
-                # Подробный debug в лог для каждого кандидата с score > 0
                 if score > 0:
                     debug_candidates.append(debug_entry)
-                    source_str = ", ".join(f"{k}={v}" for k, v in debug_entry['source_params'].items())
-                    ens_str = ", ".join(f"{k}={v}" for k, v in debug_entry['ens_params'].items())
-                    logger.debug(f"[_find_in_ens] Candidate '{debug_entry['name'][:50]}' (code={debug_entry['ens_code']}): score={score:.3f}")
-                    logger.debug(f"[_find_in_ens]   Source params: {source_str}")
-                    logger.debug(f"[_find_in_ens]   ENS params: {ens_str}")
+                    # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
+                    if _get_matching_config().debug_per_parameter:
+                        source_str = ", ".join(f"{k}={v}" for k, v in debug_entry['source_params'].items())
+                        ens_str = ", ".join(f"{k}={v}" for k, v in debug_entry['ens_params'].items())
+                        logger.debug(f"[_find_in_ens] Candidate '{debug_entry['name'][:50]}' (code={debug_entry['ens_code']}): score={score:.3f}")
+                        logger.debug(f"[_find_in_ens]   Source params: {source_str}")
+                        logger.debug(f"[_find_in_ens]   ENS params: {ens_str}")
 
                 if score > best_score:
                     best_score = score
