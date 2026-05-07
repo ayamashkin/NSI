@@ -4,7 +4,7 @@ Main Processor Module
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:28 UTC+3 — final_matched_params from generic on text; ens_name from fuzzy_ens_code; v2_computed; confidence=final_score
+LAST_FIX: 2026-05-07 08:31 UTC+3 — generic extraction BEFORE V2 scoring; v2_computed; confidence=final_score
 """
 
 import logging
@@ -705,6 +705,20 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.warning(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
 
+        # Fallback: если final_matched_params пуст — парсим text через generic pattern
+        if not final_matched_params and mask:
+            try:
+                import re
+                generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic:
+                    m = re.search(generic, text, re.IGNORECASE)
+                    if m:
+                        final_matched_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                        final_matched_params = self._normalize_params(final_matched_params)
+                        logger.info(f"[PARAM_MATCH] Params from generic on text: {final_matched_params}")
+            except Exception as e:
+                logger.debug(f"[PARAM_MATCH] Generic parse on text error: {e}")
+
         # НОВАЯ ЛОГИКА: generic pattern → parse ens_name → _calculate_match_score_v2
         v2_score = 0.0
         v2_match_type = None
@@ -727,7 +741,7 @@ class AutomatedParametricProcessor:
                             required=list(final_matched_params.keys())
                         )
                         v2_computed = True
-                        logger.debug(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
+                        logger.info(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
             except Exception as e:
                 logger.debug(f"[PARAM_MATCH] V2 scoring error: {e}")
 
@@ -782,20 +796,6 @@ class AutomatedParametricProcessor:
         if ens_params_from_index:
             ens_params_from_index = self._normalize_params(ens_params_from_index)
             logger.debug(f"[PARAM_MATCH] Normalized ens_params: {ens_params_from_index}")
-
-        # Fallback 1: если final_matched_params пуст — парсим text через generic pattern
-        if not final_matched_params and final_ens_name and mask:
-            try:
-                import re
-                generic = self._get_generic_pattern(mask.item_type, effective_standard)
-                if generic:
-                    m = re.search(generic, text, re.IGNORECASE)
-                    if m:
-                        final_matched_params = {k: v for k, v in m.groupdict().items() if v is not None}
-                        final_matched_params = self._normalize_params(final_matched_params)
-                        logger.debug(f"[PARAM_MATCH] Params from generic on text: {final_matched_params}")
-            except Exception as e:
-                logger.debug(f"[PARAM_MATCH] Generic parse on text error: {e}")
 
         # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
