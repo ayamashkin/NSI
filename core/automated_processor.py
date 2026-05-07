@@ -3,8 +3,8 @@ Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2025-05-06-fix7 (double-dollar-fix)
-LAST_FIX: 2026-05-07 08:55 UTC+3 - V2 scoring works for screws; confidence=final_score; v2_computed flag
+VERSION: 2025-05-06-fix8
+LAST_FIX: 2026-05-07 09:30 UTC+3 - washer generic pattern; coating alias Кд→Кд6/Кд9.фос.окс
 """
 
 import logging

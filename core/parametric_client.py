@@ -2,7 +2,7 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07 08:57 UTC+3 — union keys comparison (not intersection); mismatch if key missing; strict exact match; M-optional
+VERSION: 2026-05-07 09:30 UTC+3 — union keys comparison; coating variants Кд→Кд6/Кд9.фос.окс; strict exact match; M-optional
 """
 
 import re
@@ -576,6 +576,29 @@ class ParametricENSClient:
                 logger.debug(f"[REMAP] {wrong} → {correct}: {value}")
         return remapped
 
+    def _expand_coating_variants(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Expand coating search variants.
+        When coating is 'Кд', also try 'Кд6', 'Кд9.фос.окс' etc.
+        Returns list of param dicts to try.
+        """
+        variants = [params]
+        coating = params.get('покрытие')
+        if not coating:
+            return variants
+
+        coating_str = str(coating).strip().lower()
+
+        # Кд variants
+        if coating_str in ('кд', 'кд.'):
+            for variant in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
+                           'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
+                expanded = dict(params)
+                expanded['покрытие'] = variant
+                variants.append(expanded)
+
+        return variants
+
     def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Поиск по параметрам в индексе ЕНС. Fallback: точное совпадение наименования с проверкой типа."""
         if not self._ens_index or 'items' not in self._ens_index:
@@ -589,25 +612,29 @@ class ParametricENSClient:
         query_std_norm = self._normalize_standard(standard) if standard else None
         query_type = item_type.upper().strip() if item_type else None
 
-        for item in items:
-            # Фильтр по стандарту (нтд) - обязательное совпадение
-            if query_std_norm:
-                item_std = item.get('нтд') or item.get('standard')
-                item_std_norm = self._normalize_standard(item_std) if item_std else None
-                if item_std_norm and query_std_norm != item_std_norm:
-                    continue
+        # Try with coating variants
+        param_variants = self._expand_coating_variants(params)
 
-            # Фильтр по типу изделия (если указан)
-            if query_type:
-                item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
-                if item_type_field and item_type_field != query_type:
-                    continue
+        for try_params in param_variants:
+            for item in items:
+                # Фильтр по стандарту (нтд) - обязательное совпадение
+                if query_std_norm:
+                    item_std = item.get('нтд') or item.get('standard')
+                    item_std_norm = self._normalize_standard(item_std) if item_std else None
+                    if item_std_norm and query_std_norm != item_std_norm:
+                        continue
 
-            score = self._calculate_match_score(params, required, item)
+                # Фильтр по типу изделия (если указан)
+                if query_type:
+                    item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
+                    if item_type_field and item_type_field != query_type:
+                        continue
 
-            if score > best_score:
-                best_score = score
-                best_match = item
+                score = self._calculate_match_score(try_params, required, item)
+
+                if score > best_score:
+                    best_score = score
+                    best_match = item
 
         # Fallback: точное совпадение наименования (с проверкой типа)
         if best_score < 0.99 and text:
