@@ -963,6 +963,20 @@ class AutomatedParametricProcessor:
             final_matched_params = self._remap_params(final_matched_params)
             logger.debug(f"[PARAM_MATCH] Remapped params: {final_matched_params}")
 
+        # === COATING AUTO-SUBSTITUTION ===
+        # Всегда проверяем, даже если score высокий — для корректного покрытия в details.
+        # Используем raw_params (fallback или matched, до remap).
+        raw_params = fallback_params if fallback_params else match_result.matched_params
+        substitution_info = None
+        if raw_params and raw_params.get('покрытие'):
+            try:
+                # Загружаем кандидатов для определения марки материала
+                ens_candidates_sub = self._get_cached_ens_candidates(effective_standard, mask.item_type)
+                if ens_candidates_sub:
+                    _, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
+            except Exception as e:
+                logger.debug(f"[PARAM_MATCH] Coating substitution error: {e}")
+
         # Debug: собираем информацию о всех проверенных кандидатах
         debug_candidates = []
 
@@ -972,16 +986,13 @@ class AutomatedParametricProcessor:
                 ens_candidates = self._get_cached_ens_candidates(effective_standard, mask.item_type)
                 logger.info(f"[PARAM_MATCH] ENS candidates: count={len(ens_candidates)}, standard={effective_standard}, item_type={mask.item_type}")
 
-                # === COATING AUTO-SUBSTITUTION (ДО exact/fuzzy match) ===
-                # Используем params ДО remap (fallback_params или match_result.matched_params),
-                # т.к. _remap_params может очистить dict → final_matched_params = {}.
-                raw_params = fallback_params if fallback_params else match_result.matched_params
+                # === COATING AUTO-SUBSTITUTION для ПОИСКА ===
+                # Если substitution применена — используем исправленные params для поиска.
                 search_params = final_matched_params
-                if raw_params and ens_candidates:
-                    substituted_params, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates)
-                    if substituted_params != raw_params:
-                        search_params = substituted_params
-                        logger.info(f"[PARAM_MATCH] Using substituted params for search: {search_params}")
+                if substitution_info and ens_candidates:
+                    search_params = dict(final_matched_params)
+                    search_params['покрытие'] = substitution_info['corrected']
+                    logger.info(f"[PARAM_MATCH] Using substituted params for search: {search_params}")
 
                 # СНАЧАЛА exact match через _find_in_ens (coating expansion + name_exact)
                 if search_params:
