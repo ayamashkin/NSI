@@ -1,8 +1,11 @@
 """
 Script to fix masks for known problematic standards.
-Run: python fix_masks_v2.py
+Run from project root: python fix_masks_v2.py
+
+VERSION: 2026-05-07 09:45 UTC+3
 """
 
+import json
 import sqlite3
 import logging
 import hashlib
@@ -13,22 +16,73 @@ logger = logging.getLogger(__name__)
 
 
 def get_db_path():
-    """Find database file."""
-    for p in ['nomenclature.db', 'database/nomenclature.db', '../database/nomenclature.db']:
+    """Find the mask database file.
+
+    MaskDatabase is initialized with db_path from settings.database.path
+    (default: cache/results.db), but falls back to masks.db if not specified.
+    """
+    candidates = [
+        '../cache/masks.db'
+    ]
+
+    for p in candidates:
         if Path(p).exists():
+            logger.info(f"Found database: {p}")
             return p
-    # Search recursively
-    for p in Path('.').rglob('nomenclature.db'):
-        return str(p)
-    return None
+
+    # Search recursively (up to 2 levels deep)
+    for pattern in ['**/*.db', '**/*masks*']:
+        for p in Path('.').glob(pattern):
+            if p.is_file() and p.stat().st_size > 0:
+                logger.info(f"Found database via search: {p}")
+                return str(p)
+
+    # Default: create at cache/results.db
+    logger.info("No existing database found, will use: cache/results.db")
+    Path('cache').mkdir(exist_ok=True)
+    return 'cache/results.db'
+
+
+def init_masks_table(cursor):
+    """Ensure masks table exists (same schema as MaskDatabase._init_db)."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS masks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            standard TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            params TEXT,
+            required TEXT,
+            auto_score REAL DEFAULT 0.0,
+            is_active INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'llm',
+            usage_count INTEGER DEFAULT 0,
+            test_examples TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used TIMESTAMP,
+            pattern_hash TEXT UNIQUE,
+            UNIQUE(standard, item_type, pattern_hash)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_masks_standard_type 
+        ON masks(standard, item_type)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_masks_active 
+        ON masks(is_active, auto_score DESC)
+    """)
 
 
 def fix_gost_7795(cursor):
-    """Fix ГОСТ 7795-70 mask: correct length/group parsing."""
+    """Fix ГОСТ 7795-70 mask: correct length/group parsing.
+
+    Problem: old mask captured '100.58' as length=100.58 (float).
+    Fix: pattern now correctly extracts length=100, group=5.8
+    """
     standard = 'ГОСТ 7795-70'
     item_type = 'БОЛТ'
 
-    # Correct pattern: Болт [исполнение]M[диаметр]x[шаг]-[класс]x[длина].[группа]
     correct_pattern = (
         r'^Болт\s*(?P<исполнение>\d+)?\s*'
         r'M(?P<номинальный_диаметр_резьбы>\d+)'
@@ -38,13 +92,17 @@ def fix_gost_7795(cursor):
         r'ГОСТ\s*7795-70$'
     )
 
-    params = [
+    params = json.dumps([
         'исполнение', 'номинальный_диаметр_резьбы', 'шаг_резьбы',
         'класс_поле_допуска', 'длина', 'группа_класс_прочности'
-    ]
-    required = ['номинальный_диаметр_резьбы', 'длина', 'группа_класс_прочности']
+    ])
+    required = json.dumps([
+        'номинальный_диаметр_резьбы', 'длина', 'группа_класс_прочности'
+    ])
 
-    pattern_hash = hashlib.md5(correct_pattern.encode()).hexdigest()
+    pattern_hash = hashlib.sha256(
+        f"{correct_pattern}:{standard}:{item_type}".encode()
+    ).hexdigest()[:16]
 
     # Check existing
     cursor.execute(
@@ -57,10 +115,10 @@ def fix_gost_7795(cursor):
         cursor.execute(
             """UPDATE masks 
                SET pattern = ?, params = ?, required = ?, 
-                   pattern_hash = ?, is_active = 1, auto_score = 0.95
+                   pattern_hash = ?, is_active = 1, auto_score = 0.95,
+                   source = 'manual_fix', last_used = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            (correct_pattern, ','.join(params), ','.join(required),
-             pattern_hash, existing[0])
+            (correct_pattern, params, required, pattern_hash, existing[0])
         )
         logger.info(f"Updated ГОСТ 7795-70 mask (id={existing[0]})")
     else:
@@ -69,50 +127,49 @@ def fix_gost_7795(cursor):
                (standard, item_type, pattern, params, required, 
                 pattern_hash, is_active, auto_score, source)
                VALUES (?, ?, ?, ?, ?, ?, 1, 0.95, 'manual_fix')""",
-            (standard, item_type, correct_pattern,
-             ','.join(params), ','.join(required), pattern_hash)
+            (standard, item_type, correct_pattern, params, required, pattern_hash)
         )
         logger.info(f"Inserted ГОСТ 7795-70 mask")
 
 
 def add_washer_masks(cursor):
-    """Add masks for Шайба standards."""
+    """Add masks for Шайба standards (ОСТ 1 34505-80, ОСТ 1 34507-80)."""
 
     washer_masks = [
-        # ОСТ 1 34505-80
         {
             'standard': 'ОСТ 1 34505-80',
             'item_type': 'ШАЙБА',
             'pattern': (
                 r'^Шайба\s*'
-                r'(?P<диаметр>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
-                r'(?P<наружный_диаметр>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
-                r'(?P<толщина>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
+                r'(?P<диаметр>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
+                r'(?P<наружный_диаметр>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
+                r'(?P<толщина>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
                 r'(?P<покрытие>[\w.]+)\s*[-\s]*\s*'
                 r'ОСТ\s*1\s*34505-80$'
             ),
-            'params': ['диаметр', 'наружный_диаметр', 'толщина', 'покрытие'],
-            'required': ['диаметр', 'наружный_диаметр', 'толщина', 'покрытие']
+            'params': json.dumps(['диаметр', 'наружный_диаметр', 'толщина', 'покрытие']),
+            'required': json.dumps(['диаметр', 'наружный_диаметр', 'толщина', 'покрытие'])
         },
-        # ОСТ 1 34507-80
         {
             'standard': 'ОСТ 1 34507-80',
             'item_type': 'ШАЙБА',
             'pattern': (
                 r'^Шайба\s*'
-                r'(?P<диаметр>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
-                r'(?P<наружный_диаметр>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
-                r'(?P<толщина>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
+                r'(?P<диаметр>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
+                r'(?P<наружный_диаметр>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
+                r'(?P<толщина>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
                 r'(?P<покрытие>[\w.]+)\s*[-\s]*\s*'
                 r'ОСТ\s*1\s*34507-80$'
             ),
-            'params': ['диаметр', 'наружный_диаметр', 'толщина', 'покрытие'],
-            'required': ['диаметр', 'наружный_диаметр', 'толщина', 'покрытие']
+            'params': json.dumps(['диаметр', 'наружный_диаметр', 'толщина', 'покрытие']),
+            'required': json.dumps(['диаметр', 'наружный_диаметр', 'толщина', 'покрытие'])
         },
     ]
 
     for mask in washer_masks:
-        pattern_hash = hashlib.md5(mask['pattern'].encode()).hexdigest()
+        pattern_hash = hashlib.sha256(
+            f"{mask['pattern']}:{mask['standard']}:{mask['item_type']}".encode()
+        ).hexdigest()[:16]
 
         # Check existing
         cursor.execute(
@@ -125,10 +182,11 @@ def add_washer_masks(cursor):
             cursor.execute(
                 """UPDATE masks 
                    SET pattern = ?, params = ?, required = ?, 
-                       pattern_hash = ?, is_active = 1, auto_score = 0.95
+                       pattern_hash = ?, is_active = 1, auto_score = 0.95,
+                       source = 'manual_fix', last_used = CURRENT_TIMESTAMP
                    WHERE id = ?""",
-                (mask['pattern'], ','.join(mask['params']),
-                 ','.join(mask['required']), pattern_hash, existing[0])
+                (mask['pattern'], mask['params'], mask['required'],
+                 pattern_hash, existing[0])
             )
             logger.info(f"Updated {mask['standard']} mask (id={existing[0]})")
         else:
@@ -138,14 +196,14 @@ def add_washer_masks(cursor):
                     pattern_hash, is_active, auto_score, source)
                    VALUES (?, ?, ?, ?, ?, ?, 1, 0.95, 'manual_fix')""",
                 (mask['standard'], mask['item_type'], mask['pattern'],
-                 ','.join(mask['params']), ','.join(mask['required']),
-                 pattern_hash)
+                 mask['params'], mask['required'], pattern_hash)
             )
             logger.info(f"Inserted {mask['standard']} mask")
 
 
 def fix_ost_31141(cursor):
-    """Fix ОСТ 1 31141-80 mask if needed."""
+    """Fix ОСТ 1 31141-80 mask if it has unbalanced parentheses."""
+
     standard = 'ОСТ 1 31141-80'
     item_type = 'БОЛТ'
 
@@ -156,51 +214,67 @@ def fix_ost_31141(cursor):
     )
     row = cursor.fetchone()
 
+    correct_pattern = (
+        r'^Болт\s*'
+        r'(?P<номинальный_диаметр_резьбы>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
+        r'(?P<длина>\d+(?:[,\.]\d+)?)\s*[-\s]+\s*'
+        r'(?P<покрытие>[\w.]+)\s*[-\s]*\s*'
+        r'ОСТ\s*1\s*31141-80$'
+    )
+
+    params = json.dumps(['номинальный_диаметр_резьбы', 'длина', 'покрытие'])
+    required = json.dumps(['номинальный_диаметр_резьбы', 'длина', 'покрытие'])
+    pattern_hash = hashlib.sha256(
+        f"{correct_pattern}:{standard}:{item_type}".encode()
+    ).hexdigest()[:16]
+
     if row:
         mask_id, pattern = row
-        # Test if pattern has issues
-        if '(?:' in pattern and pattern.count('(') != pattern.count(')'):
+        # Test if pattern has structural issues
+        if pattern.count('(') != pattern.count(')'):
             logger.warning(f"Mask {standard} has unbalanced parentheses, fixing")
-
-            correct_pattern = (
-                r'^Болт\s*'
-                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
-                r'(?P<длина>\d+(?:[.,]\d+)?)\s*[-\s]+\s*'
-                r'(?P<покрытие>[\w.]+)\s*[-\s]*\s*'
-                r'ОСТ\s*1\s*31141-80$'
-            )
-
-            pattern_hash = hashlib.md5(correct_pattern.encode()).hexdigest()
-            params = ['номинальный_диаметр_резьбы', 'длина', 'покрытие']
-            required = ['номинальный_диаметр_резьбы', 'длина', 'покрытие']
-
             cursor.execute(
                 """UPDATE masks 
                    SET pattern = ?, params = ?, required = ?, 
-                       pattern_hash = ?, is_active = 1
+                       pattern_hash = ?, is_active = 1,
+                       source = 'manual_fix', last_used = CURRENT_TIMESTAMP
                    WHERE id = ?""",
-                (correct_pattern, ','.join(params), ','.join(required),
-                 pattern_hash, mask_id)
+                (correct_pattern, params, required, pattern_hash, mask_id)
             )
             logger.info(f"Fixed {standard} mask")
         else:
-            logger.info(f"{standard} mask looks OK")
+            logger.info(f"{standard} mask looks OK, updating anyway for consistency")
+            cursor.execute(
+                """UPDATE masks 
+                   SET pattern = ?, params = ?, required = ?, 
+                       pattern_hash = ?, is_active = 1,
+                       source = 'manual_fix', last_used = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (correct_pattern, params, required, pattern_hash, mask_id)
+            )
     else:
-        logger.warning(f"No mask found for {standard}")
+        logger.warning(f"No mask found for {standard}, inserting new one")
+        cursor.execute(
+            """INSERT INTO masks 
+               (standard, item_type, pattern, params, required, 
+                pattern_hash, is_active, auto_score, source)
+               VALUES (?, ?, ?, ?, ?, ?, 1, 0.95, 'manual_fix')""",
+            (standard, item_type, correct_pattern, params, required, pattern_hash)
+        )
 
 
 def main():
     db_path = get_db_path()
-    if not db_path:
-        logger.error("Database not found!")
-        return
-
     logger.info(f"Using database: {db_path}")
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
     try:
+        # Ensure table exists
+        init_masks_table(cursor)
+
+        # Apply fixes
         fix_gost_7795(cursor)
         add_washer_masks(cursor)
         fix_ost_31141(cursor)
