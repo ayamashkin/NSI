@@ -964,7 +964,6 @@ class AutomatedParametricProcessor:
         # Всегда проверяем, даже если score высокий — для корректного покрытия в details.
         # Используем raw_params (fallback или matched, до remap).
         raw_params = fallback_params if fallback_params else match_result.matched_params
-        substitution_info = None
         logger.debug(f"[PARAM_MATCH] Coating substitution check: raw_params={raw_params}")
         if raw_params and raw_params.get('покрытие'):
             logger.debug(f"[PARAM_MATCH] Coating substitution: has покрытие='{raw_params.get('покрытие')}', calling _apply_coating_substitution")
