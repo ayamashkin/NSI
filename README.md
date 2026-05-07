@@ -17,8 +17,11 @@
 - [Архитектура](#архитектура)
 - [Установка](#установка)
 - [Конфигурация](#конфигурация)
+- [Matching Configuration](#configconfigyaml--matching-configuration)
 - [Быстрый старт](#быстрый-старт)
 - [CLI Команды](#cli-команды)
+  - [Параметрическая обработка](#параметрическая-обработка-одна-строка)
+  - [Диагностика строки](#диагностика-строки)
 - [Анализ качества](#анализ-качества)
 - [Keyword-based маршрутизация](#keyword-based-маршрутизация)
 - [Генерация regex-масок через LLM](#генерация-regex-масок-через-llm)
@@ -287,6 +290,43 @@ auto_mapping_patterns:
   'марка материала': 'марка_материала'
 ```
 
+### config/config.yaml — Matching Configuration
+
+```yaml
+matching:
+  # Порог для считать match успешным (0.0..1.0)
+  # 1.0 = только идеальное совпадение всех параметров
+  # 0.7 = fuzzy match с совпадением ключевых параметров
+  success_threshold: 0.7
+
+  # Порог fuzzy matching кандидатов из ЕНС
+  # Fuzzy активируется когда точный parametric match не дал результата
+  fuzzy_threshold: 0.6
+
+  # Порог V2 exact matching (params vs ens_params_mask)
+  v2_exact_threshold: 0.99
+
+  # Порог similarity для покрытия (token-based Jaccard)
+  coating_similarity_threshold: 0.8
+
+  # Режим сравнения параметров:
+  # false = по пересечению ключей (ключ отсутствующий в одном наборе игнорируется)
+  # true  = строгий режим по объединению (не рекомендуется)
+  strict_union_keys: false
+
+  # Детальный debug per-parameter в лог (true = выводить matched/mismatched)
+  debug_per_parameter: true
+```
+
+| Параметр | Дефолт | Описание |
+|----------|--------|----------|
+| `success_threshold` | 0.7 | Score >= порога → success=true |
+| `fuzzy_threshold` | 0.6 | Минимальный fuzzy score для кандидата |
+| `v2_exact_threshold` | 0.99 | Порог подтверждения V2 exact match |
+| `coating_similarity_threshold` | 0.8 | Порог fuzzy-match для покрытия |
+| `strict_union_keys` | false | Режим сравнения ключей параметров |
+| `debug_per_parameter` | true | Детальный debug per-parameter в лог |
+
 ---
 
 ## Быстрый старт
@@ -453,6 +493,35 @@ python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i model
 | `export -o <json>` | Экспорт результатов |
 | `stats` | Статистика results.db |
 | `errors -l <n>` | Последние ошибки |
+
+### Параметрическая обработка (одна строка)
+
+```bash
+# Обработка одной строки через parametric processor
+python cli.py process-parametric "Болт (2)-12-96-Окс.Фос.ЭФП-ОСТ 1 31133-80" \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl
+```
+
+Результат: JSON с извлечёнными параметрами, ENS match и confidence score.
+
+### Диагностика строки
+
+```bash
+# Детальная диагностика: показать все шаги обработки строки
+python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl
+```
+
+Диагностика показывает:
+1. Извлечённые standard и item_type
+2. Найденную маску и regex-паттерн
+3. Извлечённые params (named groups)
+4. Parametric match (score, ENS-кандидаты)
+5. Fuzzy match (если parametric не дал результата)
+6. V2 scoring (params vs ens_params_mask)
+7. Coating validation (проверка покрытия)
 
 ---
 
