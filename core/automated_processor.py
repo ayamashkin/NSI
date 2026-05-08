@@ -6,11 +6,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
+  2026-05-08 11:50 UTC+3 — fuzzy_mismatched_params: подробная информация о несовпавших параметрах в results.json
   2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
   2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
-  2026-05-07 11:53 UTC+3 — coating auto_substitution ДО exact match (раньше только в fuzzy)
 """
 
 import logging
@@ -951,6 +951,7 @@ class AutomatedParametricProcessor:
         # пробуем token-based matching для текстовых параметров (покрытие, материал)
         fuzzy_ens_code = None
         fuzzy_score = 0.0
+        fuzzy_mismatched_params = {}  # несовпавшие параметры (для diagnostics)
 
         # Определяем итоговые params (fallback или обычные)
         final_matched_params = fallback_params if fallback_params else match_result.matched_params
@@ -1043,6 +1044,13 @@ class AutomatedParametricProcessor:
                         logger.info(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
                     else:
                         logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
+
+                    # Собираем несовпавшие параметры из лучшего кандидата (даже если ниже threshold)
+                    if fuzzy_debug:
+                        best_candidate = fuzzy_debug[0]  # уже отсортированы по score убыванию
+                        if best_candidate.get('params_mismatched'):
+                            fuzzy_mismatched_params = best_candidate['params_mismatched']
+                            logger.info(f"[PARAM_MATCH] Fuzzy mismatched params: {fuzzy_mismatched_params}")
                 elif not ens_candidates:
                     logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
                 elif not search_params:
@@ -1276,6 +1284,7 @@ class AutomatedParametricProcessor:
                 'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
                 'v2_computed': v2_computed if 'v2_computed' in locals() else False,
                 'coating_substitution': substitution_info,
+                'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params else None,
             },
             item_type=mask.item_type,
             standard=mask.standard
