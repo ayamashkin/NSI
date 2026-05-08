@@ -6,7 +6,7 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
-  2026-05-07 13:25 UTC+3 — coating_substitution: полное логирование; проверка всех return paths
+  2026-05-07 14:45 UTC+3 — match_type в results.json (name_exact, parametric_full, v2_exact, coating_substituted, fuzzy)
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
   2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
@@ -1221,8 +1221,19 @@ class AutomatedParametricProcessor:
 
         processing_time = (time.time() - start_time) * 1000
 
-        # Логирование coating_substitution перед возвратом
+        # Определяем match_type для вывода в JSON
+        if substitution_info and final_ens_code:
+            match_type_out = 'coating_substituted'
+        elif fuzzy_ens_code and not match_result.ens_code:
+            match_type_out = 'fuzzy_fallback'
+        elif match_result.match_type:
+            match_type_out = match_result.match_type
+        else:
+            match_type_out = None
+
+        # Логирование coating_substitution и match_type перед возвратом
         logger.info(f"[PARAM_MATCH] RETURN substitution_info={'SET' if substitution_info else 'NONE'}: {substitution_info}")
+        logger.info(f"[PARAM_MATCH] RETURN match_type={match_type_out}")
 
         return ProcessingResult(
             text=text,
@@ -1234,7 +1245,7 @@ class AutomatedParametricProcessor:
                 'name': final_ens_name,
                 'mdm_key': final_mdm_key or final_ens_code,
                 'score': final_score,
-                'type': 'fuzzy_fallback' if fuzzy_ens_code and not match_result.ens_code else match_result.match_type,
+                'type': match_type_out,
                 'params': ens_params_from_index  # ← из ENS индекса, нормализованные типы
             } if final_ens_code else None,
             confidence=final_score,
@@ -1244,6 +1255,7 @@ class AutomatedParametricProcessor:
             details={
                 'mask_id': mask.id,
                 'mask_pattern': mask.pattern,
+                'match_type': match_type_out,  # ← тип сопоставления (name_exact, parametric_full, v2_exact, coating_substituted, fuzzy)
                 'extracted_standard': extracted.get('standard_info'),
                 'extracted_type': extracted.get('item_type'),
                 'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,

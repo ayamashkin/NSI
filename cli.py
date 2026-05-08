@@ -2,7 +2,7 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
-LAST_FIX: 2026-05-07 13:35 UTC+3 — cfg.resolve_service/model() вместо прямого доступа; service/model опциональны в prompts.yaml
+LAST_FIX: 2026-05-07 14:45 UTC+3 — match_type в results.json; coating_substitution поле; cfg.resolve_service/model()
 """
 
 import click
@@ -462,6 +462,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             'item_type': result.item_type,
             'standard': result.standard,
             'mask_pattern': result.details.get('mask_pattern') if result.details else None,
+            'match_type': result.details.get('match_type') if result.details else None,
             'coating_substitution': result.details.get('coating_substitution') if result.details else None
         }
         if include_details and result.details:
