@@ -517,7 +517,7 @@ python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/mas
 
 ```bash
 # prod
-python cli.py ens build-index "data/_ЕНС_Крепеж_24.03.2026.xlsx" -o models/hardware/ens_hardware.pkl    
+python cli.py ens build-index "data/Крепежные изделия_1.xlsx" -o models/hardware/ens_hardware.pkl    
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm      
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json
 python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
