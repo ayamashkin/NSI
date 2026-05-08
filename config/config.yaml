@@ -206,10 +206,12 @@ logging:
 # =============================================================================
 mask_generation:
   # Сервис API для генерации масок: "openwebui", "mws" или "gigachat"
-  default_service: "openwebui"
+  default_service: "mts_ai"
+  #default_service: "openwebui"
 
   # Модель для генерации масок
-  default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
+  default_model: "cotype_pro_2.5"
+  #default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
 
   # Температура для LLM (0.0 = детерминированный, 1.0 = креативный)
   # Для regex-генерации рекомендуется 0.1 (минимальная вариативность)

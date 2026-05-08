@@ -6,7 +6,7 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
-  2026-05-07 14:45 UTC+3 — match_type в results.json (name_exact, parametric_full, v2_exact, coating_substituted, fuzzy)
+  2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
   2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
   2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
@@ -1221,15 +1221,25 @@ class AutomatedParametricProcessor:
 
         processing_time = (time.time() - start_time) * 1000
 
-        # Определяем match_type для вывода в JSON
+        # Определяем match_type для вывода в JSON (eng + ru)
         if substitution_info and final_ens_code:
             match_type_out = 'coating_substituted'
+            match_type_ru = 'Совпадение после подбора правильного покрытия'
         elif fuzzy_ens_code and not match_result.ens_code:
             match_type_out = 'fuzzy_fallback'
-        elif match_result.match_type:
-            match_type_out = match_result.match_type
+            match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
+        elif match_result.match_type == 'name_exact':
+            match_type_out = 'name_exact'
+            match_type_ru = 'Совпадение по наименованию'
+        elif match_result.match_type == 'exact':
+            match_type_out = 'parametric_full'
+            match_type_ru = 'Полное совпадение параметров с индексом'
+        elif match_result.match_type == 'v2_exact':
+            match_type_out = 'v2_exact'
+            match_type_ru = 'Полное совпадение параметров с маской ENS'
         else:
-            match_type_out = None
+            match_type_out = match_result.match_type or None
+            match_type_ru = 'Не определено'
 
         # Логирование coating_substitution и match_type перед возвратом
         logger.info(f"[PARAM_MATCH] RETURN substitution_info={'SET' if substitution_info else 'NONE'}: {substitution_info}")
@@ -1255,7 +1265,8 @@ class AutomatedParametricProcessor:
             details={
                 'mask_id': mask.id,
                 'mask_pattern': mask.pattern,
-                'match_type': match_type_out,  # ← тип сопоставления (name_exact, parametric_full, v2_exact, coating_substituted, fuzzy)
+                'match_type': match_type_out,       # ← тип сопоставления (eng)
+                'match_type_ru': match_type_ru,     # ← тип сопоставления (rus)
                 'extracted_standard': extracted.get('standard_info'),
                 'extracted_type': extracted.get('item_type'),
                 'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,
