@@ -951,7 +951,7 @@ class AutomatedParametricProcessor:
         # пробуем token-based matching для текстовых параметров (покрытие, материал)
         fuzzy_ens_code = None
         fuzzy_score = 0.0
-        fuzzy_mismatched_params = {}  # несовпавшие параметры (для diagnostics)
+        fuzzy_mismatched_params = None  # несовпавшие параметры (None = не применялся fuzzy)
 
         # Определяем итоговые params (fallback или обычные)
         final_matched_params = fallback_params if fallback_params else match_result.matched_params
@@ -1045,12 +1045,15 @@ class AutomatedParametricProcessor:
                     else:
                         logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
 
-                    # Собираем несовпавшие параметры из лучшего кандидата (даже если ниже threshold)
+                    # Собираем несовпавшие параметры из лучшего кандидата (всегда, для diagnostics)
                     if fuzzy_debug:
                         best_candidate = fuzzy_debug[0]  # уже отсортированы по score убыванию
                         if best_candidate.get('params_mismatched'):
-                            fuzzy_mismatched_params = best_candidate['params_mismatched']
+                            fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
                             logger.info(f"[PARAM_MATCH] Fuzzy mismatched params: {fuzzy_mismatched_params}")
+                        elif fuzzy_match:
+                            # Все параметры совпали — явно сохраняем пустой dict
+                            fuzzy_mismatched_params = {}
                 elif not ens_candidates:
                     logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
                 elif not search_params:
@@ -1230,21 +1233,26 @@ class AutomatedParametricProcessor:
         processing_time = (time.time() - start_time) * 1000
 
         # Определяем match_type для вывода в JSON (eng + ru)
+        # Приоритет: coating_substituted > name_exact (text==ens_name) > parametric_full > v2_exact > fuzzy_fallback
+        text_norm = self.parametric_client._normalize_name(text) if text else ''
+        ens_name_norm = self.parametric_client._normalize_name(final_ens_name) if final_ens_name else ''
+        is_name_exact = text_norm and ens_name_norm and text_norm == ens_name_norm
+
         if substitution_info and final_ens_code:
             match_type_out = 'coating_substituted'
             match_type_ru = 'Совпадение после подбора правильного покрытия'
+        elif is_name_exact and final_ens_code:
+            match_type_out = 'name_exact'
+            match_type_ru = 'Совпадение по наименованию'
+        elif match_result.ens_code and match_result.match_type == 'exact':
+            match_type_out = 'parametric_full'
+            match_type_ru = 'Полное совпадение параметров с индексом'
+        elif match_result.ens_code and match_result.match_type == 'v2_exact':
+            match_type_out = 'v2_exact'
+            match_type_ru = 'Полное совпадение параметров с маской ENS'
         elif fuzzy_ens_code and not match_result.ens_code:
             match_type_out = 'fuzzy_fallback'
             match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
-        elif match_result.match_type == 'name_exact':
-            match_type_out = 'name_exact'
-            match_type_ru = 'Совпадение по наименованию'
-        elif match_result.match_type == 'exact':
-            match_type_out = 'parametric_full'
-            match_type_ru = 'Полное совпадение параметров с индексом'
-        elif match_result.match_type == 'v2_exact':
-            match_type_out = 'v2_exact'
-            match_type_ru = 'Полное совпадение параметров с маской ENS'
         else:
             match_type_out = match_result.match_type or None
             match_type_ru = 'Не определено'
@@ -1284,7 +1292,7 @@ class AutomatedParametricProcessor:
                 'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
                 'v2_computed': v2_computed if 'v2_computed' in locals() else False,
                 'coating_substitution': substitution_info,
-                'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params else None,
+                'fuzzy_mismatched_params': fuzzy_mismatched_params,
             },
             item_type=mask.item_type,
             standard=mask.standard
