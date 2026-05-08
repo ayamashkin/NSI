@@ -138,6 +138,7 @@ class MatchingConfig:
     coating_similarity_threshold: float = 0.8 # Порог similarity покрытия
     strict_union_keys: bool = False          # Union keys comparison mode
     debug_per_parameter: bool = True         # Детальный debug per-parameter в лог
+    fuzzy_params_comparison: bool = False    # Выводить fuzzy_params_comparison в JSON
 
 
 @dataclass

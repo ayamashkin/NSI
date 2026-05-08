@@ -171,6 +171,13 @@ matching:
   # false = только итоговый score кандидата (краткий режим).
   debug_per_parameter: true
 
+  # --- fuzzy_params_comparison ---
+  # true = в выходной JSON добавлять поле fuzzy_params_comparison с полной
+  # сводкой по всем проверенным параметрам (status: exact/token_matched/
+  # mismatched + extracted/ens_value/similarity).
+  # false = поле не добавляется (экономия размера JSON).
+  fuzzy_params_comparison: false
+
 # =============================================================================
 # Prompts Configuration
 # Настройки реестра промптов для LLM-генерации масок

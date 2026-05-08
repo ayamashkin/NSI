@@ -641,6 +641,7 @@ class AutomatedParametricProcessor:
                 'params_matched': {},
                 'params_mismatched': {},
                 'params_missing': [],
+                'params_comparison': {},  # полная сводка по всем параметрам (exact/token_matched/mismatched/missing)
             }
 
             for param_name, extracted_val in extracted_params.items():
@@ -660,6 +661,19 @@ class AutomatedParametricProcessor:
                     else:
                         sim = self._token_similarity(extracted_val, candidate_val)
                     matched = sim >= 0.5
+                    # Заполняем полную сводку params_comparison
+                    if sim >= 0.99:
+                        status = 'exact'
+                    elif matched:
+                        status = 'token_matched'
+                    else:
+                        status = 'mismatched'
+                    candidate_debug['params_comparison'][param_name] = {
+                        'status': status,
+                        'extracted': str(extracted_val),
+                        'ens_value': str(candidate_val) if candidate_val else None,
+                        'similarity': round(sim, 3) if candidate_val else 0.0,
+                    }
                     if matched:
                         matched_weight += weight * sim
                         candidate_debug['params_matched'][param_name] = f"'{extracted_val}' ~ '{candidate_val}' (sim={sim:.2f})"
@@ -671,6 +685,13 @@ class AutomatedParametricProcessor:
                         matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
                     except (ValueError, TypeError):
                         matched = str(extracted_val).strip() == str(candidate_val).strip()
+                    status = 'exact' if matched else 'mismatched'
+                    candidate_debug['params_comparison'][param_name] = {
+                        'status': status,
+                        'extracted': str(extracted_val),
+                        'ens_value': str(candidate_val) if candidate_val else None,
+                        'similarity': 1.0 if matched else 0.0,
+                    }
                     if matched:
                         matched_weight += weight
                         candidate_debug['params_matched'][param_name] = f"{extracted_val} == {candidate_val}"
@@ -1051,8 +1072,8 @@ class AutomatedParametricProcessor:
                         if best_candidate.get('params_mismatched'):
                             fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
                             logger.info(f"[PARAM_MATCH] Fuzzy mismatched params: {fuzzy_mismatched_params}")
-                        elif fuzzy_match:
-                            # Все параметры совпали — явно сохраняем пустой dict
+                        else:
+                            # Fuzzy запускался, mismatched нет — пустой dict (явно: несовпадений не было)
                             fuzzy_mismatched_params = {}
                 elif not ens_candidates:
                     logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
@@ -1254,8 +1275,13 @@ class AutomatedParametricProcessor:
             match_type_out = 'v2_exact'
             match_type_ru = 'Полное совпадение V2'
         elif fuzzy_ens_code and not match_result.ens_code:
-            match_type_out = 'fuzzy_fallback'
-            match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
+            # Если fuzzy нашел, но V2 подтвердил exact — это parametric_full
+            if v2_computed and v2_score >= 0.99:
+                match_type_out = 'parametric_full'
+                match_type_ru = 'Полное совпадение параметров (V2 + fuzzy)'
+            else:
+                match_type_out = 'fuzzy_fallback'
+                match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
         else:
             match_type_out = match_result.match_type or None
             match_type_ru = 'Не определено'
@@ -1296,6 +1322,7 @@ class AutomatedParametricProcessor:
                 'v2_computed': v2_computed if 'v2_computed' in locals() else False,
                 'coating_substitution': substitution_info,
                 'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
+                **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().fuzzy_params_comparison and fuzzy_debug else {}),
             },
             item_type=mask.item_type,
             standard=mask.standard
