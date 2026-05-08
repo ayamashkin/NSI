@@ -973,6 +973,7 @@ class AutomatedParametricProcessor:
         fuzzy_ens_code = None
         fuzzy_score = 0.0
         fuzzy_mismatched_params = None  # None = fuzzy не запускался, {} = fuzzy OK, {...} = mismatch
+        fuzzy_debug = []  # список debug-кандидатов (инициализируем для избежания UnboundLocalError)
 
         # Определяем итоговые params (fallback или обычные)
         final_matched_params = fallback_params if fallback_params else match_result.matched_params
