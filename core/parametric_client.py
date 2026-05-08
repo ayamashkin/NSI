@@ -5,11 +5,11 @@ Level 6: Параметрическое сопоставление с испол
 VERSION: 2026-05-07
 
 LAST_FIXES:
+  2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
   2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
   2026-05-07 12:10 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
   2026-05-07 11:45 UTC+3 — ленивая загрузка MatchingConfig через _get_matching_config()
   2026-05-07 11:30 UTC+3 — union keys comparison: корректная обработка пустых ключей
-  2026-05-07 11:15 UTC+3 — _find_in_ens_debug: подробный вывод кандидатов в лог
 """
 
 import re
@@ -479,7 +479,9 @@ class ParametricENSClient:
                     except (ValueError, TypeError):
                         required = []
 
-                match_result = self._find_in_ens(extracted_params, required, standard=standard, text=text, item_type=item_type)
+                # Remap params для поиска в ENS (ENS индекс использует нормализованные имена)
+                search_params = self._remap_params(extracted_params)
+                match_result = self._find_in_ens(search_params, required, standard=standard, text=text, item_type=item_type)
 
                 if match_result:
                     # Извлекаем данные из ENS
