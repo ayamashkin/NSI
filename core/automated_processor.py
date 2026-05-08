@@ -951,7 +951,7 @@ class AutomatedParametricProcessor:
         # пробуем token-based matching для текстовых параметров (покрытие, материал)
         fuzzy_ens_code = None
         fuzzy_score = 0.0
-        fuzzy_mismatched_params = None  # несовпавшие параметры (None = не применялся fuzzy)
+        fuzzy_mismatched_params = None  # None = fuzzy не запускался, {} = fuzzy OK, {...} = mismatch
 
         # Определяем итоговые params (fallback или обычные)
         final_matched_params = fallback_params if fallback_params else match_result.matched_params
@@ -1295,7 +1295,7 @@ class AutomatedParametricProcessor:
                 'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
                 'v2_computed': v2_computed if 'v2_computed' in locals() else False,
                 'coating_substitution': substitution_info,
-                'fuzzy_mismatched_params': fuzzy_mismatched_params,
+                'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
             },
             item_type=mask.item_type,
             standard=mask.standard
