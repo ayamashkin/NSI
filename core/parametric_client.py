@@ -5,11 +5,11 @@ Level 6: Параметрическое сопоставление с испол
 VERSION: 2026-05-07
 
 LAST_FIXES:
+  2026-05-08 13:10 UTC+3 — strict_union_keys: учитывается в _compare_param_sets (false=skip пустые ключи)
   2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
   2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
   2026-05-07 12:10 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
   2026-05-07 11:45 UTC+3 — ленивая загрузка MatchingConfig через _get_matching_config()
-  2026-05-07 11:30 UTC+3 — union keys comparison: корректная обработка пустых ключей
 """
 
 import re
@@ -900,18 +900,21 @@ class ParametricENSClient:
         Сравнение двух наборов параметров.
         Score=1.0 если все НЕ-ПУСТЫЕ параметры из ОБОИХ наборов совпадают.
         Ключи, пустые в ОБОИХ наборах — игнорируются.
-        Ключ, пустой только в одном наборе — mismatch (return 0.0).
+        Ключ, пустой только в одном наборе:
+          - strict_union_keys=true  → mismatch (return 0.0)
+          - strict_union_keys=false → skip (continue)
         """
         if not params_a or not params_b:
             return 0.0
 
-        # Проверяем debug_per_parameter из конфига
-        debug_detail = _get_matching_config().debug_per_parameter
+        config = _get_matching_config()
+        debug_detail = config.debug_per_parameter
+        strict_mode = getattr(config, 'strict_union_keys', False)
 
         # Параметры, которые не участвуют в сравнении (метаданные/служебные)
         skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
 
-        # Сравниваем по ОБЪЕДИНЕНИЮ ключей, но с корректной обработкой отсутствующих
+        # Сравниваем по ОБЪЕДИНЕНИЮ ключей
         all_keys = set(params_a.keys()) | set(params_b.keys())
         checked = 0
         matched = 0
@@ -929,11 +932,18 @@ class ParametricENSClient:
             if not str_a and not str_b:
                 continue
 
-            # Если один пустой (None/''), а другой нет — mismatch!
+            # Если один пустой (None/''), а другой нет
             if not str_a or not str_b:
-                if debug_detail:
-                    logger.debug(f"[_compare] KEY MISSING: {param} = '{val_a}' vs '{val_b}'")
-                return 0.0
+                if strict_mode:
+                    # Строгий режим: пустой ключ = mismatch
+                    if debug_detail:
+                        logger.debug(f"[_compare] KEY MISSING (strict): {param} = '{val_a}' vs '{val_b}'")
+                    return 0.0
+                else:
+                    # Нестрогий режим: пустой ключ = skip (не влияет на score)
+                    if debug_detail:
+                        logger.debug(f"[_compare] KEY SKIP (non-strict): {param} = '{val_a}' vs '{val_b}'")
+                    continue
 
             checked += 1
 

@@ -6,11 +6,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2025-05-06-fix9
 
 LAST_FIXES:
+  2026-05-08 13:15 UTC+3 — match_type: поддержка params_mask_exact + params_ens_exact
   2026-05-08 11:50 UTC+3 — fuzzy_mismatched_params: подробная информация о несовпавших параметрах в results.json
   2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
   2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
   2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
-  2026-05-07 12:10 UTC+3 — coating_substitution в details (original/corrected/material/reason)
 """
 
 import logging
@@ -1244,12 +1244,15 @@ class AutomatedParametricProcessor:
         elif is_name_exact and final_ens_code:
             match_type_out = 'name_exact'
             match_type_ru = 'Совпадение по наименованию'
-        elif match_result.ens_code and match_result.match_type == 'exact':
+        elif match_result.ens_code and match_result.match_type in ('exact', 'params_ens_exact'):
             match_type_out = 'parametric_full'
             match_type_ru = 'Полное совпадение параметров с индексом'
+        elif match_result.ens_code and match_result.match_type == 'params_mask_exact':
+            match_type_out = 'parametric_full'
+            match_type_ru = 'Полное совпадение параметров с маской ENS'
         elif match_result.ens_code and match_result.match_type == 'v2_exact':
             match_type_out = 'v2_exact'
-            match_type_ru = 'Полное совпадение параметров с маской ENS'
+            match_type_ru = 'Полное совпадение V2'
         elif fuzzy_ens_code and not match_result.ens_code:
             match_type_out = 'fuzzy_fallback'
             match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
