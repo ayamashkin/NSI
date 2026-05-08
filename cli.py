@@ -2,7 +2,9 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
-LAST_FIX: 2026-05-08 11:30 UTC+3 — ens auto-mapping: автогенерация ens_column_mapping.yaml из Excel
+LAST_FIX: 2026-05-08 12:00 UTC+3 — fuzzy_mismatched_params добавлен в выходной JSON row
+  2026-05-08 11:50 UTC+3 — match_type, match_type_ru, coating_substitution, mask_pattern в JSON row
+  2026-05-08 11:30 UTC+3 — ens auto-mapping: автогенерация ens_column_mapping.yaml из Excel
 """
 
 import click
@@ -464,7 +466,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             'mask_pattern': result.details.get('mask_pattern') if result.details else None,
             'match_type': result.details.get('match_type') if result.details else None,
             'match_type_ru': result.details.get('match_type_ru') if result.details else None,
-            'coating_substitution': result.details.get('coating_substitution') if result.details else None
+            'coating_substitution': result.details.get('coating_substitution') if result.details else None,
+            'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None
         }
         if include_details and result.details:
             row['details'] = result.details
