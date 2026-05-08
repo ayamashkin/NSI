@@ -2,7 +2,7 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
-LAST_FIX: 2026-05-07 14:50 UTC+3 — match_type_ru (русское описание); coating_substitution; cfg.resolve_service/model()
+LAST_FIX: 2026-05-08 11:30 UTC+3 — ens auto-mapping: автогенерация ens_column_mapping.yaml из Excel
 """
 
 import click
@@ -672,6 +672,25 @@ def diagnose(text, db, ens_index, llm, coating_map):
 def ens():
     """Команды для работы с ЕСН"""
     pass
+
+
+@ens.command('auto-mapping')
+@click.argument('excel_file', type=click.Path(exists=True))
+@click.option('--output', '-o', required=True, help='Путь для сохранения YAML')
+@click.option('--append', is_flag=True, help='Дополнить существующий YAML')
+def auto_mapping(excel_file, output, append):
+    """Автогенерация ens_column_mapping.yaml из Excel (snake_case)"""
+    from auto_mapping import generate_mapping
+    import yaml
+
+    click.echo(f"🔄 Автогенерация маппинга из {excel_file}...")
+    mapping = generate_mapping(excel_file, append=append, existing_yaml=output if append else None)
+
+    with open(output, 'w', encoding='utf-8') as f:
+        yaml.dump(mapping, f, allow_unicode=True, sort_keys=False)
+
+    total = sum(len(v) for v in mapping.get('category_mapping', {}).values())
+    click.echo(f"✅ Сохранено {total} маппингов: {output}")
 
 
 @ens.command()
