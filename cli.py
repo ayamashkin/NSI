@@ -295,33 +295,63 @@ def models(api_name):
 # =============================================================================
 
 def _init_llm_clients(settings, all_services=False):
-    """Инициализация LLM клиентов для всех настроенных сервисов."""
+    """Инициализация LLM клиентов.
+    По умолчанию — только default_service из mask_generation.
+    При all_services — все настроенные сервисы с валидными credentials."""
     llm_clients = {}
-    services = ['openwebui', 'mws', 'gigachat'] if all_services else ['openwebui', 'mws']
+
+    if all_services:
+        # Все настроенные сервисы (с проверкой credentials)
+        services = ['mws', 'mts_ai', 'gigachat', 'openwebui']
+    else:
+        # Только default_service из конфига
+        services = [settings.mask_generation.default_service]
+        logger.info(f"LLM: using default_service='{services[0]}'")
+
     for service_name in services:
-        if service_name in settings.api:
-            try:
-                cfg = settings.api[service_name]
-                if service_name == 'openwebui':
-                    from api_clients.openwebui import OpenWebUIClient
-                    llm_clients[service_name] = OpenWebUIClient(
-                        base_url=cfg.base_url, api_key=cfg.api_key,
-                        username=cfg.username, password=cfg.password
-                    )
-                elif service_name == 'mws':
-                    from api_clients.mws_gpt import MWSGPTClient
-                    llm_clients[service_name] = MWSGPTClient(
-                        base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
-                    )
-                elif service_name == 'gigachat':
-                    from api_clients.gigachat import GigaChatClient
-                    llm_clients[service_name] = GigaChatClient(
-                        base_url=cfg.base_url, api_key=cfg.api_key,
-                        scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
-                        timeout=cfg.timeout, verify_ssl=False
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to init {service_name}: {e}")
+        if service_name not in settings.api:
+            continue
+        try:
+            cfg = settings.api[service_name]
+            # --- Проверка credentials перед созданием клиента ---
+            if service_name == 'openwebui':
+                if not cfg.api_key and not (cfg.username and cfg.password):
+                    logger.debug(f"Skipping {service_name}: no credentials")
+                    continue
+                from api_clients.openwebui import OpenWebUIClient
+                llm_clients[service_name] = OpenWebUIClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key,
+                    username=cfg.username, password=cfg.password
+                )
+            elif service_name == 'mws':
+                if not cfg.api_key:
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                from api_clients.mws_gpt import MWSGPTClient
+                llm_clients[service_name] = MWSGPTClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
+                )
+            elif service_name == 'gigachat':
+                if not cfg.api_key:
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                from api_clients.gigachat import GigaChatClient
+                llm_clients[service_name] = GigaChatClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key,
+                    scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
+                    timeout=cfg.timeout, verify_ssl=False
+                )
+            elif service_name == 'mts_ai':
+                if not cfg.api_key:
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                from api_clients.mts_ai import MTSAIClient
+                llm_clients[service_name] = MTSAIClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
+                )
+            logger.info(f"LLM client initialized: {service_name}")
+        except Exception as e:
+            logger.warning(f"Failed to init {service_name}: {e}")
     return llm_clients
 
 
@@ -467,7 +497,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             'match_type': result.details.get('match_type') if result.details else None,
             'match_type_ru': result.details.get('match_type_ru') if result.details else None,
             'coating_substitution': result.details.get('coating_substitution') if result.details else None,
-            'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None
+            'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None,
+            'fuzzy_params_comparison': result.details.get('fuzzy_params_comparison') if result.details else None
         }
         if include_details and result.details:
             row['details'] = result.details
