@@ -176,7 +176,7 @@ matching:
   # сводкой по всем проверенным параметрам (status: exact/token_matched/
   # mismatched + extracted/ens_value/similarity).
   # false = поле не добавляется (экономия размера JSON).
-  fuzzy_params_comparison: false
+  fuzzy_params_comparison: true
 
 # =============================================================================
 # Prompts Configuration

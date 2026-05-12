@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-Загрузчик данных ЕНС из Excel.
+ENS Reference Loader Module
+Адаптивная загрузка справочника ЕСН с внешним конфигом маппинга.
 Поддерживает авто-маппинг колонок через ens_column_mapping.yaml
 и авто-генерацию snake_case ключей для немапленных колонок.
 
 LAST_FIXES:
+  - 2026-05-08 14:00 UTC+3 — восстановлены ENSCategory, ENSSchema, PromptsBasedTypeDetector из git
+  - 2026-05-08 13:50 UTC+3 — добавлен _auto_snake_case fallback в _row_to_normalized_dict
+  - 2026-05-08 13:40 UTC+3 — добавлены _transliterate и _auto_snake_case
   - 2026-05-08 10:30 UTC+3 — авто-транслитерация немапленных колонок в snake_case
   - 2026-05-08 10:15 UTC+3 — fallback _auto_snake_case для всех неизвестных колонок
-  - 2026-05-07 18:20 UTC+3 — поддержка 129 колонок Excel
-  - 2026-05-07 14:30 UTC+3 — оптимизация загрузки индекса
-  - 2026-05-07 11:45 UTC+3 — базовая структура загрузчика
 """
 
 import re
+import yaml
+import pandas as pd
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Any, Optional, Set, Tuple
 from dataclasses import dataclass, field
-
-try:
-    import pandas as pd
-    import yaml
-except ImportError:
-    raise ImportError("pip install pandas pyyaml")
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# Транслитерация (общая с auto_mapping.py)
+# Транслитерация
 # ---------------------------------------------------------------------------
 
 _TRANSLIT_MAP = {
@@ -56,7 +55,6 @@ def _auto_snake_case(col_name: str) -> str:
     """
     if not col_name:
         return 'unknown'
-
     # Заменяем скобки, запятые, слэши на пробелы
     name = re.sub(r'[(),/]', ' ', col_name)
     # Точки → подчеркивание
@@ -76,288 +74,600 @@ def _auto_snake_case(col_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Конфигурация маппинга колонок
+# Классы из оригинального loader.py (git)
 # ---------------------------------------------------------------------------
+
+class ENSCategory(Enum):
+    """Категории номенклатуры в ЕСН."""
+    HARDWARE = "hardware"
+    WASHER = "hardware_washer"
+    ROLLED_METAL = "rolledmetal"
+    ERI = "eri"
+    EKB = "ekb"
+    MATERIALS = "materials"
+    UNKNOWN = "unknown"
+
 
 @dataclass
 class ENSColumnMapping:
-    """Маппинг колонок Excel → нормализованные ключи."""
-
+    """Конфигурация маппинга колонок."""
     base_mapping: Dict[str, str] = field(default_factory=dict)
-    """Базовые колонки: 'Код' → 'код'"""
-
     category_mapping: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    """По категориям: 'hardware' → {'D п�"东山再起': 'd'}"""
-
-    column_mapping: Dict[str, str] = field(default_factory=dict)
-    """Плоский маппинг всех колонок."""
-
-    def __post_init__(self):
-        """Строим плоский маппинг из base + category."""
-        flat = dict(self.base_mapping)
-        for cat_map in self.category_mapping.values():
-            flat.update(cat_map)
-        self.column_mapping = flat
-        logger.info(
-            "ENSColumnMapping: %d base + %d category = %d total columns",
-            len(self.base_mapping),
-            sum(len(m) for m in self.category_mapping.values()),
-            len(self.column_mapping),
-        )
+    auto_patterns: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_yaml(cls, yaml_path: str) -> "ENSColumnMapping":
-        """Загружает маппинг из YAML-файла."""
-        path = Path(yaml_path)
+    def load(cls, path: Optional[str] = None) -> 'ENSColumnMapping':
+        """Загрузка маппинга из YAML."""
+        if path is None:
+            path = "config/ens_column_mapping.yaml"
+
+        path = Path(path)
         if not path.exists():
-            logger.warning("Column mapping YAML not found: %s", yaml_path)
-            return cls()
+            # Пробуем альтернативные пути
+            alt_paths = [
+                Path("ens_column_mapping.yaml"),
+                Path("../config/ens_column_mapping.yaml"),
+            ]
+            for alt in alt_paths:
+                if alt.exists():
+                    path = alt
+                    break
 
-        with open(path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
+        if not path.exists():
+            logger.warning(f"Mapping config not found at {path}, using defaults")
+            return cls._default_mapping()
 
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+
+            # Компилируем паттерны
+            patterns = {}
+            for pattern, mapped in data.get('auto_mapping_patterns', {}).items():
+                try:
+                    patterns[re.compile(pattern, re.IGNORECASE)] = mapped
+                except re.error as e:
+                    logger.warning(f"Invalid pattern '{pattern}': {e}")
+
+            return cls(
+                base_mapping=data.get('base_mapping', {}),
+                category_mapping=data.get('category_mapping', {}),
+                auto_patterns=patterns
+            )
+        except Exception as e:
+            logger.error(f"Failed to load mapping config: {e}")
+            return cls._default_mapping()
+
+    @classmethod
+    def _default_mapping(cls) -> 'ENSColumnMapping':
+        """Маппинг по умолчанию."""
         return cls(
-            base_mapping=data.get('base_mapping', {}),
-            category_mapping=data.get('category_mapping', {}),
+            base_mapping={
+                'код': 'код',
+                'наименование': 'наименование',
+                'полное наименование': 'полное_наименование',
+                'mdm key': 'mdm_key',
+                'нтд': 'стандарт',
+            },
+            category_mapping={},
+            auto_patterns={}
         )
 
-    def auto_map_column(self, col_name: str) -> Optional[str]:
-        """
-        Определяет нормализованный ключ для колонки.
-        Сначала ищет в явном маппинге, затем применяет авто-snake_case.
-        """
-        if not col_name:
+    def get_mapping_for_category(self, category: str) -> Dict[str, str]:
+        """Получение полного маппинга для категории."""
+        result = dict(self.base_mapping)
+        cat_map = self.category_mapping.get(category, {})
+        result.update(cat_map)
+        return result
+
+    def auto_map_column(self, column_name: str) -> Optional[str]:
+        """Авто-маппинг колонки по паттерну."""
+        if not column_name:
             return None
-
-        # 1. Прямое совпадение в маппинге
-        if col_name in self.column_mapping:
-            return self.column_mapping[col_name]
-
-        # 2. Регистро-независимый поиск
-        col_lower = col_name.lower().strip()
-        for key, val in self.column_mapping.items():
-            if key.lower().strip() == col_lower:
-                return val
-
-        # 3. Regex-маппинг для типовых паттернов
-        regex_patterns = {
-            r'^код$': 'код',
-            r'^наименование$': 'наименование',
-            r'^полное\s*наименование$': 'полное_наименование',
-            r'^тип\s*позиции$': 'тип',
-            r'^нтд$': 'нтд',
-            r'^d\s*\(?п.*?\)?$': 'd',
-            r'^d\s*$': 'd',
-            r'^d,\s*мм$': 'd',
-            r'^l\s*\(?п.*?\)?$': 'l',
-            r'^l$': 'l',
-            r'^l,\s*мм$': 'l',
-            r'^покрытие$': 'покрытие',
-            r'^класс\s*прочности$': 'класс_прочности',
-            r'^материал$': 'материал',
-            r'^стандарт$': 'стандарт',
-            r'^тип$': 'тип',
-        }
-
-        for pattern, normalized in regex_patterns.items():
-            if re.search(pattern, col_name, re.IGNORECASE):
-                return normalized
-
-        # 4. АВТО-ГЕНЕРАЦИЯ: транслитерация + snake_case
-        auto_key = _auto_snake_case(col_name)
-        if auto_key and auto_key != 'unknown':
-            logger.debug("Auto-mapped column '%s' → '%s'", col_name, auto_key)
-            return auto_key
-
+        col_lower = column_name.lower()
+        for pattern, mapped_name in self.auto_patterns.items():
+            if pattern.search(col_lower):
+                return mapped_name
         return None
 
-    def _row_to_normalized_dict(self, row: pd.Series) -> Dict[str, Any]:
-        """
-        Преобразует строку DataFrame в нормализованный словарь.
-        Все немапленные колонки получают авто-snake_case ключи.
-        """
-        result = {}
-        for col_name, value in row.items():
-            if pd.isna(value):
-                continue
 
-            # Определяем нормализованный ключ
-            normalized_key = self.auto_map_column(col_name)
-            if normalized_key is None:
-                # Крайний fallback — авто-snake_case из оригинального имени
-                normalized_key = _auto_snake_case(col_name)
+class PromptsBasedTypeDetector:
+    """Определение типа номенклатуры на основе prompts.yaml (с кэшированием)."""
 
-            # Сохраняем значение (строка или число)
-            if isinstance(value, (int, float)):
-                result[normalized_key] = value
-            else:
-                result[normalized_key] = str(value).strip()
+    # Класс-level кэш для prompts
+    _cache: Dict[str, Dict] = {}
 
-        return result
+    def __init__(self, prompts_path: str = "config/prompts.yaml"):
+        self.prompts_path = Path(prompts_path) if prompts_path else Path("config/prompts.yaml")
+        self.prompts: Dict[str, Any] = {}
+        self.category_map: Dict[str, str] = {}
+        self._load_prompts()
+
+    def _load_prompts(self):
+        """Загрузка prompts.yaml с кэшированием."""
+        cache_key = str(self.prompts_path)
+
+        # Проверяем кэш
+        if cache_key in PromptsBasedTypeDetector._cache:
+            cached = PromptsBasedTypeDetector._cache[cache_key]
+            self.prompts = cached['prompts']
+            self.category_map = cached['category_map']
+            logger.debug(f"Using cached prompts from {self.prompts_path}")
+            return
+
+        # Ищем файл
+        if not self.prompts_path.exists():
+            alt_paths = [
+                Path("prompts.yaml"),
+                Path("../config/prompts.yaml"),
+                Path("../../config/prompts.yaml"),
+            ]
+            for alt in alt_paths:
+                if alt.exists():
+                    self.prompts_path = alt
+                    cache_key = str(self.prompts_path)
+                    break
+
+        if not self.prompts_path.exists():
+            logger.warning(f"prompts.yaml not found at {self.prompts_path}")
+            return
+
+        try:
+            with open(self.prompts_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+                self.prompts = data.get('prompts', {})
+
+            for pid, cfg in self.prompts.items():
+                cat = cfg.get('category', '')
+                if cat:
+                    self.category_map[cat] = pid
+
+            # Сохраняем в кэш
+            PromptsBasedTypeDetector._cache[cache_key] = {
+                'prompts': self.prompts,
+                'category_map': self.category_map
+            }
+
+            logger.info(f"Loaded {len(self.prompts)} prompts from {self.prompts_path} (cached)")
+        except Exception as e:
+            logger.error(f"Failed to load prompts.yaml: {e}")
+
+    def detect_type(self, text: str) -> Tuple[Optional[str], Optional[str], float]:
+        """Определение типа номенклатуры по тексту."""
+        if not self.prompts:
+            return None, None, 0.0
+
+        text_lower = (text or '').lower()
+        best_match = None
+        best_category = None
+        best_score = 0
+
+        for prompt_id, cfg in self.prompts.items():
+            keywords = cfg.get('keywords', [])
+            category = cfg.get('category', '')
+            score = 0
+
+            for keyword in keywords:
+                if keyword is None:
+                    continue
+                keyword = str(keyword).strip()
+
+                if keyword.startswith('regex:') or keyword.startswith('re:'):
+                    pattern = keyword.split(':', 1)[1].strip()
+                    try:
+                        if re.search(pattern, text, re.IGNORECASE):
+                            score += 3
+                    except re.error:
+                        continue
+
+                elif '*' in keyword or '?' in keyword:
+                    pattern = keyword.replace('.', r'\.').replace('*', '.*').replace('?', '.')
+                    try:
+                        if re.search(pattern, text_lower):
+                            score += 2
+                    except re.error:
+                        continue
+
+                else:
+                    if keyword.lower() in text_lower:
+                        score += 1
+                        if text_lower.startswith(keyword.lower()):
+                            score += 1
+
+            if score > best_score:
+                best_score = score
+                best_match = prompt_id
+                best_category = category
+
+        confidence = min(best_score / 5, 1.0) if best_score > 0 else 0.0
+        return best_match, best_category, confidence
+
+
+@dataclass
+class ENSSchema:
+    """Гибкая схема колонок для категории ЕСН."""
+    category: ENSCategory
+    column_mapping: Dict[str, str] = field(default_factory=dict)
+    content_indicators: List[str] = field(default_factory=list)
+    name_columns: List[str] = field(default_factory=list)
+
+
+class ENSSchemaRegistry:
+    """Реестр схем с адаптивным определением."""
+
+    BASE_COLUMNS = ['Код', 'Наименование', 'Полное наименование',
+                    'MDM Key', 'НТД', 'Торговая марка', 'Марка материала']
+
+    @classmethod
+    def detect_schema(cls, df: pd.DataFrame, sample_rows: int = 10,
+                      prompts_path: Optional[str] = None) -> Tuple[ENSCategory, Optional[str], float]:
+        """Автоопределение схемы по колонкам, содержимому и prompts.yaml."""
+        columns = set((c or '').lower() for c in df.columns if c)
+
+        try:
+            sample_text = ' '.join(
+                df.iloc[:sample_rows].fillna('').astype(str).values.flatten()
+            ).lower()
+        except Exception as e:
+            logger.warning(f"Failed to get sample text: {e}")
+            sample_text = ''
+
+        detector = PromptsBasedTypeDetector(prompts_path) if prompts_path else PromptsBasedTypeDetector()
+        prompt_id, category_str, prompt_confidence = detector.detect_type(sample_text[:1000])
+
+        if prompt_id and category_str:
+            category_map = {
+                'hardware': ENSCategory.HARDWARE,
+                'hardware_washer': ENSCategory.WASHER,
+                'rolledmetal': ENSCategory.ROLLED_METAL,
+                'eri': ENSCategory.ERI,
+                'ekb': ENSCategory.EKB,
+            }
+            detected_cat = category_map.get(category_str, ENSCategory.UNKNOWN)
+            if detected_cat != ENSCategory.UNKNOWN:
+                logger.info(f"Detected via prompts.yaml: {detected_cat.value} (prompt: {prompt_id}, confidence: {prompt_confidence:.2f})")
+                return detected_cat, prompt_id, prompt_confidence
+
+        return ENSCategory.UNKNOWN, None, 0.0
 
 
 # ---------------------------------------------------------------------------
-# Загрузчик данных ЕНС
+# ENSLoader с авто-маппингом
 # ---------------------------------------------------------------------------
 
 class ENSLoader:
-    """Загружает и индексирует данные ЕНС из Excel."""
+    """Адаптивный загрузчик справочника ЕСН с внешним конфигом маппинга."""
 
-    def __init__(
-        self,
-        excel_path: str,
-        column_mapping_yaml: Optional[str] = None,
-        sheet_name: Optional[str] = None,
-    ):
-        self.excel_path = Path(excel_path)
-        self.sheet_name = sheet_name
-        self.schema = ENSColumnMapping.from_yaml(column_mapping_yaml) if column_mapping_yaml else ENSColumnMapping()
-        self._df: Optional[pd.DataFrame] = None
-        self._index: List[Dict[str, Any]] = []
+    # Класс-level кэш для детекторов
+    _detector_cache: Dict[str, PromptsBasedTypeDetector] = {}
 
-    def load(self) -> "ENSLoader":
-        """Загружает Excel в DataFrame."""
-        if not self.excel_path.exists():
-            raise FileNotFoundError(f"ENS Excel not found: {self.excel_path}")
+    def __init__(self, file_path: str, category: Optional[ENSCategory] = None,
+                 adaptive: bool = True, prompts_path: Optional[str] = None,
+                 mapping_config_path: Optional[str] = None):
+        self.file_path = Path(file_path)
+        self.category = category
+        self.adaptive = adaptive
+        self.prompts_path = prompts_path
+        self.mapping_config_path = mapping_config_path
+        self.schema: Optional[ENSSchema] = None
+        self.df: Optional[pd.DataFrame] = None
+        self.items: List[Dict[str, Any]] = []
+        self.available_columns: List[str] = []
+        self.detected_prompt_id: Optional[str] = None
+        self.detection_confidence: float = 0.0
+        self.column_mapping: ENSColumnMapping = ENSColumnMapping()
+        self._detector: Optional[PromptsBasedTypeDetector] = None
+        self._reverse_mapping: Dict[str, str] = {}  # normalized_field -> source_excel_column
 
-        logger.info("Loading ENS data from %s", self.excel_path)
-        self._df = pd.read_excel(self.excel_path, sheet_name=self.sheet_name)
+    def load(self) -> List[Dict[str, Any]]:
+        """Загрузка и нормализация данных ЕСН."""
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"ENS file not found: {self.file_path}")
 
-        # Авто-обнаружение всех колонок
-        all_columns = list(self._df.columns)
-        mapped_count = sum(1 for c in all_columns if self.schema.auto_map_column(c) in self.schema.column_mapping.values())
-        auto_mapped = sum(
-            1 for c in all_columns
-            if self.schema.auto_map_column(c) and self.schema.auto_map_column(c) not in self.schema.column_mapping.values()
-        )
-        unmapped = len(all_columns) - mapped_count - auto_mapped
+        logger.info(f"Loading ENS reference: {self.file_path}")
+
+        # Загружаем конфиг маппинга
+        self.column_mapping = ENSColumnMapping.load(self.mapping_config_path)
+
+        try:
+            self.df = pd.read_excel(self.file_path)
+            raw_columns = list(self.df.columns)
+            self.available_columns = [str(c) if c is not None else f"unnamed_{i}" for i, c in enumerate(raw_columns)]
+            self.df.columns = self.available_columns
+            logger.info(f"Available columns: {len(self.available_columns)}")
+        except Exception as e:
+            logger.error(f"Failed to load ENS Excel: {e}")
+            raise
+
+        if self.category is None:
+            self.category, self.detected_prompt_id, self.detection_confidence = \
+                ENSSchemaRegistry.detect_schema(self.df, prompts_path=self.prompts_path)
+
+        # Получаем маппинг для категории
+        category_str = self.category.value if self.category else 'unknown'
+        mapping = self.column_mapping.get_mapping_for_category(category_str)
+
+        # Обратный маппинг: normalized_field -> source Excel column
+        self._reverse_mapping = {}
+
+        # Добавляем авто-маппинг для неизвестных колонок
+        explicitly_mapped = 0
+        auto_pattern_mapped = 0
+        auto_snake_mapped = 0
+
+        for col in self.available_columns:
+            if not col:
+                continue
+            col_lower = col.lower()
+            # Проверяем явный маппинг
+            if any(col_lower == k.lower() for k in mapping.keys()):
+                explicitly_mapped += 1
+                continue
+            # Пробуем regex-паттерны из YAML
+            auto_mapped = self.column_mapping.auto_map_column(col)
+            if auto_mapped:
+                mapping[col] = auto_mapped
+                self._reverse_mapping[auto_mapped] = col
+                auto_pattern_mapped += 1
+                continue
+            # АВТО-SNAKE_CASE: транслитерация для оставшихся колонок
+            snake_key = _auto_snake_case(col)
+            if snake_key and snake_key != 'unknown':
+                mapping[col] = snake_key
+                self._reverse_mapping[snake_key] = col
+                auto_snake_mapped += 1
+
+        # Также записываем reverse для явного маппинга
+        for src_col, dst_field in mapping.items():
+            if dst_field not in self._reverse_mapping:
+                self._reverse_mapping[dst_field] = src_col
 
         logger.info(
-            "ENS columns: %d total | %d explicitly mapped | %d auto-mapped | %d unmapped",
-            len(all_columns), mapped_count, auto_mapped, unmapped,
+            "ENS column mapping: %d explicit + %d auto_pattern + %d auto_snake = %d total (%d source columns)",
+            explicitly_mapped, auto_pattern_mapped, auto_snake_mapped,
+            len(mapping), len(self.available_columns)
         )
 
-        # Логируем немапленные колонки
-        if unmapped > 0:
-            unmapped_cols = [
-                c for c in all_columns
-                if self.schema.auto_map_column(c) is None
-            ]
-            logger.warning("Unmapped columns (%d): %s", len(unmapped_cols), unmapped_cols[:20])
+        self.schema = ENSSchema(
+            category=self.category or ENSCategory.UNKNOWN,
+            column_mapping=mapping,
+            name_columns=['Полное наименование', 'Наименование', 'Код', 'НТД']
+        )
 
+        self.items = self._normalize_dataframe()
+
+        logger.info(f"Loaded {len(self.items)} ENS items for category: {category_str}")
+        return self.items
+
+    @property
+    def reverse_mapping(self) -> Dict[str, str]:
+        """Обратный маппинг: normalized_field -> исходная колонка Excel."""
+        return self._reverse_mapping.copy()
+
+    def _normalize_dataframe(self) -> List[Dict[str, Any]]:
+        """Нормализация DataFrame в список словарей."""
+        items = []
+
+        for _, row in self.df.iterrows():
+            item = self._row_to_normalized_dict(row)
+            if item.get('полное_наименование') or item.get('наименование'):
+                items.append(item)
+
+        return items
+
+    def _row_to_normalized_dict(self, row: pd.Series) -> Dict[str, Any]:
+        """Преобразование строки DataFrame в нормализованный словарь."""
+        result = {
+            '_ens_category': self.category.value if self.category else 'unknown',
+            '_source_file': str(self.file_path.name),
+            '_available_columns': self.available_columns,
+            '_detected_prompt_id': self.detected_prompt_id,
+            '_detection_confidence': self.detection_confidence,
+        }
+
+        for col in self.available_columns:
+            value = row[col]
+
+            if pd.isna(value):
+                value = None
+            else:
+                value = str(value).strip()
+                if col and any(x in (col or '').lower() for x in ['длина', 'диаметр', 'толщина', 'ширина', 'шаг', 'масса']):
+                    try:
+                        value = self._extract_numeric(value)
+                    except:
+                        pass
+
+            # Используем маппинг из конфига (включая авто-snake_case)
+            key = self.schema.column_mapping.get(col)
+            if key is None:
+                # Крайний fallback — авто-snake_case
+                key = _auto_snake_case(col)
+            result[key] = value
+
+            col_safe = (col or "").lower().replace(" ", "_")
+            original_key = f"_original_{col_safe}"
+            result[original_key] = value
+
+        self._add_implicit_params(result)
+
+        return result
+
+    def _extract_numeric(self, value: str) -> Any:
+        """Извлечение числового значения из строки."""
+        if not value:
+            return None
+        match = re.search(r'[\d]+[.,]?[\d]*', str(value).replace(',', '.'))
+        if match:
+            num_str = match.group().replace(',', '.')
+            try:
+                return float(num_str) if '.' in num_str else int(num_str)
+            except ValueError:
+                return num_str
+        return value
+
+    def _get_detector(self) -> PromptsBasedTypeDetector:
+        """Получение детектора (с кэшированием)."""
+        cache_key = str(self.prompts_path or "default")
+
+        if self._detector is None:
+            if cache_key in ENSLoader._detector_cache:
+                self._detector = ENSLoader._detector_cache[cache_key]
+                logger.debug("Using cached detector")
+            else:
+                self._detector = PromptsBasedTypeDetector(self.prompts_path) if self.prompts_path else PromptsBasedTypeDetector()
+                ENSLoader._detector_cache[cache_key] = self._detector
+                logger.debug("Created new detector and cached")
+
+        return self._detector
+
+    def _add_implicit_params(self, item: Dict[str, Any]):
+        """Добавление неявных параметров с использованием prompts.yaml."""
+        name = str(item.get('полное_наименование') or item.get('наименование') or '')
+
+        if not name:
+            logger.debug("Empty name, skipping type detection")
+            return
+
+        try:
+            detector = self._get_detector()
+            prompt_id, category, confidence = detector.detect_type(name)
+        except Exception as e:
+            logger.warning(f"Type detection failed for '{name[:50]}...': {e}")
+            prompt_id, category, confidence = None, None, 0.0
+
+        if prompt_id:
+            item['_detected_prompt_id'] = prompt_id
+            item['_detected_category'] = category
+            item['_detection_confidence'] = confidence
+
+            if category:
+                type_map = {
+                    'hardware': 'крепеж',
+                    'hardware_washer': 'шайба',
+                    'rolledmetal': 'прокат',
+                    'eri': 'эри',
+                    'ekb': 'экб',
+                }
+                item['тип'] = type_map.get(category, category)
+                item['_implicit_тип'] = True
+
+    def get_column_info(self) -> Dict[str, Any]:
+        """Получение информации о колонках файла."""
+        if self.df is None:
+            raise RuntimeError("DataFrame not loaded. Call load() first.")
+
+        info = {
+            'total_columns': len(self.available_columns),
+            'columns': self.available_columns,
+            'mapped_columns': list(self.schema.column_mapping.keys()) if self.schema else [],
+            'category': self.category.value if self.category else None,
+            'detected_prompt_id': self.detected_prompt_id,
+            'detection_confidence': self.detection_confidence,
+            'sample_values': {}
+        }
+
+        for col in self.available_columns[:20]:
+            non_null = self.df[col].dropna()
+            if len(non_null) > 0:
+                info['sample_values'][col] = str(non_null.iloc[0])[:50]
+
+        return info
+
+    def get_training_examples(self, min_params: int = 2) -> List[Dict]:
+        """Получение обучающих примеров для NER/LLM."""
+        examples = []
+
+        for item in self.items:
+            full_name = item.get('полное_наименование') or item.get('наименование')
+            if not full_name:
+                continue
+
+            params = {k: v for k, v in item.items()
+                     if not k.startswith('_') and v is not None and v != ''}
+
+            if len(params) >= min_params:
+                examples.append({
+                    'text': full_name,
+                    'params': params,
+                    'entities': self._extract_entities(full_name, params),
+                    'ens_code': item.get('код'),
+                    'mdm_key': item.get('mdm_key'),
+                    'detected_prompt_id': item.get('_detected_prompt_id'),
+                    'detected_category': item.get('_detected_category'),
+                })
+
+        return examples
+
+    def _extract_entities(self, text: str, params: Dict) -> List[Dict]:
+        """Извлечение позиций сущностей в тексте для NER."""
+        entities = []
+        if not text:
+            return entities
+
+        text_lower = text.lower()
+
+        for param_name, param_value in params.items():
+            if param_value is None or not isinstance(param_value, (str, int, float)):
+                continue
+
+            param_value = str(param_value)
+            if not param_value:
+                continue
+
+            value_lower = param_value.lower()
+            if value_lower in text_lower:
+                start = text_lower.index(value_lower)
+                end = start + len(value_lower)
+                entities.append({
+                    'start': start,
+                    'end': end,
+                    'label': param_name.upper(),
+                    'value': param_value
+                })
+
+        return sorted(entities, key=lambda x: x['start'])
+
+    def build_fuzzy_index(self):
+        """Построение индекса для нечеткого поиска."""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        texts = []
+        for item in self.items:
+            name = item.get('полное_наименование') or item.get('наименование', '')
+            texts.append(str(name))
+
+        if not texts:
+            return None
+
+        self.vectorizer = TfidfVectorizer(
+            ngram_range=(2, 4),
+            analyzer='char',
+            lowercase=True
+        )
+        self.tfidf_matrix = self.vectorizer.fit_transform(texts)
+        self.indexed_items = self.items
+
+        logger.info(f"Built fuzzy index for {len(texts)} ENS items")
         return self
 
-    def build_index(self) -> List[Dict[str, Any]]:
-        """Строит нормализованный индекс из всех строк Excel."""
-        if self._df is None:
-            self.load()
+    def find_similar(self, query: str, k: int = 5) -> List[Dict]:
+        """Поиск похожих записей в ЕСН."""
+        if not hasattr(self, 'vectorizer'):
+            self.build_fuzzy_index()
 
-        logger.info("Building ENS index from %d rows...", len(self._df))
-        self._index = []
+        from sklearn.metrics.pairwise import cosine_similarity
 
-        for idx, row in self._df.iterrows():
-            normalized = self.schema._row_to_normalized_dict(row)
-            if normalized:
-                # Добавляем мета-информацию
-                normalized['_source_row'] = int(idx)
-                normalized['_source_file'] = str(self.excel_path.name)
-                self._index.append(normalized)
+        query_vec = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
 
-        logger.info("ENS index built: %d entries", len(self._index))
-        return self._index
+        top_indices = similarities.argsort()[-k:][::-1]
 
-    def get_index(self) -> List[Dict[str, Any]]:
-        """Возвращает построенный индекс."""
-        if not self._index:
-            self.build_index()
-        return self._index
-
-    def search(
-        self,
-        standard: Optional[str] = None,
-        item_type: Optional[str] = None,
-        **kwargs,
-    ) -> List[Dict[str, Any]]:
-        """Простой поиск по индексу."""
-        results = self._index
-
-        if standard:
-            results = [r for r in results if r.get('стандарт') == standard or r.get('standard') == standard]
-        if item_type:
-            results = [r for r in results if r.get('тип') == item_type or r.get('item_type') == item_type]
-
-        for key, value in kwargs.items():
-            results = [r for r in results if r.get(key) == value]
+        results = []
+        for idx in top_indices:
+            if similarities[idx] > 0.1:
+                item = dict(self.indexed_items[idx])
+                item['_similarity'] = float(similarities[idx])
+                results.append(item)
 
         return results
-
-    def get_column_stats(self) -> Dict[str, int]:
-        """Возвращает статистику по колонкам (для отладки)."""
-        if self._df is None:
-            self.load()
-
-        stats = {}
-        for col in self._df.columns:
-            key = self.schema.auto_map_column(col) or _auto_snake_case(col)
-            non_null = self._df[col].notna().sum()
-            stats[key] = int(non_null)
-
-        return stats
-
-
-# ---------------------------------------------------------------------------
-# Фабрика загрузчиков
-# ---------------------------------------------------------------------------
-
-def create_ens_loader(
-    excel_path: str,
-    mapping_yaml: Optional[str] = None,
-    category: Optional[str] = None,
-) -> ENSLoader:
-    """
-    Фабричная функция для создания загрузчика ЕНС.
-
-    Args:
-        excel_path: Путь к Excel-файлу ЕНС
-        mapping_yaml: Путь к ens_column_mapping.yaml (опционально)
-        category: Категория для фильтрации (например 'hardware')
-
-    Returns:
-        ENSLoader: Настроенный и загруженный загрузчик
-    """
-    loader = ENSLoader(excel_path, column_mapping_yaml=mapping_yaml)
-    loader.load()
-
-    if category:
-        # Фильтруем по категории если указана
-        logger.info("Filtering ENS by category: %s", category)
-
-    loader.build_index()
-    return loader
-
-
-# ---------------------------------------------------------------------------
-# Точка входа для отладки
-# ---------------------------------------------------------------------------
-
-if __name__ == '__main__':
-    import sys
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    if len(sys.argv) < 2:
-        print("Usage: python loader.py <path_to_ens.xlsx> [mapping.yaml]")
-        sys.exit(1)
-
-    excel = sys.argv[1]
-    mapping = sys.argv[2] if len(sys.argv) > 2 else None
-
-    loader = create_ens_loader(excel, mapping_yaml=mapping)
-
-    print(f"\nIndex entries: {len(loader.get_index())}")
-    print(f"Columns mapped: {len(loader.schema.column_mapping)}")
-
-    # Выводим статистику
-    stats = loader.get_column_stats()
-    print(f"\nTop columns by fill rate:")
-    for col, count in sorted(stats.items(), key=lambda x: -x[1])[:20]:
-        print(f"  {col}: {count}")

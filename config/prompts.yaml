@@ -23,8 +23,8 @@ prompts:
       - "анкер"
       - "саморез"
       - "шайба"
-    service: "openwebui"
-    model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
+    #service: "openwebui"
+    #model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
     #service: "gigachat"
     #model: "GigaChat-2"
 
@@ -39,8 +39,8 @@ prompts:
     category: "hardware_washer"
     keywords:
       - "шайбы"
-    service: "openwebui"
-    model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
+    #service: "openwebui"
+    #model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
     #service: "gigachat"
     #model: "GigaChat-2"
 
@@ -71,8 +71,8 @@ prompts:
       - "прутки"
         # Регулярное выражение
       - 'regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\.|ст\.сорт\.|ст\.констр\.|ст\.КАЧ\.'
-    service: "openwebui"
-    model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
+    #service: "openwebui"
+    #model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
     #service: "gigachat"
     #model: "GigaChat-2"
 
