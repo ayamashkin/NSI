@@ -916,12 +916,12 @@ class LLMMaskGenerator:
         return selected[:n]
 
     def _preprocess_json_text(self, text: str) -> str:
-        r"""Предобработка JSON текста от LLM."""
-        placeholder = '\x00DBL\x00'
-        result = text.replace('\\', placeholder)
-        result = re.sub(r'\([^"\\/bfnrtu])', r'\\\\\1', result)
-        result = result.replace(placeholder, '\\')
-        return result
+        r"""Предобработка JSON текста от LLM.
+        LLM часто генерирует regex с одиночными backslash (\s, \d, \w) внутри JSON-строк,
+        что делает JSON невалидным (JSON допускает только \\, \", \/, \b, \f, \n, \r, \t, \uXXXX).
+        Экранируем regex-escapes через negative lookbehind, сохраняя уже двойные (\\) нетронутыми.
+        """
+        return re.sub(r'(?<!\\)\\([^"\\/bfnrtu])', r'\\\\\1', text)
 
     def _extract_json(self, text):
         """Извлечение JSON из ответа LLM."""
