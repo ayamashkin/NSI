@@ -2,7 +2,13 @@
 LLM Mask Generator Module
 Level 2: Автоматическая генерация regex масок с помощью LLM.
 Модель/температура/system_prompt определяются автоматически по keywords из prompts.yaml.
-LAST_FIX: 2026-05-07 08:28 UTC+3 — _preprocess_json_text: escape ALL regex backslashes (\., \-, \[, ...) for JSON compatibility
+
+LAST_FIXES:
+  - 2026-05-12 14:00 UTC+3 — LLMProvider: добавлен MTS_AI; resolve_service/resolve_model из settings
+  - 2026-05-12 13:50 UTC+3 — _get_prompt_config: убраны жесткие fallback 'openwebui'/'qwen2.5:7b'
+  - 2026-05-12 13:45 UTC+3 — _build_retry_config: resolve service/model через mask_generation defaults
+  - 2026-05-07 08:28 UTC+3 — _preprocess_json_text: escape ALL regex backslashes
+  - 2026-05-07 08:25 UTC+3 — Базовая структура llm_mask_generator
 """
 
 import re
@@ -21,6 +27,7 @@ class LLMProvider(str, Enum):
     OPENWEBUI = "openwebui"
     MWS = "mws"
     GIGACHAT = "gigachat"
+    MTS_AI = "mts_ai"
 
 
 @dataclass
@@ -42,8 +49,10 @@ class GenerationAttempt:
 class LLMMaskGenerator:
     """
     Генератор масок через LLM.
-    Автоматически определяет конфигурацию (service, model, temperature, system_prompt)
-    по keywords из prompts.yaml — та же логика, что и в NomenclatureProcessor.
+    Правила выбора сервиса/модели:
+      1. Если в prompts.yaml указаны service/model → используем их
+      2. Если не указаны → берем из mask_generation.default_service/default_model
+      3. Если нет подходящего правила → берем из mask_generation defaults
     """
 
     def __init__(
@@ -60,14 +69,11 @@ class LLMMaskGenerator:
         self.attempts: List[GenerationAttempt] = []
 
     # ==========================================================================
-    # CLIENT HELPERS (поддержка строковых ключей и enum)
+    # CLIENT HELPERS
     # ==========================================================================
 
     def _has_client(self, provider: LLMProvider) -> bool:
-        """
-        Проверка наличия клиента для провайдера.
-        Поддерживает строковые ключи (как в cli.py: 'mws', 'openwebui') и LLMProvider enum.
-        """
+        """Проверка наличия клиента для провайдера."""
         if provider in self.clients:
             return True
         if provider.value in self.clients:
@@ -75,10 +81,7 @@ class LLMMaskGenerator:
         return False
 
     def _get_client(self, provider: LLMProvider):
-        """
-        Получение клиента для провайдера.
-        Поддерживает строковые ключи и LLMProvider enum.
-        """
+        """Получение клиента для провайдера."""
         if provider in self.clients:
             return self.clients[provider]
         if provider.value in self.clients:
@@ -86,18 +89,16 @@ class LLMMaskGenerator:
         raise KeyError(f"No client for provider: {provider}")
 
     # ==========================================================================
-    # KEYWORD-BASED PROMPT RESOLUTION (как в processor.py)
+    # KEYWORD-BASED PROMPT RESOLUTION
     # ==========================================================================
 
     def _match_keywords(self, name_lower: str, keywords: List[str]) -> bool:
-        """
-        Проверка совпадения keywords — точная копия логики из processor.py.
-        Поддерживает: regex:, glob-шаблоны (*, ?), обычные подстроки.
-        """
+        """Проверка совпадения keywords."""
         for keyword in keywords:
-            keyword = keyword.strip()
+            keyword = str(keyword).strip() if keyword else ""
+            if not keyword:
+                continue
 
-            # regex: префикс
             if keyword.startswith('regex:') or keyword.startswith('re:'):
                 pattern = keyword.split(':', 1)[1].strip()
                 try:
@@ -107,7 +108,6 @@ class LLMMaskGenerator:
                     logger.warning(f"[LLMMaskGenerator] Невалидный regex '{pattern}': {e}")
                     continue
 
-            # glob-шаблоны
             elif '*' in keyword or '?' in keyword:
                 pattern = keyword.replace('.', r'\.').replace('*', '.*').replace('?', '.')
                 try:
@@ -115,8 +115,6 @@ class LLMMaskGenerator:
                         return True
                 except re.error:
                     continue
-
-            # простое вхождение подстроки
             else:
                 if keyword.lower() in name_lower:
                     return True
@@ -125,15 +123,14 @@ class LLMMaskGenerator:
 
     def _load_prompts_raw(self) -> Dict[str, Dict]:
         """Загрузка сырых данных prompts из prompts.yaml."""
-        # Приоритет 1: settings.prompts
         if self.settings and hasattr(self.settings, 'prompts'):
             try:
                 prompts = {}
                 for pid, cfg in self.settings.prompts.items():
                     prompts[pid] = {
                         'keywords': getattr(cfg, 'keywords', []),
-                        'service': getattr(cfg, 'service', 'openwebui'),
-                        'model': getattr(cfg, 'model', 'qwen2.5:7b'),
+                        'service': getattr(cfg, 'service', None),
+                        'model': getattr(cfg, 'model', None),
                         'temperature': getattr(cfg, 'temperature', 0.1),
                         'system_prompt': getattr(cfg, 'system_prompt', None),
                     }
@@ -141,11 +138,9 @@ class LLMMaskGenerator:
             except Exception as e:
                 logger.warning(f"[LLMMaskGenerator] Ошибка чтения settings.prompts: {e}")
 
-        # Приоритет 2: читаем prompts.yaml напрямую
         try:
             import yaml
             from pathlib import Path
-
             for path in ['config/prompts.yaml', 'prompts.yaml', '../config/prompts.yaml']:
                 if Path(path).exists():
                     with open(path, 'r', encoding='utf-8') as f:
@@ -164,54 +159,25 @@ class LLMMaskGenerator:
         standard_normalized: Optional[str] = None,
         example_samples: Optional[List[str]] = None
     ) -> Optional[str]:
-        """
-        Каскадное определение prompt_id по keywords из 5 источников данных.
-
-        Порядок поиска (от точного к общему):
-        1. item_type     — "болт", "гайка", "труба"...
-        2. standard_type — "ГОСТ", "ОСТ", "ТУ", "ISO", "DIN", "РАМ"
-        3. standard      — "ГОСТ 7798-70" (нормализованный)
-        4. examples      — первые 3 примера из ЕСН
-        5. name          — полное наименование номенклатуры
-
-        Args:
-            item_type_or_name: Тип изделия
-            name: Полное наименование номенклатуры
-            standard_type: Тип стандарта (ГОСТ/ОСТ/ТУ/ISO/DIN/РАМ)
-            standard_normalized: Нормализованное название стандарта
-            example_samples: Примеры из ЕСН для keyword matching
-
-        Returns:
-            prompt_id (например, 'hardware', 'rolledMetal')
-        """
+        """Каскадное определение prompt_id по keywords из 5 источников."""
         prompts_data = self._load_prompts_raw()
 
         if not prompts_data:
             logger.warning("[LLMMaskGenerator] Не удалось загрузить prompts, fallback на 'hardware'")
             return 'hardware'
 
-        # КАСКАД 1-5: собираем источники по приоритету
-        sources: List[Tuple[str, str]] = []  # (source_type, source_text)
+        sources: List[Tuple[str, str]] = []
 
-        # 1. item_type (самый точный)
         if item_type_or_name and item_type_or_name.lower() not in ('unknown', 'none', ''):
             sources.append(('item_type', item_type_or_name))
-
-        # 2. standard_type (ГОСТ → крепеж/металл, ТУ → custom)
         if standard_type and standard_type not in ('UNKNOWN', ''):
             sources.append(('standard_type', standard_type))
-
-        # 3. standard_normalized (конкретный стандарт)
         if standard_normalized and standard_normalized.strip():
             sources.append(('standard', standard_normalized.strip()))
-
-        # 4. examples (содержимое примеров из ЕСН)
         if example_samples:
             for i, sample in enumerate(example_samples[:3]):
                 if sample and sample.strip():
                     sources.append((f'example#{i+1}', sample.strip()))
-
-        # 5. name (полное наименование — самый общий)
         if name and name.strip():
             sources.append(('name', name.strip()))
 
@@ -219,7 +185,6 @@ class LLMMaskGenerator:
             logger.warning("[LLMMaskGenerator] Нет данных для keyword matching, fallback на 'hardware'")
             return 'hardware'
 
-        # Поиск по всем источникам
         for source_type, source_text in sources:
             name_lower = source_text.lower()
             for prompt_id, cfg in prompts_data.items():
@@ -227,26 +192,24 @@ class LLMMaskGenerator:
                 if self._match_keywords(name_lower, keywords):
                     logger.info(
                         f"[LLMMaskGenerator] Keywords match by {source_type}: "
-                        f"'{source_text[:50]}' → prompt_id='{prompt_id}'"
+                        f"'{source_text[:50]}' -> prompt_id='{prompt_id}'"
                     )
                     return prompt_id
 
         logger.warning(
-            f"[LLMMaskGenerator] Нет совпадений по keywords ни по одному из "
-            f"{len(sources)} источников, fallback на 'hardware'"
+            f"[LLMMaskGenerator] Нет совпадений по keywords, fallback на 'hardware'"
         )
         return 'hardware'
 
     # ==========================================================================
-    # PROMPT CONFIGURATION
+    # PROMPT CONFIGURATION (с resolve_service / resolve_model)
     # ==========================================================================
 
     def _load_skip_fields(self) -> set:
         """Загрузка skip_fields из ens_column_mapping.yaml."""
         default = {'код', 'mdm_key', 'единицы_измерения', 'наименование_типа.1',
                    'полное_наименование', 'наименование', 'нтд',
-                   'наименование_типа',  # дублирует тип_изделия, используем только тип_изделия
-                   }
+                   'наименование_типа'}
         try:
             import yaml
             from pathlib import Path
@@ -262,23 +225,48 @@ class LLMMaskGenerator:
             logger.warning(f"[LLMMaskGenerator] Не удалось загрузить skip_fields: {e}")
         return default
 
+    def _resolve_service_model(self, prompt_cfg: Any) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Определяет финальный service и model по правилам:
+          1. Если в prompt_cfg указаны service/model (не None) → используем
+          2. Иначе → берем из mask_generation.default_service/default_model
+        """
+        # Получаем raw значения (могут быть None)
+        service = getattr(prompt_cfg, 'service', None)
+        model = getattr(prompt_cfg, 'model', None)
+
+        logger.debug(f"[LLMMaskGenerator] Raw from prompt: service={service}, model={model}")
+
+        # Fallback на mask_generation defaults
+        if (not service or not model) and self.settings and hasattr(self.settings, 'mask_generation'):
+            mg = self.settings.mask_generation
+            if not service:
+                service = getattr(mg, 'default_service', None)
+                logger.debug(f"[LLMMaskGenerator] Service resolved from mask_generation: {service}")
+            if not model:
+                model = getattr(mg, 'default_model', None)
+                logger.debug(f"[LLMMaskGenerator] Model resolved from mask_generation: {model}")
+
+        return service, model
+
     def _get_prompt_config(self, prompt_id: Optional[str] = None) -> Optional[Any]:
-        """
-        Получение конфигурации промпта из prompts.yaml.
-        Если prompt_id не передан — используем fallback 'hardware'.
-        """
+        """Получение конфигурации промпта из prompts.yaml."""
         logger.debug(f"[LLMMaskGenerator] _get_prompt_config: prompt_id={prompt_id}")
 
         if not prompt_id:
             prompt_id = 'hardware'
 
-        # Приоритет 1: settings
+        # Приоритет 1: settings.prompts (PromptConfig объекты с resolve_service/model)
         if self.settings and hasattr(self.settings, 'prompts'):
-            prompts = self.settings.prompts
-            result = prompts.get(prompt_id) if hasattr(prompts, 'get') else None
-            if result:
-                logger.debug(f"[LLMMaskGenerator] Найден в settings.prompts: {prompt_id}")
-                return result
+            try:
+                prompts = self.settings.prompts
+                if hasattr(prompts, 'get'):
+                    result = prompts.get(prompt_id)
+                    if result:
+                        logger.debug(f"[LLMMaskGenerator] Найден в settings.prompts: {prompt_id}")
+                        return result
+            except Exception as e:
+                logger.warning(f"[LLMMaskGenerator] Ошибка чтения settings.prompts: {e}")
 
         # Приоритет 2: читаем prompts.yaml напрямую
         logger.info("[LLMMaskGenerator] settings недоступен, читаем prompts.yaml напрямую")
@@ -293,14 +281,29 @@ class LLMMaskGenerator:
                     prompts_data = data.get('prompts', {})
                     if prompt_id in prompts_data:
                         cfg = prompts_data[prompt_id]
-                        class SimplePromptConfig:
+
+                        # Создаем объект без жестких fallback'ов
+                        class ResolvedPromptConfig:
                             pass
-                        result = SimplePromptConfig()
-                        result.service = cfg.get('service', 'openwebui')
-                        result.model = cfg.get('model', 'qwen2.5:7b')
+
+                        result = ResolvedPromptConfig()
+                        result.keywords = cfg.get('keywords', [])
+                        result.service = cfg.get('service')  # None если не указан!
+                        result.model = cfg.get('model')      # None если не указан!
                         result.temperature = cfg.get('temperature', 0.1)
                         result.system_prompt = cfg.get('system_prompt')
-                        logger.debug(f"[LLMMaskGenerator] Загружен из {path}: {prompt_id} → {result.model}")
+
+                        # Resolve через mask_generation defaults
+                        resolved_svc, resolved_mdl = self._resolve_service_model(result)
+                        if resolved_svc:
+                            result.service = resolved_svc
+                        if resolved_mdl:
+                            result.model = resolved_mdl
+
+                        logger.debug(
+                            f"[LLMMaskGenerator] Загружен из {path}: "
+                            f"{prompt_id} -> service={result.service}, model={result.model}"
+                        )
                         return result
                     break
         except Exception as e:
@@ -319,16 +322,16 @@ class LLMMaskGenerator:
         example_samples: Optional[List[str]] = None
     ) -> List[Dict]:
         """
-        Формирование retry конфигурации.
+        Формирование retry конфигурации с единым resolved сервисом.
 
-        Логика:
-        1. Если передан prompt_id — используем его
-        2. Иначе — определяем по keywords из item_type или name
-        3. Из prompts.yaml берём service, model, temperature, system_prompt
+        Правила:
+          1. prompt_id найден в prompts.yaml + service/model указаны → используем
+          2. prompt_id найден, service/model НЕ указаны → mask_generation defaults
+          3. prompt_id НЕ найден → mask_generation defaults
         """
         configs = []
 
-        # Автоопределение prompt_id по keywords (каскадный поиск)
+        # Автоопределение prompt_id
         if not prompt_id:
             prompt_id = self._resolve_prompt_by_keywords(
                 item_type_or_name=item_type or "",
@@ -340,90 +343,83 @@ class LLMMaskGenerator:
             source = item_type or (name[:40] if name else "unknown")
             logger.info(f"[LLMMaskGenerator] Auto-resolved prompt_id='{prompt_id}' from '{source}'")
 
-        # Приоритет 1: prompts.yaml
+        # --- Правило 1 и 2: prompt_id найден ---
         prompt_cfg = self._get_prompt_config(prompt_id)
+
         if prompt_cfg:
+            # Resolve service/model (с fallback на mask_generation)
+            resolved_service, resolved_model = self._resolve_service_model(prompt_cfg)
+            temp = getattr(prompt_cfg, 'temperature', 0.1)
+            system_prompt = getattr(prompt_cfg, 'system_prompt', None)
+
+            # Определяем provider
             provider_map = {
                 'openwebui': LLMProvider.OPENWEBUI,
                 'mws': LLMProvider.MWS,
                 'gigachat': LLMProvider.GIGACHAT,
+                'mts_ai': LLMProvider.MTS_AI,
             }
-            provider = provider_map.get(prompt_cfg.service)
+            provider = provider_map.get(resolved_service) if resolved_service else None
 
             if provider and self._has_client(provider):
-                model = prompt_cfg.model
-                temp = prompt_cfg.temperature
-                system_prompt = getattr(prompt_cfg, 'system_prompt', None)
-
                 logger.info(
-                    f"[LLMMaskGenerator] Конфиг из prompts.yaml/{prompt_id}: "
-                    f"provider={prompt_cfg.service}, model={model}, temp={temp}"
+                    f"[LLMMaskGenerator] Resolved: service={resolved_service}, "
+                    f"model={resolved_model}, temp={temp} (prompt='{prompt_id}')"
                 )
-
                 configs.append({
                     "provider": provider,
-                    "model": model,
+                    "model": resolved_model,
                     "temperature": temp,
                     "system_prompt": system_prompt,
                     "source": f"prompts.yaml:{prompt_id}"
                 })
+                # Retry с повышенной температурой (тот же сервис!)
                 configs.append({
                     "provider": provider,
-                    "model": model,
+                    "model": resolved_model,
                     "temperature": round(min(temp + 0.2, 0.5), 2),
                     "system_prompt": system_prompt,
                     "source": f"prompts.yaml:{prompt_id}(retry)"
                 })
-
-        # Fallback: config.yaml api.*.default_model
-        if not configs and self.settings and hasattr(self.settings, 'api'):
-            for provider in [LLMProvider.OPENWEBUI, LLMProvider.MWS, LLMProvider.GIGACHAT]:
-                service_name = provider.value
-                if service_name in self.settings.api and self._has_client(provider):
-                    api_cfg = self.settings.api[service_name]
-                    model = getattr(api_cfg, 'default_model', None)
-                    if model and self._has_client(provider):
-                        configs.append({
-                            "provider": provider,
-                            "model": model,
-                            "temperature": 0.1,
-                            "system_prompt": None,
-                            "source": f"config.yaml:{service_name}"
-                        })
-
-        # Last resort fallback — из раздела mask_generation в config.yaml
-        if not configs:
-            fallback_cfg = getattr(self.settings, 'mask_generation', None) if self.settings else None
-
-            if fallback_cfg:
-                # Явно указанный сервис и модель из config.yaml
-                svc = getattr(fallback_cfg, 'default_service', 'mws')
-                fallback_model = getattr(fallback_cfg, 'default_model', 'qwen2.5-72b-instruct')
-                fallback_temp = getattr(fallback_cfg, 'default_temperature', 0.1)
-
-                provider_map = {
-                    'openwebui': LLMProvider.OPENWEBUI,
-                    'mws': LLMProvider.MWS,
-                    'gigachat': LLMProvider.GIGACHAT,
-                }
-                fallback_provider = provider_map.get(svc, LLMProvider.MWS)
-                logger.info(f"[LLMMaskGenerator] Fallback из mask_generation: {svc}/{fallback_model}")
+                logger.info(f"[LLMMaskGenerator] Retry конфигурация: {len(configs)} попыток с {resolved_service}")
+                return configs
             else:
-                # Хардкод-только если нет settings вообще
-                fallback_provider = LLMProvider.MWS
-                fallback_model = "qwen2.5-72b-instruct"
-                fallback_temp = 0.1
+                logger.warning(
+                    f"[LLMMaskGenerator] Resolved service '{resolved_service}' не имеет клиента, "
+                    f"fallback на mask_generation"
+                )
 
-            if self._has_client(fallback_provider):
-                configs.append({
-                    "provider": fallback_provider,
-                    "model": fallback_model,
-                    "temperature": fallback_temp,
-                    "system_prompt": None,
-                    "source": f"fallback:mask_generation:{fallback_provider.value}"
-                })
-            else:
-                logger.error(f"[LLMMaskGenerator] Fallback клиент {fallback_provider.value} не инициализирован!")
+        # --- Правило 3: fallback на mask_generation ---
+        fallback_cfg = getattr(self.settings, 'mask_generation', None) if self.settings else None
+
+        if fallback_cfg:
+            svc = getattr(fallback_cfg, 'default_service', 'mws')
+            fallback_model = getattr(fallback_cfg, 'default_model', 'qwen2.5-72b-instruct')
+            fallback_temp = getattr(fallback_cfg, 'default_temperature', 0.1)
+
+            provider_map = {
+                'openwebui': LLMProvider.OPENWEBUI,
+                'mws': LLMProvider.MWS,
+                'gigachat': LLMProvider.GIGACHAT,
+                'mts_ai': LLMProvider.MTS_AI,
+            }
+            fallback_provider = provider_map.get(svc, LLMProvider.MWS)
+            logger.info(f"[LLMMaskGenerator] Fallback из mask_generation: {svc}/{fallback_model}")
+        else:
+            fallback_provider = LLMProvider.MWS
+            fallback_model = "qwen2.5-72b-instruct"
+            fallback_temp = 0.1
+
+        if self._has_client(fallback_provider):
+            configs.append({
+                "provider": fallback_provider,
+                "model": fallback_model,
+                "temperature": fallback_temp,
+                "system_prompt": None,
+                "source": f"fallback:mask_generation:{fallback_provider.value}"
+            })
+        else:
+            logger.error(f"[LLMMaskGenerator] Fallback клиент {fallback_provider.value} не инициализирован!")
 
         logger.info(f"[LLMMaskGenerator] Retry конфигурация: {len(configs)} попыток")
         for i, cfg in enumerate(configs, 1):
@@ -448,21 +444,7 @@ class LLMMaskGenerator:
         name: Optional[str] = None,
         standard_info: Optional[Any] = None
     ) -> Tuple[Optional[Dict[str, Any]], List[GenerationAttempt]]:
-        """
-        Генерация маски с auto-resolution prompt_id по keywords (каскадный поиск).
-
-        Args:
-            standard: Стандарт (ГОСТ 7798-70, etc.)
-            item_type: Тип изделия (болт, гайка, etc.)
-            examples: Примеры номенклатуры для обучения
-            context: Дополнительный контекст
-            prompt_id: Явный prompt_id (автоопределение если None)
-            name: Полное наименование (source #5 в каскаде)
-            standard_info: Объект StandardInfo (source #2, #3 в каскаде)
-
-        Returns:
-            (mask_dict, attempts)
-        """
+        """Генерация маски с auto-resolution prompt_id."""
         self.attempts = []
 
         logger.info(
@@ -470,13 +452,11 @@ class LLMMaskGenerator:
             f"item_type={item_type}, примеров={len(examples)}, prompt_id={prompt_id}"
         )
 
-        # Извлекаем sample texts из examples для keyword matching (source #4)
         example_samples = [
             ex.get('полное_наименование') or ex.get('наименование', '')
             for ex in examples[:3]
         ]
 
-        # Извлекаем данные из standard_info (source #2, #3)
         standard_type = None
         standard_normalized = None
         if standard_info:
@@ -485,7 +465,6 @@ class LLMMaskGenerator:
                 standard_type = standard_type.value if hasattr(standard_type, 'value') else str(standard_type)
             standard_normalized = getattr(standard_info, 'normalized', None) or getattr(standard_info, 'full_name', None)
 
-        # Строим retry-конфиг с каскадным keyword resolution
         retry_configs = self._build_retry_config(
             prompt_id=prompt_id,
             item_type=item_type,
@@ -498,10 +477,7 @@ class LLMMaskGenerator:
             logger.error("[LLMMaskGenerator] Нет доступных конфигураций LLM")
             return None, []
 
-        # === СОЗДАЕМ ПРОМПТ (один раз на все попытки) ===
         prompt = self._build_prompt(standard, item_type, examples, context)
-
-        # Сохраняем промпт для отладки
         self._save_debug_prompt(standard, item_type, prompt)
 
         max_attempts = min(self.max_retries, len(retry_configs))
@@ -547,7 +523,7 @@ class LLMMaskGenerator:
         context: Optional[Dict],
         prompt: Optional[str] = None
     ) -> GenerationAttempt:
-        """Одна попытка генерации маски с полным логированием."""
+        """Одна попытка генерации маски."""
         provider = config["provider"]
         model = config["model"]
         temperature = config["temperature"]
@@ -559,20 +535,15 @@ class LLMMaskGenerator:
             f"{provider.value}/{model}, temp={temperature} (source: {source})"
         )
 
-        # Промпт
         if prompt is None:
             prompt = self._build_prompt(standard, item_type, examples, context)
 
-        # Проверка промпта перед вызовом
         if not prompt or not prompt.strip():
             logger.error(f"[LLMMaskGenerator] Попытка {attempt_number}: ПРОМПТ ПУСТОЙ!")
             return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
                 model=model, temperature=temperature, success=False,
                 error_message="Prompt is empty", raw_response="PROMPT_WAS_EMPTY")
 
-        logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: prompt_len={len(prompt)}, prompt_preview={prompt[:100]}")
-
-        # Вызов API с полным логированием
         raw_response = ""
         response = None
         try:
@@ -581,29 +552,22 @@ class LLMMaskGenerator:
             response = client.complete(
                 prompt=prompt, model=model, temperature=temperature, system_prompt=system_prompt
             )
-            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: API ответ type={type(response)}, value={'None' if response is None else 'not None'}")
 
             if response is None:
                 raw_response = "API_RESPONSE_WAS_NONE"
             elif isinstance(response, dict):
                 raw_response = response.get("raw") or str(response)
-                raw_len = len(raw_response) if raw_response is not None else 0
-                logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: success={response.get('success')}, raw_len={raw_len}")
             else:
                 raw_response = str(response)
-                logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: response type={type(response)}, str_len={len(raw_response)}")
 
         except Exception as e:
             import traceback
             raw_response = f"EXCEPTION: {type(e).__name__}: {e}\n{traceback.format_exc()}"
             logger.error(f"[LLMMaskGenerator] Попытка {attempt_number}: ИСКЛЮЧЕНИЕ: {e}")
         finally:
-            # ВСЕГДА сохраняем ответ (защита от None)
             safe_response = raw_response if raw_response is not None else "RAW_RESPONSE_WAS_NONE"
             self._save_debug_response(standard, item_type, attempt_number, safe_response)
-            logger.info(f"[LLMMaskGenerator] Попытка {attempt_number}: ответ СОХРАНЕН, length={len(safe_response)}")
 
-        # Обработка результата
         if raw_response.startswith("API_RESPONSE_WAS_NONE"):
             return GenerationAttempt(attempt_number=attempt_number, provider=provider.value,
                 model=model, temperature=temperature, success=False,
@@ -614,12 +578,6 @@ class LLMMaskGenerator:
                 model=model, temperature=temperature, success=False,
                 error_message=raw_response[:200], raw_response=raw_response[:500])
 
-        if isinstance(response, dict) and not response.get("success"):
-            # API сообщил об ошибке, но raw может содержать JSON
-            logger.warning(f"[LLMMaskGenerator] Попытка {attempt_number}: API success=False, но пробуем парсить raw")
-            # Продолжаем к парсингу ниже — не возвращаем ошибку
-
-        # Парсинг JSON
         content = response.get("content") if isinstance(response, dict) else None
         result = content if isinstance(content, dict) else self._extract_json(raw_response)
 
@@ -638,12 +596,11 @@ class LLMMaskGenerator:
                 error_message=fail_reason, raw_response=raw_response[:500])
 
     # ==========================================================================
-    # PROMPT BUILDER (промпт для генерации маски)
+    # PROMPT BUILDER
     # ==========================================================================
 
     def _load_prompt_template(self) -> str:
-        """Загрузка шаблона промпта из файла (путь из settings)."""
-        # Путь из settings -> mask_generation.prompt_template
+        """Загрузка шаблона промпта из файла."""
         if self.settings and hasattr(self.settings, 'mask_generation'):
             mg = self.settings.mask_generation
             template_path = getattr(mg, 'prompt_template', None)
@@ -651,7 +608,6 @@ class LLMMaskGenerator:
                 with open(template_path, 'r', encoding='utf-8') as f:
                     return f.read()
 
-        # Fallback: ищем по стандартным путям
         for path in [
             'prompts/templates/mask_generation.txt',
             'config/prompts/templates/mask_generation.txt',
@@ -661,30 +617,23 @@ class LLMMaskGenerator:
                 with open(path, 'r', encoding='utf-8') as f:
                     return f.read()
 
-        # Hardcoded fallback (если файл не найден)
         logger.warning("[LLMMaskGenerator] Шаблон промпта не найден, используем fallback")
         return self._default_prompt_template()
 
     def _sanitize_filename(self, text: str) -> str:
         """Очистка строки для использования в имени файла."""
-        import re
-        # Заменяем недопустимые символы на _
         sanitized = re.sub(r'[\\/*?:"<>|]', '_', str(text))
-        # Убираем множественные _
         sanitized = re.sub(r'_+', '_', sanitized)
-        # Обрезаем до 80 символов
         return sanitized.strip('_')[:80]
 
     def _save_debug_prompt(self, standard: str, item_type: str, prompt: str):
-        """Сохранение промпта в файл для отладки."""
         self._save_debug_file(standard, item_type, "prompt", prompt)
 
     def _save_debug_response(self, standard: str, item_type: str, attempt: int, response: str):
-        """Сохранение raw ответа LLM для отладки."""
         self._save_debug_file(standard, item_type, f"response_a{attempt}", response)
 
     def _save_debug_file(self, standard: str, item_type: str, suffix: str, content: str):
-        """Сохранение произвольного файла отладки."""
+        """Сохранение файла отладки."""
         save_enabled = False
         debug_dir = "prompts/debug"
 
@@ -697,19 +646,14 @@ class LLMMaskGenerator:
             return
 
         try:
-            from pathlib import Path
             from datetime import datetime
-
             Path(debug_dir).mkdir(parents=True, exist_ok=True)
 
             safe_type = self._sanitize_filename(item_type or "unknown")
             safe_std = self._sanitize_filename(standard or "unknown")
-            # Имя по маске: [тип]_[стандарт].txt
-            # Для response добавляем _a{N}
             if suffix == "prompt":
                 filename = f"{safe_type}_{safe_std}.txt"
             else:
-                # suffix = "response_a1" -> "_a1"
                 attempt_suffix = suffix.replace("response", "")
                 filename = f"{safe_type}_{safe_std}{attempt_suffix}.txt"
 
@@ -731,7 +675,6 @@ class LLMMaskGenerator:
             logger.warning(f"[LLMMaskGenerator] Не удалось сохранить файл: {e}")
 
     def _default_prompt_template(self) -> str:
-        """Fallback шаблон если файл не найден."""
         return (
             "Ты — эксперт по техническим стандартам ГОСТ и регулярным выражениям Python.\n\n"
             "ЗАДАЧА: Создай regex-паттерн с named groups (?P<name>...) "
@@ -757,16 +700,11 @@ class LLMMaskGenerator:
         )
 
     def _build_prompt(self, standard, item_type, examples, context):
-        """
-        Построение промпта для LLM-генерации regex-маски.
-        Шаблон загружается из файла (prompts/templates/mask_generation.txt).
-        """
+        """Построение промпта для LLM-генерации regex-маски."""
         template = self._load_prompt_template()
 
-        # --- Алиасы полей: если 'тип_изделия' отсутствует, берём из 'наименование_типа' ---
         field_aliases = {'тип_изделия': 'наименование_типа'}
 
-        # Применяем алиасы к examples (создаём 'тип_изделия' из 'наименование_типа' если нужно)
         aliased_examples = []
         for ex in examples:
             new_ex = dict(ex)
@@ -777,7 +715,6 @@ class LLMMaskGenerator:
             aliased_examples.append(new_ex)
         examples = aliased_examples
 
-        # --- Анализ полей ЕСН ---
         field_stats = {}
         for ex in examples:
             for key, val in ex.items():
@@ -792,19 +729,15 @@ class LLMMaskGenerator:
         sorted_fields = sorted(field_stats.items(), key=lambda x: -x[1])
         relevant_fields = [k for k, v in sorted_fields if v >= threshold]
 
-        # Убеждаемся что тип_изделия всегда первым в списке (заменяет наименование_типа)
         if 'тип_изделия' not in relevant_fields:
             relevant_fields.insert(0, 'тип_изделия')
         else:
-            # Перемещаем тип_изделия на первое место
             relevant_fields.remove('тип_изделия')
             relevant_fields.insert(0, 'тип_изделия')
 
-        # Загружаем skip_fields из конфига (ens_column_mapping.yaml)
         skip_fields = self._load_skip_fields()
 
         def clean_name(n: str, max_len: int = 30) -> str:
-            """Очистка имени поля для regex group name + ограничение длины."""
             result = n.replace('.', '_').replace('-', '_').replace('(', '_').replace(')', '_').replace(',', '_')
             while '__' in result:
                 result = result.replace('__', '_')
@@ -813,13 +746,11 @@ class LLMMaskGenerator:
                 result = result[:max_len].rstrip('_')
             return result
 
-        # Очищаем имена: оригинальное поле -> имя для regex
         field_name_map = {}
         seen_names = set()
         for f in relevant_fields:
             if f not in skip_fields:
                 cleaned = clean_name(f)
-                # Обработка дубликатов после обрезки
                 original_cleaned = cleaned
                 suffix = 2
                 while cleaned in seen_names:
@@ -829,13 +760,9 @@ class LLMMaskGenerator:
                 seen_names.add(cleaned)
                 field_name_map[f] = cleaned
 
-        # Убеждаемся что тип_изделия есть в маппинге (ключевое поле)
         if 'тип_изделия' not in field_name_map:
             field_name_map['тип_изделия'] = 'тип_изделия'
 
-        # === КЛЮЧЕВОЕ: разделяем видимые и невидимые параметры ===
-        # Видимые = значение реально присутствует в полном_наименовании (хотя бы в одном примере)
-        # Невидимые = метаданные ЕСН, которых нет в номенклатурной строке
         visible_fields = set()
         for ex in examples:
             name = ex.get('полное_наименование') or ex.get('наименование', '')
@@ -849,21 +776,16 @@ class LLMMaskGenerator:
                 val_str = str(val).strip()
                 if not val_str:
                     continue
-                # Нормализуем для поиска: убираем точки, пробелы, регистр
                 val_norm = val_str.lower().replace('.', '').replace(' ', '').replace(',', '')
                 name_norm = name_lower.replace('.', '').replace(' ', '').replace(',', '')
-                # Проверяем вхождение (прямое или нормализованное)
                 if val_str.lower() in name_lower or val_norm in name_norm:
                     visible_fields.add(field)
 
-        # Разделяем поля
         visible_field_names = [f for f in relevant_fields if f in visible_fields and f not in skip_fields]
         invisible_field_names = [f for f in relevant_fields if f not in visible_fields and f not in skip_fields]
 
-        # regex_fields = ТОЛЬКО видимые параметры (для named groups в маске)
         regex_fields = [field_name_map[f] for f in visible_field_names if f in field_name_map]
 
-        # Убеждаемся что тип_изделия всегда есть
         if 'тип_изделия' not in visible_field_names and 'тип_изделия' in field_name_map:
             visible_field_names.insert(0, 'тип_изделия')
             if field_name_map['тип_изделия'] not in regex_fields:
@@ -871,27 +793,22 @@ class LLMMaskGenerator:
 
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
-        # --- Форматирование примеров ---
-        # Берём разнообразные примеры: с пропущенными параметрами, разные покрытия и т.д.
         sample_examples = self._select_diverse_examples(examples, n=10)
         examples_lines = []
         for i, ex in enumerate(sample_examples, 1):
             name = ex.get('полное_наименование') or ex.get('наименование', '')
             if not name:
                 continue
-            # Всегда показываем полное_наименование (даже если в skip_fields)
             filled_fields = [f"    полное_наименование: {name}"]
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
                     filled_fields.append(f"    {field}: {val}")
 
-            # Отмечаем пропущенные параметры (важно для опциональности в regex)
             missing_fields = [f for f in display_fields if not ex.get(f) or not str(ex.get(f)).strip()]
             if missing_fields:
                 filled_fields.append(f"    [ПРОПУЩЕНЫ: {', '.join(missing_fields)}]")
 
-            # ВИДИМЫЕ параметры: те, что реально есть в строке
             visible_parts = []
             for field in visible_field_names:
                 val = ex.get(field)
@@ -899,7 +816,6 @@ class LLMMaskGenerator:
                     group_name = field_name_map.get(field, field)
                     visible_parts.append(f"(?P<{group_name}>{val})")
 
-            # НЕВИДИМЫЕ параметры: метаданные из БД
             invisible_parts = []
             for field in invisible_field_names:
                 val = ex.get(field)
@@ -920,13 +836,10 @@ class LLMMaskGenerator:
 
         examples_text = "\n\n".join(examples_lines) if examples_lines else "Нет примеров"
 
-        # --- Статистика ---
         stats_lines = []
-        # Статистика только по ВИДИМЫМ полям (для regex)
         for k in visible_field_names:
             if k in field_name_map:
                 stats_lines.append(f"    {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
-        # Отдельно показываем метаданные
         if invisible_field_names:
             stats_lines.append("    --- МЕТАДАННЫЕ (не для regex): ---")
             for k in invisible_field_names:
@@ -934,23 +847,16 @@ class LLMMaskGenerator:
                     stats_lines.append(f"    {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в БД, не в строке]")
         stats_text = "\n".join(stats_lines) if stats_lines else "Нет статистики"
 
-        # --- Подстановка в шаблон ---
-        # params_list: JSON-список очищенных имён (ТОЛЬКО видимые)
         import json
         params_list = json.dumps(regex_fields, ensure_ascii=False)
 
-        # required_list: JSON-список (все видимые кроме опциональных)
         optional_params = {'исполнение', 'покрытие', 'марка_материала'}
         required_fields = [f for f in regex_fields if f not in optional_params]
         required_list = json.dumps(required_fields, ensure_ascii=False)
 
-        # params_hint: строка для подсказки
         params_hint = ", ".join(regex_fields[:10])
-
-        # context_text
         context_text = context.get('context', '') if context else ''
 
-        # Подстановка через str.replace (НЕ format! из-за {} в данных)
         result = template
         replacements = {
             "{item_type}": item_type,
@@ -966,7 +872,6 @@ class LLMMaskGenerator:
         for placeholder, value in replacements.items():
             result = result.replace(placeholder, value)
 
-        # Проверяем, остались ли неподставленные placeholder'ы
         remaining = [m for m in re.finditer(r'\{[a-z_]+\}', result) if m.group() not in ('{{', '}}')]
         if remaining:
             logger.warning(f"[LLMMaskGenerator] Неподставленные placeholder'ы: {[m.group() for m in remaining[:5]]}")
@@ -975,28 +880,14 @@ class LLMMaskGenerator:
 
     @staticmethod
     def _select_diverse_examples(examples: List[Dict], n: int = 10) -> List[Dict]:
-        """
-        Выбор разнообразных примеров для промпта.
-
-        Цель: показать LLM записи с РАЗНЫМ набором параметров:
-        - С полным набором (все поля заполнены)
-        - С пропущенным исполнением
-        - С пропущенным покрытием
-        - С пропущенным диаметром (если есть)
-
-        Это позволяет LLM сделать параметры опциональными через ? в regex.
-        """
         if len(examples) <= n:
             return examples
 
         selected = []
         seen_patterns = set()
-
-        # 1. Пример с максимальным набором полей (первый, обычно полный)
         selected.append(examples[0])
         seen_patterns.add('full')
 
-        # 2. Ищем примеры с пропущенными полями
         key_fields = ['исполнение', 'покрытие', 'тип_резьбы', 'марка_материала', 'шаг_резьбы', 'номинальный_диаметр_резьбы']
 
         for field in key_fields:
@@ -1004,9 +895,7 @@ class LLMMaskGenerator:
                 pattern_key = f"missing_{field}"
                 if pattern_key in seen_patterns:
                     continue
-                # Проверяем что это поле пропущено, но другие важные есть
                 if not ex.get(field) or not str(ex.get(field)).strip():
-                    # Проверяем что не все поля пустые (иначе бесполезный пример)
                     has_some = any(ex.get(f) and str(ex.get(f)).strip() for f in key_fields if f != field)
                     if has_some:
                         selected.append(ex)
@@ -1015,13 +904,11 @@ class LLMMaskGenerator:
             if len(selected) >= n // 2:
                 break
 
-        # 3. Дополняем случайными разнообразными до n
         import random
-        random.seed(42)  # воспроизводимость
+        random.seed(42)
         remaining = [ex for ex in examples if ex not in selected]
         random.shuffle(remaining)
 
-        # Добавляем до n штук
         needed = n - len(selected)
         if remaining and needed > 0:
             selected.extend(remaining[:needed])
@@ -1029,36 +916,23 @@ class LLMMaskGenerator:
         return selected[:n]
 
     def _preprocess_json_text(self, text: str) -> str:
-        r"""
-        Предобработка JSON текста от LLM.
-        LLM часто генерирует regex с одиночными backslash (\s, \d, \w) внутри JSON-строк,
-        что делает JSON невалидным (JSON допускает только \\, \", \/, \b, \f, \n, \r, \t, \uXXXX).
-        Экранируем regex-escapes, сохраняя уже двойные (\\) нетронутыми.
-        """
-        import re
-        # Placeholder для уже двойных backslash
+        r"""Предобработка JSON текста от LLM."""
         placeholder = '\x00DBL\x00'
-        result = text.replace('\\\\', placeholder)
-        # Экранируем любой \ перед НЕ-JSON-escape символом
-        # JSON valid: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
-        result = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', result)
-        # Восстанавливаем двойные
-        result = result.replace(placeholder, '\\\\')
+        result = text.replace('\\', placeholder)
+        result = re.sub(r'\([^"\\/bfnrtu])', r'\\\\\1', result)
+        result = result.replace(placeholder, '\\')
         return result
 
     def _extract_json(self, text):
-        """Извлечение JSON из ответа LLM. Приоритет: ```json блоки, затем все {...}."""
+        """Извлечение JSON из ответа LLM."""
         if not text or not text.strip():
             return None
 
-        # Исправляем невалидные JSON escape от LLM
         text = self._preprocess_json_text(text)
-
         candidates = []
 
-        # === Стратегия 1: Code blocks ```json ... ``` (приоритетная) ===
         parts = text.split('```')
-        for i in range(1, len(parts), 2):  # берем содержимое между ```
+        for i in range(1, len(parts), 2):
             block = parts[i].strip()
             if block.startswith('json'):
                 block = block[4:].strip()
@@ -1082,7 +956,6 @@ class LLMMaskGenerator:
                                 pass
                             break
 
-        # === Стратегия 2: Все {...} на балансировке скобок ===
         depth = 0
         start = -1
         for i, ch in enumerate(text):
@@ -1122,7 +995,6 @@ class MaskQualityGate:
         self.retry_threshold = retry_threshold
 
     def evaluate(self, score: float) -> Tuple[str, str]:
-        """Оценка качества маски."""
         if score >= self.activation_threshold:
             return "activate", f"Score {score:.2f} >= {self.activation_threshold}"
         elif score >= self.retry_threshold:
