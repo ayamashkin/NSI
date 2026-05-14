@@ -4,11 +4,10 @@ Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
 
 LAST_FIX:
- 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor вместо ProcessPoolExecutor: один ENS индекс в памяти, shared между threads (устраняет OOM при multiprocessing)
- 2026-05-14 11:54 UTC+3 — batch: Excel input/output + result.db upsert с mask_pattern_hash (обновление при изменении маски)
- 2026-05-14 10:32 UTC+3 — multiprocessing batch через ProcessPoolExecutor + опции --workers/--chunk-size (производительность)
- 2026-05-08 12:00 UTC+3 — fuzzy_mismatched_params добавлен в выходной JSON row
- 2026-05-08 11:50 UTC+3 — match_type, match_type_ru, coating_substitution, mask_pattern в JSON row
+ 2026-05-14 15:30 UTC+3 — result.db: ВСЕГДА сохраняем результаты, путь из config.yaml (result_database.path), legacy results.db удален
+ 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor вместо ProcessPoolExecutor: один ENS индекс в памяти, shared между threads
+ 2026-05-14 11:54 UTC+3 — batch: Excel input/output + result.db upsert с mask_pattern_hash
+ 2026-05-14 10:32 UTC+3 — multiprocessing batch через ProcessPoolExecutor + опции --workers/--chunk-size
 """
 
 import click
@@ -16,7 +15,6 @@ import logging
 import yaml
 import json
 import multiprocessing
-import threading
 import psutil
 from pathlib import Path
 from typing import Optional, List
@@ -26,6 +24,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _get_result_db_path(ctx_obj: dict, cli_option: Optional[str]) -> str:
+    """Получить путь к result.db: CLI > config > default."""
+    if cli_option:
+        return cli_option
+    # Из конфига
+    config = ctx_obj.get('config', {})
+    result_db_cfg = config.get('result_database', {})
+    if result_db_cfg and result_db_cfg.get('path'):
+        return result_db_cfg['path']
+    return 'result.db'
+
 
 @click.group()
 @click.option('--config', '-c', default='config/config.yaml', help='Путь к конфигу')
@@ -48,7 +59,7 @@ def cli(ctx, config):
         logger.warning("Failed to setup logging from config: %s", e)
 
 # =============================================================================
-# LEGACY COMMANDS (LLM Mode)
+# LEGACY COMMANDS (LLM Mode) — оставлены для обратной совместимости
 # =============================================================================
 
 @cli.command()
@@ -66,6 +77,7 @@ def prompts():
         click.echo(f"  Модель: {cfg.resolve_model(settings)}")
         click.echo(f"  Ключевые слова: {', '.join(cfg.keywords[:5])}...")
 
+
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--prompt', '-p', multiple=True, help='ID промпта (можно несколько)')
@@ -76,7 +88,6 @@ def prompts():
 def process(ctx, input_file, prompt, auto, workers, force):
     """Обработка номенклатуры через LLM (legacy mode)"""
     from config.settings import get_settings
-    from core.database import DatabaseManager
     from core.processor import NomenclatureProcessor, load_excel_items
     from utils.excel_loader import ExcelLoader
 
@@ -91,8 +102,7 @@ def process(ctx, input_file, prompt, auto, workers, force):
 
     click.echo(f"✅ Загружено {len(items)} записей")
 
-    db = DatabaseManager(settings.database.path)
-    processor = NomenclatureProcessor(db, max_workers=workers)
+    processor = NomenclatureProcessor(None, max_workers=workers)
 
     prompt_ids = list(prompt) if prompt else []
     if auto:
@@ -106,8 +116,6 @@ def process(ctx, input_file, prompt, auto, workers, force):
 
     click.echo(f"\n✅ Обработка завершена: {len(results)} результатов")
 
-    stats = db.get_statistics()
-    click.echo(f"📈 Всего в БД: {stats.get('total', 0)}")
 
 @cli.command()
 @click.option('--output', '-o', default='results.json', help='Файл для экспорта')
@@ -117,20 +125,18 @@ def process(ctx, input_file, prompt, auto, workers, force):
 @click.option('--status', '-s', help='Фильтр по статусу (completed, error, ignored)')
 @click.option('--include-raw', is_flag=True, help='Включить raw_response')
 @click.option('--include-full-request', is_flag=True, help='Включить full_request')
-def export(output, structure, prompt, status, include_raw, include_full_request):
-    """Экспорт результатов обработки в JSON"""
-    from config.settings import get_settings
-    from core.database import DatabaseManager
+@click.pass_context
+def export(ctx, output, structure, prompt, status, include_raw, include_full_request):
+    """Экспорт результатов обработки в JSON (legacy — из result.db)"""
+    from core.result_database import ResultDatabaseManager
 
-    settings = get_settings()
-    db = DatabaseManager(settings.database.path)
+    result_db_path = _get_result_db_path(ctx.obj, None)
+    db = ResultDatabaseManager(db_path=result_db_path)
 
     click.echo("📤 Экспорт результатов...")
 
     results = db.get_all_results(
-        category=None,
-        status=status,
-        prompt_id=prompt,
+        success=None,
         limit=None
     )
 
@@ -138,51 +144,45 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
         click.echo("⚠️ Нет данных для экспорта")
         return
 
-    export_data = db.export_filtered_to_json(
-        output_path=output,
-        results=results,
-        structure=structure,
-        include_raw=include_raw,
-        include_full_request=include_full_request
-    )
+    with open(output, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
 
     click.echo(f"✅ Экспортировано: {len(results)} записей → {output}")
 
-@cli.command()
-def stats():
-    """Статистика по результатам в БД"""
-    from config.settings import get_settings
-    from core.database import DatabaseManager
 
-    settings = get_settings()
-    db = DatabaseManager(settings.database.path)
+@cli.command()
+@click.pass_context
+def stats(ctx):
+    """Статистика по result.db"""
+    from core.result_database import ResultDatabaseManager
+
+    result_db_path = _get_result_db_path(ctx.obj, None)
+    db = ResultDatabaseManager(db_path=result_db_path)
 
     stats = db.get_statistics()
 
-    click.echo("📊 Статистика результатов:")
-    click.echo(f"  Всего записей: {stats.get('total', 0)}")
-    click.echo(f"  По статусам:")
-    for status, count in stats.get('by_status', {}).items():
-        click.echo(f"    {status}: {count}")
-    click.echo(f"  По категориям:")
-    for cat, count in stats.get('by_category', {}).items():
-        click.echo(f"    {cat}: {count}")
-    click.echo(f"  По API:")
-    for api, count in stats.get('by_api', {}).items():
-        click.echo(f"    {api}: {count}")
+    click.echo("📊 Статистика result.db:")
+    click.echo(f"  Всего записей: {stats['total']}")
+    click.echo(f"  ✅ Успешно: {stats['success']}")
+    click.echo(f"  ❌ Не распознано: {stats['failed']}")
+    click.echo(f"  🔄 Обновлено после вставки: {stats['changed_after_insert']}")
+    click.echo(f"  📈 Success rate: {stats['success_rate']:.1%}")
+    click.echo(f"  По типам сопоставления:")
+    for mt, cnt in stats['by_match_type'].items():
+        click.echo(f"    {mt}: {cnt}")
+
 
 @cli.command()
 @click.option('--limit', '-l', default=10, help='Количество ошибок')
-@click.option('--prompt', '-p', help='Фильтр по ID промпта')
-def errors(limit, prompt):
-    """Просмотр ошибок обработки"""
-    from config.settings import get_settings
-    from core.database import DatabaseManager
+@click.pass_context
+def errors(ctx, limit):
+    """Просмотр ошибок обработки (из result.db)"""
+    from core.result_database import ResultDatabaseManager
 
-    settings = get_settings()
-    db = DatabaseManager(settings.database.path)
+    result_db_path = _get_result_db_path(ctx.obj, None)
+    db = ResultDatabaseManager(db_path=result_db_path)
 
-    error_results = db.get_all_results(status='error', prompt_id=prompt, limit=limit)
+    error_results = db.get_all_results(success=False, limit=limit)
 
     if not error_results:
         click.echo("✅ Ошибок не найдено")
@@ -192,9 +192,10 @@ def errors(limit, prompt):
 
     for i, result in enumerate(error_results, 1):
         click.echo(f"{i}. {result.get('article', 'N/A')}: {result.get('name', 'N/A')[:50]}...")
-        click.echo(f"   Промпт: {result.get('prompt_id', 'N/A')}")
-        click.echo(f"   Ошибка: {result.get('error_message', 'N/A')[:100]}...")
+        click.echo(f"   Уверенность: {result.get('confidence', 0):.2f}")
+        click.echo(f"   Уровень: {result.get('level', 'N/A')}")
         click.echo()
+
 
 @cli.command()
 @click.argument('text')
@@ -226,6 +227,7 @@ def detect(text):
             return
 
     click.echo("❌ Категория не определена")
+
 
 @cli.command()
 @click.option('--api', 'api_name', help='Проверить конкретный API (openwebui, mws, gigachat)')
@@ -294,9 +296,7 @@ def models(api_name):
 # =============================================================================
 
 def _init_llm_clients(settings, all_services=False):
-    """Инициализация LLM клиентов.
-    По умолчанию — только default_service из mask_generation.
-    При all_services — все настроенные сервисы с валидными credentials."""
+    """Инициализация LLM клиентов."""
     llm_clients = {}
 
     if all_services:
@@ -350,17 +350,22 @@ def _init_llm_clients(settings, all_services=False):
             logger.warning("Failed to init %s: %s", service_name, e)
     return llm_clients
 
+
 @cli.command()
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
-def process_parametric(text, db, ens_index, llm):
-    """Обработка одной строки с параметрическим поиском"""
+@click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml или result.db)')
+@click.pass_context
+def process_parametric(ctx, text, db, ens_index, llm, result_db):
+    """Обработка одной строки с параметрическим поиском + сохранение в result.db"""
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
+    from core.result_database import ResultDatabaseManager
     from config.settings import get_settings
 
+    result_db_path = _get_result_db_path(ctx.obj, result_db)
     llm_clients = {}
     settings = get_settings()
     if llm:
@@ -381,6 +386,32 @@ def process_parametric(text, db, ens_index, llm):
 
     result = processor.process(text)
 
+    # === СОХРАНЕНИЕ В result.db (ВСЕГДА) ===
+    result_manager = ResultDatabaseManager(db_path=result_db_path)
+    changed, reason = result_manager.upsert_result(
+        article="",  # для одиночной строки артикул пустой
+        name=text,
+        level=result.level.value if hasattr(result.level, 'value') else str(result.level),
+        success=result.success,
+        params=result.params,
+        ens_code=result.ens_match.get('code') if result.ens_match else None,
+        ens_name=result.ens_match.get('name') if result.ens_match else None,
+        ens_params=result.ens_params,
+        ens_params_mask=result.ens_params_mask,
+        confidence=result.confidence,
+        match_type=result.details.get('match_type') if result.details else None,
+        match_type_ru=result.details.get('match_type_ru') if result.details else None,
+        coating_substitution=result.details.get('coating_substitution') if result.details else None,
+        fuzzy_mismatched_params=result.details.get('fuzzy_mismatched_params') if result.details else None,
+        mask_id=result.details.get('mask_id') if result.details else None,
+        mask_pattern=result.details.get('mask_pattern') if result.details else None,
+        standard=result.standard,
+        item_type=result.item_type,
+        details=result.details,
+        processing_time_ms=result.processing_time_ms,
+    )
+    click.echo(f"💾 Сохранено в {result_db_path}: {reason}")
+
     click.echo(f"📋 Текст: {result.text}")
     click.echo(f"🔹 Уровень: {result.level.value}")
     click.echo(f"✅ Успех: {result.success}")
@@ -399,16 +430,12 @@ def process_parametric(text, db, ens_index, llm):
 
 
 def _calc_max_workers(default_workers: Optional[int], ens_index_path: str) -> int:
-    """Рассчитать безопасное число workers с учетом RAM.
-    ENS индекс ~6GB RAM. Оставляем 4GB для ОС + запас.
-    """
+    """Рассчитать безопасное число workers с учетом RAM."""
     cpu_count = multiprocessing.cpu_count()
     try:
         available_gb = psutil.virtual_memory().available / (1024**3)
-        # ENS индекс занимает ~6GB, каждый thread добавляет ~0.1GB overhead
-        # Безопасно: available_gb - 4GB (OS) / 0.5GB per thread
         safe_by_ram = max(1, int((available_gb - 4) / 0.5))
-        n_workers = min(cpu_count, safe_by_ram, 16)  # max 16 threads
+        n_workers = min(cpu_count, safe_by_ram, 16)
     except Exception:
         n_workers = min(cpu_count, 4)
 
@@ -452,7 +479,7 @@ def _process_single_with_processor(processor, text: str) -> dict:
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
 @click.option('--output', '-o', default='results.xlsx', help='Выходной Excel-файл')
-@click.option('--result-db', '-r', default='result.db', help='Путь к result.db для upsert')
+@click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml или result.db)')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию')
 @click.option('--validate/--no-validate', default=True, help='Проверять валидность')
 @click.option('--success-only', is_flag=True, help='Выгружать только успешно распознанные')
@@ -462,7 +489,8 @@ def _process_single_with_processor(processor, text: str) -> dict:
 @click.option('--chunk-size', default=50, type=int, help='Размер чанка для передачи в pool')
 @click.option('--article-col', default='Артикул', help='Имя колонки с артикулом во входном Excel')
 @click.option('--name-col', default='наименование', help='Имя колонки с наименованием во входном Excel')
-def batch(input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col):
+@click.pass_context
+def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col):
     """Пакетная обработка с параметрическим поиском (ThreadPool + shared ENS index + Excel + result.db)"""
     import pandas as pd
     from tqdm import tqdm
@@ -470,6 +498,10 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
     from core.automated_processor import AutomatedParametricProcessor
     from core.result_database import ResultDatabaseManager
     from config.settings import get_settings
+
+    # === ОПРЕДЕЛЯЕМ ПУТЬ К result.db ===
+    result_db_path = _get_result_db_path(ctx.obj, result_db)
+    click.echo(f"💾 Result DB: {result_db_path}")
 
     click.echo(f"📊 Загрузка {input_file}...")
     df = pd.read_excel(input_file)
@@ -534,7 +566,6 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
     stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
     if n_workers > 1:
-        # ThreadPool: shared processor, shared ENS index в памяти
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {}
             for i, text in enumerate(texts):
@@ -563,7 +594,6 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
                         stats['failed'] += 1
                     pbar.update(1)
     else:
-        # Однопоточный fallback
         for i, text in enumerate(tqdm(texts, desc="Обработка")):
             result = _process_single_with_processor(processor, text)
             results[i] = result
@@ -573,9 +603,9 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
             else:
                 stats['failed'] += 1
 
-    # === СОХРАНЕНИЕ В result.db ===
-    click.echo(f"💾 Сохранение в {result_db}...")
-    result_manager = ResultDatabaseManager(db_path=result_db)
+    # === СОХРАНЕНИЕ В result.db (ВСЕГДА) ===
+    click.echo(f"💾 Сохранение в {result_db_path}...")
+    result_manager = ResultDatabaseManager(db_path=result_db_path)
     db_stats = {'inserted': 0, 'updated': 0, 'unchanged': 0}
 
     for i, result in enumerate(results):
@@ -619,7 +649,6 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
     # === ЭКСПОРТ В EXCEL ===
     click.echo(f"📤 Экспорт в {output}...")
 
-    # Фильтрация для Excel
     if success_only:
         export_results = [r for r in results if r and r.get('success')]
         export_df = df[[df.index[i] for i, r in enumerate(results) if r and r.get('success')]]
@@ -627,7 +656,6 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
         export_results = results
         export_df = df.copy()
 
-    # Добавляем колонки к исходному DataFrame
     extra_cols = {
         'ens_code': 'Код ЕНС',
         'ens_name': 'Наименование ЕНС',
@@ -685,7 +713,7 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
-@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
+@click.option('--ens-index', '-i', required=True, help='Пути к индексу ЕСН')
 @click.option('--output', '-o', help='Excel-файл для сохранения отчета')
 @click.option('--json', '-j', 'json_output', help='JSON-файл для детального отчета')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
@@ -740,16 +768,18 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
 
 
 @cli.command('result-stats')
-@click.option('--result-db', '-r', default='result.db', help='Путь к result.db')
+@click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml)')
 @click.option('--since', help='Фильтр по дате изменения (ISO format)')
-def result_stats(result_db, since):
+@click.pass_context
+def result_stats(ctx, result_db, since):
     """Статистика по result.db"""
     from core.result_database import ResultDatabaseManager
 
-    manager = ResultDatabaseManager(db_path=result_db)
+    result_db_path = _get_result_db_path(ctx.obj, result_db)
+    manager = ResultDatabaseManager(db_path=result_db_path)
     stats = manager.get_statistics()
 
-    click.echo(f"📊 Статистика result.db ({result_db}):")
+    click.echo(f"📊 Статистика result.db ({result_db_path}):")
     click.echo(f"  Всего записей: {stats['total']}")
     click.echo(f"  ✅ Успешно: {stats['success']}")
     click.echo(f"  ❌ Не распознано: {stats['failed']}")
@@ -765,16 +795,18 @@ def result_stats(result_db, since):
 
 
 @cli.command('result-export')
-@click.option('--result-db', '-r', default='result.db', help='Путь к result.db')
+@click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml)')
 @click.option('--output', '-o', required=True, help='Выходной Excel-файл')
 @click.option('--source', '-s', help='Исходный Excel для обогащения')
 @click.option('--article-col', default='Артикул', help='Колонка артикула в исходном файле')
 @click.option('--name-col', default='наименование', help='Колонка наименования в исходном файле')
-def result_export(result_db, output, source, article_col, name_col):
+@click.pass_context
+def result_export(ctx, result_db, output, source, article_col, name_col):
     """Экспорт result.db в Excel (с опциональным обогащением исходного файла)"""
     from core.result_database import ResultDatabaseManager
 
-    manager = ResultDatabaseManager(db_path=result_db)
+    result_db_path = _get_result_db_path(ctx.obj, result_db)
+    manager = ResultDatabaseManager(db_path=result_db_path)
     manager.export_to_excel(
         output_path=output,
         source_path=source,
@@ -790,14 +822,18 @@ def result_export(result_db, output, source, article_col, name_col):
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
 @click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
-def diagnose(text, db, ens_index, llm, coating_map):
-    """Диагностика обработки одной строки номенклатуры."""
+@click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml)')
+@click.pass_context
+def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db):
+    """Диагностика обработки одной строки номенклатуры + сохранение в result.db."""
     import re
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
     from core.parametric_client import ParametricENSClient
+    from core.result_database import ResultDatabaseManager
     from config.settings import get_settings
 
+    result_db_path = _get_result_db_path(ctx.obj, result_db)
     settings = get_settings()
     llm_clients = {}
     if llm:
@@ -907,6 +943,32 @@ def diagnose(text, db, ens_index, llm, coating_map):
     click.echo(f"  processing_time_ms: {result.processing_time_ms:.1f}")
     if result.details:
         click.echo(f"  details: {result.details}")
+
+    # === СОХРАНЕНИЕ В result.db (ВСЕГДА) ===
+    result_manager = ResultDatabaseManager(db_path=result_db_path)
+    changed, reason = result_manager.upsert_result(
+        article="",
+        name=text,
+        level=result.level.value if hasattr(result.level, 'value') else str(result.level),
+        success=result.success,
+        params=result.params,
+        ens_code=result.ens_match.get('code') if result.ens_match else None,
+        ens_name=result.ens_match.get('name') if result.ens_match else None,
+        ens_params=result.ens_params,
+        ens_params_mask=result.ens_params_mask,
+        confidence=result.confidence,
+        match_type=result.details.get('match_type') if result.details else None,
+        match_type_ru=result.details.get('match_type_ru') if result.details else None,
+        coating_substitution=result.details.get('coating_substitution') if result.details else None,
+        fuzzy_mismatched_params=result.details.get('fuzzy_mismatched_params') if result.details else None,
+        mask_id=result.details.get('mask_id') if result.details else None,
+        mask_pattern=result.details.get('mask_pattern') if result.details else None,
+        standard=result.standard,
+        item_type=result.item_type,
+        details=result.details,
+        processing_time_ms=result.processing_time_ms,
+    )
+    click.echo(f"\n💾 Сохранено в {result_db_path}: {reason}")
 
     click.echo(f"\n{'=' * 60}")
 

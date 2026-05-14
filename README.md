@@ -443,13 +443,13 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.p
 
 ```bash
 # Полная обработка с сохранением в result.db и экспортом в Excel
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --result-db result.db --workers 8
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --workers 8
 
 # Только успешно распознанные
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --result-db result.db --success-only --workers 8
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --success-only --workers 8
 
 # С debug-информацией (для анализа)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --result-db result.db --include-details --workers 8
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --include-details --workers 8
 ```
 
 ### 4. Анализ качества распознавания
@@ -462,13 +462,14 @@ python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models
 
 ```bash
 # Статистика по result.db
-python cli.py result-stats --result-db result.db
+python cli.py result-stats
 
 # Экспорт result.db в Excel (с обогащением исходного файла)
-python cli.py result-export --result-db result.db --output output/enriched.xlsx --source data/nomenclature.xlsx --article-col "Артикул" --name-col "наименование"
+python cli.py result-export --output output/СТИ_КумАПП_из_АСУ_НСИ.xlsx --source "data/СТИ_КумАПП_из_АСУ_НСИ.xlsx" --article-col "Артикул" --name-col "наименование"
+python cli.py result-export --output output/nomenclature1.xlsx --source "data/nomenclature1.xlsx" --name-col "Наименование"
 
 # Записи, измененные после перегенерации масок
-python cli.py result-stats --result-db result.db --since 2026-05-14T10:00:00
+python cli.py result-stats --since 2026-05-14T10:00:00
 ```
 
 ### Вызовы для отладки
@@ -481,13 +482,13 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm
 
 # Batch-обработка через тестовый индекс (Excel → Excel)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.xlsx --result-db result.db --workers 4
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --workers 4
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
 
 # Запуск с логированием DEBUG — видно все шаги PARAM_MATCH, Fallback, _apply_mask
-python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --output output/results.xlsx --result-db result.db 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
+python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware/ens_hardware.pkl --output output/results.xlsx 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
 
 # Диагностика отдельной строки + паттерна
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80"  --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl
@@ -503,7 +504,7 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o mod
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 
 # Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.xlsx --result-db result.db
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.xlsx
 
 # Анализ качества
 python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
@@ -1273,7 +1274,7 @@ python cli.py process test_sample.xlsx --auto -w 2
 python cli.py stats
 
 # Проверка result.db
-python cli.py result-stats --result-db result.db
+python cli.py result-stats --result-db cache/result.db
 ```
 
 ---
