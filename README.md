@@ -1176,3 +1176,17 @@ aiohttp>=3.8        # Async API (опционально)
 ---
 
 
+```bash
+# 1. Размер файла и тип
+dir cache\masks.db /Q
+
+# 2. WAL файлы (если WAL-режим — -wal/-shm могут быть рассинхронизированы)
+dir cache\masks.db*
+
+# 3. Режим журналирования
+sqlite3 cache/masks.db "PRAGMA journal_mode;"
+sqlite3 cache/masks.db "PRAGMA wal_checkpoint;"
+
+# 4. Попробуйте простой запрос к БД через Python
+python -c "import sqlite3; c=sqlite3.connect('cache/masks.db'); print(c.execute('SELECT count(*) FROM masks').fetchone())"
+```

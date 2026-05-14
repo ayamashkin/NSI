@@ -221,8 +221,7 @@ class AutomatedParametricProcessor:
         # Fallback 2: ищем маску только по стандарту (любой item_type)
         if mask is None:
             try:
-                all_masks = self.mask_db.get_all_masks()
-                standard_masks = [m for m in all_masks if m.standard == standard]
+                standard_masks = self.mask_db.list_masks(standard=standard)
                 logger.info(f"[PROCESS] Found {len(standard_masks)} masks for standard='{standard}' (any item_type)")
                 if standard_masks:
                     mask = standard_masks[0]
