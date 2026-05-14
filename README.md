@@ -443,39 +443,19 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.p
 
 ```bash
 # Полная обработка с сохранением в result.db и экспортом в Excel
-python cli.py batch data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  -o output/results.xlsx \
-  --result-db result.db \
-  --workers 8
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --result-db result.db --workers 8
 
 # Только успешно распознанные
-python cli.py batch data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  -o output/results.xlsx \
-  --result-db result.db \
-  --success-only \
-  --workers 8
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --result-db result.db --success-only --workers 8
 
 # С debug-информацией (для анализа)
-python cli.py batch data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  -o output/results.xlsx \
-  --result-db result.db \
-  --include-details \
-  --workers 8
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --result-db result.db --include-details --workers 8
 ```
 
 ### 4. Анализ качества распознавания
 
 ```bash
-python cli.py analyze-quality data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  -o output/quality_report.json
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality_report.json
 ```
 
 ### 5. Работа с result.db
@@ -634,10 +614,7 @@ python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" \
 Команда `analyze-quality` собирает статистику распознавания по группам `(item_type, standard)`:
 
 ```bash
-python cli.py analyze-quality data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  -o output/quality_report.json
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality_report.json
 ```
 
 ### Формат JSON-отчета
