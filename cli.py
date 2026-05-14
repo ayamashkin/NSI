@@ -4,11 +4,11 @@ Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
 
 LAST_FIX:
+ 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor вместо ProcessPoolExecutor: один ENS индекс в памяти, shared между threads (устраняет OOM при multiprocessing)
  2026-05-14 11:54 UTC+3 — batch: Excel input/output + result.db upsert с mask_pattern_hash (обновление при изменении маски)
  2026-05-14 10:32 UTC+3 — multiprocessing batch через ProcessPoolExecutor + опции --workers/--chunk-size (производительность)
  2026-05-08 12:00 UTC+3 — fuzzy_mismatched_params добавлен в выходной JSON row
  2026-05-08 11:50 UTC+3 — match_type, match_type_ru, coating_substitution, mask_pattern в JSON row
- 2026-05-08 11:30 UTC+3 — ens auto-mapping: автогенерация ens_column_mapping.yaml из Excel
 """
 
 import click
@@ -16,10 +16,12 @@ import logging
 import yaml
 import json
 import multiprocessing
+import threading
+import psutil
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config.settings import setup_logging
 
@@ -396,42 +398,32 @@ def process_parametric(text, db, ens_index, llm):
         click.echo(f"  Код: {result.ens_match.get('code')}")
 
 
-# === МУЛЬТИПРОЦЕССИНГ: worker-функции ===
-def _init_processor_worker(args: dict) -> 'AutomatedParametricProcessor':
-    """Инициализация processor внутри worker-процесса (lazy init)."""
-    from core.mask_database import MaskDatabase
-    from core.automated_processor import AutomatedParametricProcessor
-    from config.settings import get_settings
+def _calc_max_workers(default_workers: Optional[int], ens_index_path: str) -> int:
+    """Рассчитать безопасное число workers с учетом RAM.
+    ENS индекс ~6GB RAM. Оставляем 4GB для ОС + запас.
+    """
+    cpu_count = multiprocessing.cpu_count()
+    try:
+        available_gb = psutil.virtual_memory().available / (1024**3)
+        # ENS индекс занимает ~6GB, каждый thread добавляет ~0.1GB overhead
+        # Безопасно: available_gb - 4GB (OS) / 0.5GB per thread
+        safe_by_ram = max(1, int((available_gb - 4) / 0.5))
+        n_workers = min(cpu_count, safe_by_ram, 16)  # max 16 threads
+    except Exception:
+        n_workers = min(cpu_count, 4)
 
-    settings = get_settings()
-    mask_db = MaskDatabase(db_path=args['db'])
+    if default_workers:
+        n_workers = min(default_workers, n_workers)
 
-    llm_clients = {}
-    if args.get('llm'):
-        llm_clients = _init_llm_clients(settings, all_services=True)
-
-    processor = AutomatedParametricProcessor(
-        mask_db=mask_db,
-        llm_clients=llm_clients if llm_clients else None,
-        ens_index_path=args.get('ens_index'),
-        use_llm_generation=args.get('llm', False),
-        settings=settings
-    )
-    return processor
+    logger.info("[WORKERS] CPU=%d, available_RAM=%.1fGB, safe_workers=%d, requested=%s, final=%d",
+                cpu_count, available_gb if 'available_gb' in locals() else 0, safe_by_ram if 'safe_by_ram' in locals() else 0, default_workers, n_workers)
+    return n_workers
 
 
-def _process_single(args: dict) -> dict:
-    """Обработка одной записи в worker-процессе."""
-    text = args['text']
-    processor = args.get('_processor')
-
-    if processor is None:
-        processor = _init_processor_worker(args)
-        args['_processor'] = processor
-
+def _process_single_with_processor(processor, text: str) -> dict:
+    """Обработка одной записи с существующим processor (thread-safe)."""
     result = processor.process(text)
 
-    # Сериализация результата
     return {
         'text': result.text,
         'level': result.level.value if hasattr(result.level, 'value') else str(result.level),
@@ -466,12 +458,12 @@ def _process_single(args: dict) -> dict:
 @click.option('--success-only', is_flag=True, help='Выгружать только успешно распознанные')
 @click.option('--include-details', is_flag=True, help='Включить debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
-@click.option('--workers', '-w', default=None, type=int, help='Количество worker-процессов (по умолчанию: число CPU)')
+@click.option('--workers', '-w', default=None, type=int, help='Количество worker-потоков (по умолчанию: авто по RAM/CPU)')
 @click.option('--chunk-size', default=50, type=int, help='Размер чанка для передачи в pool')
 @click.option('--article-col', default='Артикул', help='Имя колонки с артикулом во входном Excel')
 @click.option('--name-col', default='наименование', help='Имя колонки с наименованием во входном Excel')
 def batch(input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col):
-    """Пакетная обработка с параметрическим поиском (multiprocessing + Excel + result.db)"""
+    """Пакетная обработка с параметрическим поиском (ThreadPool + shared ENS index + Excel + result.db)"""
     import pandas as pd
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
@@ -484,7 +476,6 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
 
     # Определяем колонки
     if article_col not in df.columns:
-        # Пробуем найти колонку с артикулом (case-insensitive)
         article_candidates = [c for c in df.columns if 'артикул' in str(c).lower() or 'article' in str(c).lower() or 'код' in str(c).lower()]
         if article_candidates:
             article_col = article_candidates[0]
@@ -523,30 +514,32 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
             return
         click.echo("🤖 LLM генерация включена")
 
-    # === МУЛЬТИПРОЦЕССИНГ ===
-    n_workers = workers or multiprocessing.cpu_count()
-    click.echo(f"⚡ Workers: {n_workers} (CPU cores: {multiprocessing.cpu_count()})")
+    # === ИНИЦИАЛИЗАЦИЯ PROCESSOR (один раз, shared между threads) ===
+    click.echo(f"⚙️ Инициализация processor (ENS index: {ens_index})...")
+    mask_db = MaskDatabase(db_path=db)
+    processor = AutomatedParametricProcessor(
+        mask_db=mask_db,
+        llm_clients=llm_clients if llm else None,
+        ens_index_path=ens_index,
+        use_llm_generation=llm,
+        settings=settings
+    )
+    click.echo("✅ Processor инициализирован")
 
-    worker_args = {
-        'db': db,
-        'ens_index': ens_index,
-        'llm': llm,
-    }
+    # === РАСЧЕТ БЕЗОПАСНОГО ЧИСЛА WORKERS ===
+    n_workers = _calc_max_workers(workers, ens_index)
+    click.echo(f"⚡ Workers: {n_workers} (авто-расчет по RAM/CPU)")
 
     results: List[Optional[dict]] = [None] * len(texts)
     stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
     if n_workers > 1:
-        tasks = [
-            {**worker_args, 'text': text, 'idx': i}
-            for i, text in enumerate(texts)
-        ]
-
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # ThreadPool: shared processor, shared ENS index в памяти
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {}
-            for task in tasks:
-                future = executor.submit(_process_single, task)
-                futures[future] = task['idx']
+            for i, text in enumerate(texts):
+                future = executor.submit(_process_single_with_processor, processor, text)
+                futures[future] = i
 
             with tqdm(total=len(texts), desc="Обработка") as pbar:
                 for future in as_completed(futures):
@@ -570,39 +563,12 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
                         stats['failed'] += 1
                     pbar.update(1)
     else:
-        mask_db = MaskDatabase(db_path=db)
-        processor = AutomatedParametricProcessor(
-            mask_db=mask_db,
-            llm_clients=llm_clients if llm else None,
-            ens_index_path=ens_index,
-            use_llm_generation=llm,
-            settings=settings
-        )
+        # Однопоточный fallback
         for i, text in enumerate(tqdm(texts, desc="Обработка")):
-            result = processor.process(text)
-            results[i] = {
-                'text': result.text,
-                'level': result.level.value if hasattr(result.level, 'value') else str(result.level),
-                'success': result.success,
-                'params': result.params,
-                'ens_code': result.ens_match.get('code') if result.ens_match else None,
-                'ens_name': result.ens_match.get('name') if result.ens_match else None,
-                'ens_params': result.ens_params,
-                'ens_params_mask': result.ens_params_mask,
-                'confidence': result.confidence,
-                'processing_time_ms': result.processing_time_ms,
-                'item_type': result.item_type,
-                'standard': result.standard,
-                'match_type': result.details.get('match_type') if result.details else None,
-                'match_type_ru': result.details.get('match_type_ru') if result.details else None,
-                'coating_substitution': result.details.get('coating_substitution') if result.details else None,
-                'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None,
-                'mask_id': result.details.get('mask_id') if result.details else None,
-                'mask_pattern': result.details.get('mask_pattern') if result.details else None,
-                'details': result.details
-            }
+            result = _process_single_with_processor(processor, text)
+            results[i] = result
             stats['total'] += 1
-            if results[i]['success']:
+            if result['success']:
                 stats['success'] += 1
             else:
                 stats['failed'] += 1
@@ -679,19 +645,16 @@ def batch(input_file, db, ens_index, output, result_db, llm, validate, success_o
     for i, result in enumerate(results):
         if result is None:
             continue
-        # Находим индекс в export_df (если success_only — индексы могут не совпадать)
         if success_only and not result.get('success'):
             continue
         row_idx = export_df.index[i] if not success_only else None
         if success_only:
-            # Находим соответствующую строку
             mask = (df[article_col].astype(str).str.strip() == str(articles[i]).strip()) & \
                    (df[name_col].astype(str).str.strip() == str(names[i]).strip())
             matching = df[mask]
             if len(matching) == 0:
                 continue
             row_idx = matching.index[0]
-            # Добавляем в export_df если еще нет
             if row_idx not in export_df.index:
                 export_df = pd.concat([export_df, matching.iloc[[0]]], ignore_index=True)
                 row_idx = export_df.index[-1]

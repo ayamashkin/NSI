@@ -5,15 +5,16 @@ Level 6: Параметрическое сопоставление с испол
 VERSION: 2026-05-14
 
 LAST_FIXES:
+ 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor support: threading.Lock для _find_in_ens_cache, _pattern_cache, _ens_by_standard_type (thread-safety)
  2026-05-14 10:32 UTC+3 — индексация ENS по (стандарт, тип) + O(1) поиск по коду + кэш compiled regex (производительность)
  2026-05-08 13:10 UTC+3 — strict_union_keys: учитывается в _compare_param_sets (false=skip пустые ключи)
  2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
  2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
- 2026-05-07 12:10 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
 """
 
 import re
 import logging
+import threading
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,6 +202,10 @@ class ParametricENSClient:
         self._ens_by_code: Dict[str, Dict] = {}
         self._pattern_cache: Dict[str, Any] = {}
 
+        # === THREAD-SAFETY: locks для кэшей ===
+        self._find_in_ens_lock = threading.Lock()
+        self._pattern_lock = threading.Lock()
+
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
             self._build_indexes()
@@ -256,10 +261,11 @@ class ParametricENSClient:
         return candidates
 
     def _get_compiled_pattern(self, pattern: str) -> Any:
-        """Кэширование compiled regex."""
-        if pattern not in self._pattern_cache:
-            self._pattern_cache[pattern] = re.compile(pattern, re.IGNORECASE)
-        return self._pattern_cache[pattern]
+        """Кэширование compiled regex (thread-safe)."""
+        with self._pattern_lock:
+            if pattern not in self._pattern_cache:
+                self._pattern_cache[pattern] = re.compile(pattern, re.IGNORECASE)
+            return self._pattern_cache[pattern]
 
     def _get_ens_by_code(self, ens_code: str) -> Optional[Dict]:
         """O(1) поиск по коду ЕНС."""
@@ -663,7 +669,7 @@ class ParametricENSClient:
             logger.warning("[_find_in_ens] ENS index not loaded!")
             return None, debug_candidates
 
-        # === КЭШИРОВАНИЕ ===
+        # === КЭШИРОВАНИЕ (thread-safe) ===
         # Кэшируем результат по хешу (params, required, standard, item_type)
         cache_key = "{}:{}:{}:{}".format(
             hash(str(sorted(params.items()))),
@@ -671,10 +677,11 @@ class ParametricENSClient:
             standard,
             item_type
         )
-        if cache_key in self._find_in_ens_cache:
-            cached = self._find_in_ens_cache[cache_key]
-            logger.debug("[_find_in_ens] Cache hit for %s/%s", standard, item_type)
-            return cached['match'], cached['debug']
+        with self._find_in_ens_lock:
+            if cache_key in self._find_in_ens_cache:
+                cached = self._find_in_ens_cache[cache_key]
+                logger.debug("[_find_in_ens] Cache hit for %s/%s", standard, item_type)
+                return cached['match'], cached['debug']
 
         best_match = None
         best_score = 0.0
@@ -790,11 +797,12 @@ class ParametricENSClient:
         else:
             logger.info("[_find_in_ens] No match found (best_score=%.2f < 0.7 threshold)", best_score)
 
-        # Сохраняем в кэш перед возвратом
-        self._find_in_ens_cache[cache_key] = {
-            'match': best_match if best_score >= 0.7 else None,
-            'debug': debug_candidates
-        }
+        # Сохраняем в кэш перед возвратом (thread-safe)
+        with self._find_in_ens_lock:
+            self._find_in_ens_cache[cache_key] = {
+                'match': best_match if best_score >= 0.7 else None,
+                'debug': debug_candidates
+            }
 
         if best_score < 0.7:
             return None, debug_candidates
