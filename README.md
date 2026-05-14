@@ -514,25 +514,13 @@ python cli.py batch data/nomenclature.xlsx \
   --workers 4
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware2/ens_hardware.pkl \
-  --workers 4 \
-  -o output/quality.xlsx \
-  -j output/quality.json
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
 
 # Запуск с логированием DEBUG — видно все шаги PARAM_MATCH, Fallback, _apply_mask
-python -u cli.py batch data/nomenclature.xlsx \
-  --db cache/masks.db \
-  --ens-index models/hardware2/ens_hardware.pkl \
-  --output output/results.xlsx \
-  --result-db result.db \
-  2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
+python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --output output/results.xlsx --result-db result.db 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
 
 # Диагностика отдельной строки + паттерна
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" \
-  --db cache/masks.db \
-  --ens-index models/hardware2/ens_hardware.pkl
+python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80"  --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl
 ```
 
 ### Prod
@@ -545,19 +533,10 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o mod
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 
 # Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature1.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  --workers 8 \
-  -o output/results.xlsx \
-  --result-db result.db
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 8 -o output/results.xlsx --result-db result.db
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature1.xlsx \
-  -d cache/masks.db \
-  -i models/hardware/ens_hardware.pkl \
-  -o output/quality.xlsx \
-  -j output/quality.json
+python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
 ```
 
 ---
