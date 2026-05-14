@@ -485,12 +485,7 @@ python cli.py analyze-quality data/nomenclature.xlsx \
 python cli.py result-stats --result-db result.db
 
 # Экспорт result.db в Excel (с обогащением исходного файла)
-python cli.py result-export \
-  --result-db result.db \
-  --output output/enriched.xlsx \
-  --source data/nomenclature.xlsx \
-  --article-col "Артикул" \
-  --name-col "наименование"
+python cli.py result-export --result-db result.db --output output/enriched.xlsx --source data/nomenclature.xlsx --article-col "Артикул" --name-col "наименование"
 
 # Записи, измененные после перегенерации масок
 python cli.py result-stats --result-db result.db --since 2026-05-14T10:00:00
@@ -506,12 +501,7 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm
 
 # Batch-обработка через тестовый индекс (Excel → Excel)
-python cli.py batch data/nomenclature.xlsx \
-  -d cache/masks.db \
-  -i models/hardware2/ens_hardware.pkl \
-  -o output/results.xlsx \
-  --result-db result.db \
-  --workers 4
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.xlsx --result-db result.db --workers 4
 
 # Анализ качества
 python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
