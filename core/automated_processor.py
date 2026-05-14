@@ -1,27 +1,26 @@
 """
-Parametric ENS Client Module
-Level 6: Параметрическое сопоставление с использованием масок.
+Main Processor Module
+Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
+AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 VERSION: 2026-05-14
 
 LAST_FIXES:
- 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor support: threading.Lock для _find_in_ens_cache, _pattern_cache, _ens_by_standard_type (thread-safety)
- 2026-05-14 10:32 UTC+3 — индексация ENS по (стандарт, тип) + O(1) поиск по коду + кэш compiled regex (производительность)
- 2026-05-08 13:10 UTC+3 — strict_union_keys: учитывается в _compare_param_sets (false=skip пустые ключи)
- 2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
- 2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
+ 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor support: threading.Lock для _coating_rules_cache, _ens_candidates_cache (thread-safety)
+ 2026-05-14 10:32 UTC+3 — кэш coating_rules (одна загрузка на сессию) + lazy debug-логи + делегация ENS поиска в индексы (производительность)
+ 2026-05-08 13:15 UTC+3 — match_type: поддержка params_mask_exact + params_ens_exact
+ 2026-05-08 11:50 UTC+3 — fuzzy_mismatched_params: подробная информация о несовпавших параметрах в results.json
+ 2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
 """
 
-import re
 import logging
 import threading
 from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
-# Lazy import для доступа к MatchingConfig (избегаем circular dependency)
+# Lazy import для избежания circular dependency
 _matching_config = None
 
 def _get_matching_config():
@@ -32,750 +31,711 @@ def _get_matching_config():
             from config.settings import get_settings
             _matching_config = get_settings().matching
         except Exception:
+            # Fallback: дефолтные значения если конфиг не загрузился
             class _FallbackMatchingConfig:
                 success_threshold = 0.7
                 fuzzy_threshold = 0.6
                 v2_exact_threshold = 0.99
                 coating_similarity_threshold = 0.8
                 strict_union_keys = False
-                debug_per_parameter = True
             _matching_config = _FallbackMatchingConfig()
     return _matching_config
 
-# Кэш для empty_equivalent_values
-_empty_equiv_cache: Optional[Dict[str, List[str]]] = None
+logger = logging.getLogger(__name__)
 
-def _load_empty_equivalent_values() -> Dict[str, List[str]]:
-    """Загрузка значений, эквивалентных пустым, из ens_column_mapping.yaml."""
-    global _empty_equiv_cache
-    if _empty_equiv_cache is not None:
-        return _empty_equiv_cache
+class ProcessingLevel(Enum):
+    """Уровни обработки."""
+    LEVEL_0_EXTRACT = "standard_extraction"  # Извлечение стандарта
+    LEVEL_1_MASK_LOOKUP = "mask_lookup"  # Проверка MaskDatabase
+    LEVEL_2_LLM_GENERATE = "llm_generation"  # Генерация маски
+    LEVEL_3_VALIDATE = "auto_validation"  # Авто-валидация
+    LEVEL_5_SAVE = "save_mask"  # Сохранение маски
+    LEVEL_6_PARAMETRIC_MATCH = "parametric_match"  # Параметрическое сопоставление
+    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"  # TF-IDF fallback
+    LEVEL_8_LLM_DIRECT = "llm_direct"  # Прямой LLM вызов
 
-    default = {}  # Загружается из ens_column_mapping.yaml
-
-    try:
-        import yaml
-        from pathlib import Path
-        for path in ['config/ens_column_mapping.yaml', 'ens_column_mapping.yaml']:
-            if Path(path).exists():
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
-                equiv = data.get('empty_equivalent_values', {})
-                if equiv:
-                    _empty_equiv_cache = {k: [str(v).strip() for v in vals]
-                                          for k, vals in equiv.items() if vals}
-                    return _empty_equiv_cache
-                break
-    except Exception as e:
-        logger.warning("Failed to load empty_equivalent_values: %s", e)
-
-    _empty_equiv_cache = default
-    return _empty_equiv_cache
-
-def _text_similarity(a: str, b: str) -> float:
-    """
-    Token-based Jaccard similarity для текстовых параметров.
-    Удаляет цифры перед сравнением (Кд9.хр → кд, хр).
-
-    Examples:
-    'Хим.Пас' ~ 'Хим.Пас' = 1.0
-    'Кд' ~ 'Кд9.хр' = 0.5 (кд общий, хр нет)
-    'Кд.фос' ~ 'Кд.фос.окс' = 0.67
-    'Окс.Фос' ~ 'Фос.Окс' = 1.0
-    """
-    import re
-    if not a or not b:
-        return 0.0
-
-    a_str = str(a).lower().strip()
-    b_str = str(b).lower().strip()
-
-    # Exact match
-    if a_str == b_str:
-        return 1.0
-
-    # Extract tokens, remove digits
-    def _extract_tokens(text):
-        raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
-        cleaned = []
-        for t in raw:
-            letters = re.sub(r'[0-9]', '', t)
-            if letters:
-                cleaned.append(letters)
-        return set(cleaned)
-
-    tokens_a = _extract_tokens(a_str)
-    tokens_b = _extract_tokens(b_str)
-
-    if not tokens_a or not tokens_b:
-        return 0.0
-
-    intersection = tokens_a & tokens_b
-    union = tokens_a | tokens_b
-
-    return len(intersection) / len(union)
-
-def _is_empty_equivalent(field: str, value: Any) -> bool:
-    """Проверяет, является ли значение эквивалентным пустому/None."""
-    if value is None:
-        return True
-    val_str = str(value).strip()
-    if not val_str:
-        return True
-    equiv_values = _load_empty_equivalent_values()
-    empty_vals = equiv_values.get(field, [])
-    return val_str.lower() in [v.lower() for v in empty_vals]
-
-@dataclass
-class ParametricMatch:
-    """Результат параметрического сопоставления."""
-    ens_code: Optional[str]
-    ens_name: Optional[str]
-    mdm_key: Optional[str]
-    matched_params: Dict[str, Any]
-    ens_params: Dict[str, Any]  # параметры из индекса ENS
-    ens_params_mask: Dict[str, Any]  # параметры из ens_name по маске
-    score: float
-    match_type: str  # 'exact', 'partial', 'fuzzy'
-    confidence: float
-    details: Dict[str, Any]
-
+class ProcessingResult:
+    """Результат обработки."""
     def __init__(
         self,
-        ens_code: Optional[str] = None,
-        ens_name: Optional[str] = None,
-        mdm_key: Optional[str] = None,
-        matched_params: Optional[Dict[str, Any]] = None,
+        text: str = '',
+        level: ProcessingLevel = ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
+        success: bool = False,
+        params: Optional[Dict[str, Any]] = None,
         ens_params: Optional[Dict[str, Any]] = None,
         ens_params_mask: Optional[Dict[str, Any]] = None,
-        score: float = 0.0,
-        match_type: str = 'failed',
+        ens_match: Optional[Dict[str, Any]] = None,
         confidence: float = 0.0,
-        details: Optional[Dict[str, Any]] = None
+        processing_time_ms: float = 0.0,
+        details: Optional[Dict[str, Any]] = None,
+        item_type: str = '',
+        standard: str = ''
     ):
-        self.ens_code = ens_code
-        self.ens_name = ens_name
-        self.mdm_key = mdm_key
-        self.matched_params = matched_params or {}
+        self.text = text
+        self.level = level
+        self.success = success
+        self.params = params or {}
         self.ens_params = ens_params or {}
         self.ens_params_mask = ens_params_mask or {}
-        self.score = score
-        self.match_type = match_type
+        self.ens_match = ens_match
         self.confidence = confidence
+        self.processing_time_ms = processing_time_ms
         self.details = details or {}
+        self.item_type = item_type
+        self.standard = standard
 
-class ParametricENSClient:
+    @property
+    def ens_params_from_match(self) -> Optional[Dict[str, Any]]:
+        """Параметры из ENS записи (только при наличии ens_code)."""
+        if (self.ens_match and self.ens_match.get('code')
+            and 'params' in self.ens_match and self.ens_match['params']):
+            return self.ens_match['params']
+        return None
+
+class AutomatedParametricProcessor:
     """
-    Клиент для параметрического поиска по ЕСН.
+    Основной процессор автоматизированного параметрического поиска.
 
-    Архитектура:
-    1. Проверка наличия маски в MaskDatabase
-    2. Применение маски для извлечения параметров
-    3. Поиск по параметрам в ENSIndex
-    4. Расчет score сопоставления
+    Архитектура (согласно ROADMAP.md):
+    Level 0: Regex Extractor (standard from text)
+    Level 1: MaskDatabase (check existing validated masks)
+    Level 2: AutoMaskGenerator (LLM local/cloud)
+    Level 3: AutoValidator (test on ENS samples, score >= 0.85)
+    Level 5: Save to MaskDatabase (auto-approved)
+    Level 6: ParametricMatching (extract params, compare)
+    Level 7: ENSIndex (TF-IDF fallback)
+    Level 8: LLM Direct (few-shot with ENS examples)
     """
 
     def __init__(
         self,
         mask_db,
+        llm_clients: Optional[Dict[str, Any]] = None,
         ens_index_path: Optional[str] = None,
-        use_tfidf_fallback: bool = True
+        min_mask_score: float = 0.85,
+        max_llm_retries: int = 3,
+        use_llm_generation: bool = True,
+        settings: Optional[Any] = None
     ):
         """
-        Инициализация клиента.
+        Инициализация процессора.
 
         Args:
             mask_db: Экземпляр MaskDatabase
+            llm_clients: Словарь LLM клиентов {provider: client}
             ens_index_path: Путь к индексу ЕСН
-            use_tfidf_fallback: Использовать TF-IDF fallback
+            min_mask_score: Минимальный score для активации маски
+            max_llm_retries: Максимум попыток LLM генерации
+            use_llm_generation: Разрешить LLM генерацию масок
         """
         self.mask_db = mask_db
+        self.llm_clients = llm_clients or {}
         self.ens_index_path = ens_index_path
-        self.use_tfidf_fallback = use_tfidf_fallback
-        self._ens_index = None
+        self.min_mask_score = min_mask_score
+        self.max_llm_retries = max_llm_retries
+        self.use_llm_generation = use_llm_generation
+        self.settings = settings
 
-        # Кэш для _find_in_ens по хешу (params, standard, item_type)
-        self._find_in_ens_cache: Dict[str, Any] = {}
-
-        # === ПРОИЗВОДИТЕЛЬНОСТЬ: индексы и кэши ===
-        self._ens_by_standard_type: Dict[Tuple[str, str], List[Dict]] = {}
-        self._ens_by_code: Dict[str, Dict] = {}
-        self._pattern_cache: Dict[str, Any] = {}
+        # === ПРОИЗВОДИТЕЛЬНОСТЬ: кэши ===
+        self._coating_rules_cache: Optional[Dict] = None
+        self._coating_rules_loaded: bool = False
+        self._ens_candidates_cache: Dict[Tuple[str, str], List[Dict]] = {}
 
         # === THREAD-SAFETY: locks для кэшей ===
-        self._find_in_ens_lock = threading.Lock()
-        self._pattern_lock = threading.Lock()
+        self._coating_rules_lock = threading.Lock()
+        self._ens_candidates_lock = threading.Lock()
 
-        if ens_index_path and Path(ens_index_path).exists():
-            self._load_ens_index()
-            self._build_indexes()
+        # Инициализация компонентов
+        self._init_components()
 
-    def _build_indexes(self):
-        """Построить индексы для O(1) / O(small N) доступа к ENS."""
-        items = self._ens_index.get('items', []) if self._ens_index else []
-        logger.info("Building ENS indexes for %d items...", len(items))
+    def _init_components(self):
+        """Инициализация внутренних компонентов."""
+        # StandardExtractor
+        from parsers.standard_extractor import get_standard_extractor
+        self.standard_extractor = get_standard_extractor()
 
-        for item in items:
-            std = self._normalize_standard(item.get('нтд') or item.get('standard', ''))
-            itype = str(item.get('тип_изделия') or item.get('наименование_типа', '')).upper().strip()
-
-            # Индекс по (стандарт, тип)
-            key = (std, itype)
-            self._ens_by_standard_type.setdefault(key, []).append(item)
-
-            # Индекс по коду
-            code = str(item.get('код', '')).strip()
-            mdm = str(item.get('mdm_key', '')).strip()
-            if code:
-                self._ens_by_code[code] = item
-            if mdm and mdm != code:
-                self._ens_by_code[mdm] = item
-
-        total_keys = len(self._ens_by_standard_type)
-        logger.info("ENS indexes built: %d (std,type) groups, %d codes", total_keys, len(self._ens_by_code))
-
-    def _get_candidates_by_index(self, std_norm: Optional[str], query_type: Optional[str]) -> List[Dict]:
-        """Получить кандидатов ENS через индекс (вместо полного скана)."""
-        candidates = []
-
-        if std_norm and query_type:
-            key = (std_norm, query_type)
-            candidates = self._ens_by_standard_type.get(key, [])
-
-        if not candidates and std_norm:
-            # Fallback: все записи с этим стандартом
-            for key, group in self._ens_by_standard_type.items():
-                if key[0] == std_norm:
-                    candidates.extend(group)
-
-        if not candidates and query_type:
-            # Fallback: все записи с этим типом
-            for key, group in self._ens_by_standard_type.items():
-                if key[1] == query_type:
-                    candidates.extend(group)
-
-        if not candidates:
-            # Ultimate fallback (редко): все записи
-            candidates = self._ens_index.get('items', []) if self._ens_index else []
-
-        return candidates
-
-    def _get_compiled_pattern(self, pattern: str) -> Any:
-        """Кэширование compiled regex (thread-safe)."""
-        with self._pattern_lock:
-            if pattern not in self._pattern_cache:
-                self._pattern_cache[pattern] = re.compile(pattern, re.IGNORECASE)
-            return self._pattern_cache[pattern]
-
-    def _get_ens_by_code(self, ens_code: str) -> Optional[Dict]:
-        """O(1) поиск по коду ЕНС."""
-        return self._ens_by_code.get(str(ens_code).strip())
-
-    def _relax_pattern(self, pattern: str, standard: str = None) -> str:
-        r"""
-        Исправления regex-масок для корректного matching'а:
-        1. Латинская t/a → русская т/а + \s* после типа изделия
-        2. \s* после )? опциональной группы
-        3. \s* перед \( в опциональной группе
-        4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (запятая как разделитель)
-        5. ОСТ1 → ОСТ\s*1 (пробел между ОСТ и цифрой)
-        6. Винт: вынести номинальный_диаметр_резьбы из опциональной группы
-        7. Шайба: добавить толщину между наружным_диаметром и покрытием
-        """
-        relaxed = pattern
-
-        # 1. Латинская t/a → русская т/а (без double \s*)
-        _ru_t = chr(0x0442)  # русская т
-        _ru_a = chr(0x0430)  # русская а
-        _ru_b = chr(0x0431)  # русская б
-        _ru_g = chr(0x0433)  # русская г
-
-        for latin, cyr in [('Винt', 'Вин' + _ru_t), ('Болt', 'Бол' + _ru_t),
-                           ('Шайba', 'Шай' + _ru_b + _ru_a), ('Гайka', 'Гай' + _ru_g + _ru_a)]:
-            if latin in relaxed:
-                has_s = relaxed[relaxed.find(latin) + len(latin):].startswith(r'\s*')
-                relaxed = relaxed.replace(latin, cyr + (r'\s*' if not has_s else ''), 1)
-
-        # Fallback: fix any remaining mixed-script type names
-        relaxed = relaxed.replace('Винt', 'Вин' + _ru_t)
-        relaxed = relaxed.replace('Болt', 'Бол' + _ru_t)
-        relaxed = relaxed.replace('Шайb', 'Шай' + _ru_b)
-        relaxed = relaxed.replace('Гайk', 'Гай' + _ru_g)
-
-        # 2. )?(?P< → )?\s*(?P<
-        relaxed = re.sub(r'\)\?\(\?P<', lambda m: r')?\s*(?P<', relaxed)
-
-        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (через .replace)
-        relaxed = relaxed.replace(r'\d+(?:\\.\d+)?', r'\d+(?:[.,]\d+)?')
-        # Also try with single backslash (masks loaded from DB)
-        relaxed = relaxed.replace(r'\d+(?:\.\d+)?', r'\d+(?:[.,]\d+)?')
-
-        # 5. ОСТ1 → ОСТ\s*1
-        if r'ОСТ\s*1' not in relaxed:
-            relaxed = re.sub(r'ОСТ1', lambda m: r'ОСТ\s*1', relaxed)
-
-        # 6. Винт: вынести номинальный_диаметр_резьбы из опциональной группы
-        _opt_fix_old = r')\s*\)\s*-(?P<номинальный_диаметр_резьбы>'
-        _opt_fix_new = r')\s*\)\s*-)?(?P<номинальный_диаметр_резьбы>'
-        if _opt_fix_old in relaxed:
-            relaxed = relaxed.replace(_opt_fix_old, _opt_fix_new, 1)
-            relaxed = relaxed.replace(r'))?\s*(?P<длина>', r')\s*-(?P<длина>', 1)
-
-        # 7. Шайба: пропустить промежуточное число между наружным диаметром и покрытием
-        _shaiba_old = r'(?P<наружный_диаметр_диаметр_вписа>\d+)\-?(?P<покрытие>[\w.]+)?'
-        _shaiba_new = r'(?P<наружный_диаметр_диаметр_вписа>\d+)(?:\-\d+)?\-(?P<покрытие>[\w.]+)'
-        if _shaiba_old in relaxed:
-            relaxed = relaxed.replace(_shaiba_old, _shaiba_new, 1)
-        _shaiba_old2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)\-(?P<покрытие>[\w.]+)?'
-        _shaiba_new2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)(?:\-\d+)?\-(?P<покрытие>[\w.]+)'
-        if _shaiba_old2 in relaxed:
-            relaxed = relaxed.replace(_shaiba_old2, _shaiba_new2, 1)
-
-        # 8. Винт: добавить \s* перед \( в группе исполнения
-        relaxed = relaxed.replace(
-            r'(?:\u005c(\u005cs*(?P<исполнение>',
-            r'(?:\s*\(\s*(?P<исполнение>',
-            1
+        # AutoValidator
+        from core.auto_validator import AutoValidator
+        self.validator = AutoValidator(
+            ens_index_path=self.ens_index_path,
+            activation_threshold=self.min_mask_score
         )
 
-        # 9. Исполнение: сделать скобки опциональными, разрешить пробел/дефис после
-        relaxed = relaxed.replace('$$?', r'\(')
-        relaxed = relaxed.replace(r'$$\s*)', r'\)\s*)')
-        relaxed = relaxed.replace(r'$$\s*(?P<', r'\)\s*(?P<')
-        relaxed = relaxed.replace('$$', r'\(')
-        relaxed = relaxed.replace('$(?P<', r'\((?P<')
-        relaxed = relaxed.replace(r'$\s*)', r'\)\s*)')
-        relaxed = relaxed.replace(r'$\s*(?P<', r'\)\s*(?P<')
-        relaxed = relaxed.replace(r'\$\$?\s*)', r'\)\s*)')
-        relaxed = relaxed.replace(r'\$\$?(?P<', r'\((?P<')
-        relaxed = relaxed.replace(r'\$(?P<', r'\((?P<')
-        relaxed = relaxed.replace(r'\)\s*', r'\)[-\s]*')
-        if '$' in relaxed.rstrip('$').rstrip():
-            relaxed = re.sub(r'\$(?=\s|[-\s]*\(|[-\s]*\d|[-\s]*[A-Z])', r'\)', relaxed)
-            relaxed = re.sub(r'\$(?=\s*$)', r'\)', relaxed)
-
-        # 14. Разделители между параметрами: \s+ → [-\s]+
-        relaxed = relaxed.replace(r')\s+(?P<', r')[-\s]+(?P<')
-        relaxed = relaxed.replace(r'\d+\s+\d+', r'\d+[-\s]+\d+')
-
-        # 10. Метрическая резьба: добавить опциональный шаг (x1,25)
-        relaxed = relaxed.replace(
-            r'(?:M(?P<номинальный_диаметр_резьбы>\d+))',
-            r'(?:M(?P<номинальный_диаметр_резьбы>\d+)(?:[xX\u00d7]\d+(?:[.,]\d+)?)?)',
-            1
-        )
-
-        # 10a. Сделать M опциональным перед номинальный_диаметр_резьбы
-        relaxed = relaxed.replace(
-            r'(?P<номинальный_диаметр_резьбы>M',
-            r'(?P<номинальный_диаметр_резьбы>(?:M)?'
-        )
-
-        # 11. Класс поля допуска: ограничить буквами (без цифр)
-        relaxed = relaxed.replace(
-            r'(?P<класс_поле_допуска>[\d+][\w]*)',
-            r'(?P<класс_поле_допуска>[\d+][a-zA-Z\u0430-\u044f\u0410-\u042f]*)',
-            1
-        )
-
-        # 12. Удалить конфликтующую группу tipo_rezby=M
-        relaxed = relaxed.replace(
-            r'(?:\s*(?P<тип_резьбы>M))?\s*[-\s]*',
-            r'\s*[-\s]*',
-            1
-        )
-
-        # 13. Группа прочности: ограничить цифры перед точкой
-        relaxed = relaxed.replace(
-            r'(?P<группа_класс_прочности>\d+\.\d+)',
-            r'(?P<группа_класс_прочности>\d{1,2}(?:\.\d+)?)',
-            1
-        )
-
-        # 9a. Если маска не содержит суффикс стандарта -- добавить
-        has_std = any(s in relaxed for s in ['ОСТ', 'ГОСТ', 'ТУ', 'ISO'])
-        if standard and not has_std:
-            std_suffix = None
-            if standard.startswith('ОСТ 1'):
-                parts = standard.split('1', 1)
-                if len(parts) > 1:
-                    std_suffix = r'-ОСТ\s*1\s*' + parts[1].strip().replace(' ', r'\s*')
-            elif standard.startswith('ГОСТ'):
-                std_suffix = r'\s*ГОСТ\s*' + standard.replace('ГОСТ', '').strip().replace(' ', r'\s*')
-            elif standard.startswith('ТУ'):
-                std_suffix = r'\s*ТУ\s*' + standard.replace('ТУ', '').strip().replace(' ', r'\s*')
-            elif standard.startswith('ISO'):
-                std_suffix = r'\s*ISO\s*' + standard.replace('ISO', '').strip().replace(' ', r'\s*')
-
-            if std_suffix:
-                relaxed = relaxed.rstrip('$').rstrip() + std_suffix + r'\s*$'
-
-        # Проверяем что результат - валидный regex
-        try:
-            re.compile(relaxed)
-        except re.error as e:
-            logger.warning(
-                "_relax_pattern produced invalid regex: %s. "
-                "Falling back to original pattern. "
-                "Original (50 chars): %r. "
-                "Relaxed (50 chars): %r",
-                e, pattern[:50], relaxed[:50]
+        # LLM Generator
+        if self.use_llm_generation and self.llm_clients:
+            from generators.llm_mask_generator import LLMMaskGenerator
+            self.llm_generator = LLMMaskGenerator(
+                clients=self.llm_clients,
+                settings=self.settings,
+                max_retries=self.max_llm_retries
             )
-            return pattern
+        else:
+            self.llm_generator = None
 
-        return relaxed
+        # Parametric Client
+        from core.parametric_client import ParametricENSClient
+        self.parametric_client = ParametricENSClient(
+            mask_db=self.mask_db,
+            ens_index_path=self.ens_index_path
+        )
 
-    def _load_ens_index(self):
-        """Загрузка индекса ЕСН."""
-        try:
-            import pickle
-            with open(self.ens_index_path, 'rb') as f:
-                data = pickle.load(f)
-            self._ens_index = data
-            logger.info("Loaded ENS index from %s", self.ens_index_path)
-        except Exception as e:
-            logger.warning("Failed to load ENS index: %s", e)
+        logger.info("AutomatedParametricProcessor initialized")
 
-    def match(
-        self,
-        text: str,
-        standard: Optional[str] = None,
-        item_type: Optional[str] = None,
-        pattern: Optional[str] = None
-    ) -> ParametricMatch:
+    def process(self, text: str) -> ProcessingResult:
         """
-        Параметрическое сопоставление.
+        Обработка одной строки номенклатуры.
 
         Args:
-            text: Текст номенклатуры
-            standard: Стандарт (если известен)
-            item_type: Тип изделия (если известен)
+            text: Строка номенклатуры
 
         Returns:
-            ParametricMatch
+            ProcessingResult
         """
-        # Шаг 1: Получаем маску
-        mask = None
-        if standard and item_type:
+        import time
+        start_time = time.time()
+
+        # Очищаем trailing punctuation (запятые, точки и т.д. в конце строки)
+        clean_text = text.strip().rstrip(',.;: ')
+        if clean_text != text.strip():
+            logger.debug("Cleaned trailing punctuation: '%s' -> '%s'", text, clean_text)
+
+        logger.info("Processing: %s...", text[:50])
+
+        # Level 0: Извлечение стандарта
+        extracted = self.standard_extractor.extract_all(clean_text)
+        standard_info = extracted.get('standard_info')
+        item_type = extracted.get('item_type')
+
+        if not standard_info or not item_type:
+            # Не удалось извлечь базовую информацию -> Level 8: LLM Direct
+            return self._llm_direct_process(clean_text, start_time)
+
+        standard = standard_info.normalized
+        logger.info("[PROCESS] standard='%s', item_type='%s', clean_text='%s'", standard, item_type, clean_text[:60])
+
+        # Level 1: Проверка MaskDatabase
+        search_item_type = item_type.upper()  # Нормализуем в uppercase (стандарты: БОЛТ, ВИНТ)
+        logger.info("[PROCESS] Searching mask: standard='%s', item_type='%s'", standard, search_item_type)
+        mask = self.mask_db.get_mask(standard, search_item_type)
+        logger.info("[PROCESS] Search by (standard+UPPER): found=%s", mask is not None)
+
+        # Fallback: пробуем исходный регистр
+        if mask is None:
             mask = self.mask_db.get_mask(standard, item_type)
+            if mask:
+                logger.info("[PROCESS] Found mask with original item_type: %s", item_type)
 
-        if not mask:
-            # Fallback: пробуем извлечь стандарт и тип из текста
-            from parsers.standard_extractor import get_standard_extractor
-            extractor = get_standard_extractor()
-            extracted = extractor.extract_all(text)
+        # Fallback 2: ищем маску только по стандарту (любой item_type)
+        if mask is None:
+            try:
+                standard_masks = self.mask_db.list_masks(standard=standard)
+                logger.info("[PROCESS] Found %d masks for standard='%s' (any item_type)", len(standard_masks), standard)
+                if standard_masks:
+                    mask = standard_masks[0]
+                    logger.info("[PROCESS] Using mask with item_type='%s'", mask.item_type)
+            except Exception as e:
+                logger.warning("[PROCESS] Fallback search by standard error: %s", e)
 
-            std_info = extracted.get('standard_info')
-            extracted_type = extracted.get('item_type')
+        logger.info("[PROCESS] mask found: %s, is_active: %s", mask is not None, getattr(mask, 'is_active', False))
 
-            if std_info and extracted_type:
-                mask = self.mask_db.get_mask(
-                    std_info.normalized,
-                    extracted_type
+        if mask is not None and not mask.is_active:
+            # Маска найдена но не активна — активируем принудительно
+            logger.info("[PROCESS] Mask found but inactive, activating")
+            try:
+                self.mask_db.activate_mask(mask.id)
+                mask.is_active = True
+            except Exception as e:
+                logger.warning("[PROCESS] Failed to activate mask: %s", e)
+
+        if mask and mask.is_active:
+            # Активная маска найдена -> Level 6: ParametricMatch
+            # Убеждаемся что у маски заполнен стандарт (берем извлеченный если в маске пусто)
+            effective_standard = getattr(mask, 'standard', None) or standard
+            if not getattr(mask, 'standard', None):
+                mask.standard = effective_standard
+                logger.info("[PROCESS] Fixed empty mask.standard -> '%s'", effective_standard)
+            logger.info("[PROCESS] -> Level 6: ParametricMatch with mask %s", mask.id)
+            return self._parametric_match(clean_text, mask, extracted, start_time)
+
+        # Level 2: LLM Generation (если разрешено)
+        if self.use_llm_generation and self.llm_generator:
+            standard_info = extracted.get('standard_info')
+            generated_mask = self._generate_mask(standard, item_type, clean_text, standard_info)
+
+            if generated_mask:
+                # Level 3: AutoValidation
+                validation_result = self._validate_mask(
+                    generated_mask, standard, item_type
                 )
 
-        # Шаг 2: Применяем маску (с релаксацией для совместимости)
-        # Если pattern передан напрямую - используем его (skip БД)
-        effective_mask = mask
-        if pattern and not mask:
-            # Создаём временный mask-like объект
-            from types import SimpleNamespace
-            effective_mask = SimpleNamespace(
-                pattern=pattern, required=[], id=-1
-            )
+                if validation_result.passed:
+                    # Level 5: Save mask
+                    mask_record = self._save_mask(generated_mask, validation_result)
 
-        if effective_mask:
-            # Используем стандарт из параметра match() если в маске пусто
-            effective_standard = getattr(effective_mask, 'standard', None) or standard
-            relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern, standard=effective_standard)
-            extracted_params = self._apply_mask(relaxed_pattern, text, standard=effective_standard)
-
-            if extracted_params:
-                # Шаг 3: Ищем в ЕСН
-                required = getattr(effective_mask, 'required', [])
-                # Если required - JSON строка, парсим
-                if isinstance(required, str):
-                    try:
-                        import json as _json
-                        required = _json.loads(required)
-                    except (ValueError, TypeError):
-                        required = []
-
-                # Remap params для поиска в ENS (ENS индекс использует нормализованные имена)
-                search_params = self._remap_params(extracted_params)
-                match_result = self._find_in_ens(search_params, required, standard=standard, text=text, item_type=item_type)
-
-                if match_result:
-                    # Извлекаем данные из ENS
-                    ens_code = match_result.get('код')
-                    ens_name = match_result.get('полное_наименование') or match_result.get('наименование')
-                    ens_params_from_index = {k: v for k, v in match_result.items() if k not in ['_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд']}
-
-                    # Парсим ens_name той же маской → ens_params_mask (raw, те же имена групп)
-                    ens_params_mask = None
-                    if ens_name:
-                        try:
-                            ens_params_mask = self._apply_mask(relaxed_pattern, str(ens_name), standard=effective_standard)
-                        except Exception as e:
-                            logger.debug("[match] Failed to parse ens_name='%s': %s", ens_name, e)
-
-                    # Новая логика сопоставления
-                    final_score, match_type, details = self._calculate_match_score_v2(
-                        text=text,
-                        ens_name=ens_name,
-                        params=extracted_params,
-                        ens_params=ens_params_from_index,
-                        ens_params_mask=ens_params_mask,
-                        required=required
-                    )
-
-                    return ParametricMatch(
-                        ens_code=ens_code,
-                        ens_name=ens_name,
-                        mdm_key=match_result.get('mdm_key'),
-                        matched_params=extracted_params,
-                        ens_params=ens_params_from_index,
-                        ens_params_mask=ens_params_mask or {},
-                        score=final_score,
-                        match_type=match_type,
-                        confidence=final_score,
-                        details={
-                            'mask_id': getattr(effective_mask, 'id', None),
-                            'pattern': getattr(effective_mask, 'pattern', None),
-                            **details
-                        }
-                    )
-                # Если ЕСН не нашёл - всё равно возвращаем extracted params
-                # (confidence от regex match)
-                required = getattr(effective_mask, 'required', [])
-                if required:
-                    regex_confidence = self._calculate_confidence(extracted_params, required)
+                    if mask_record:
+                        # Level 6: ParametricMatch с новой маской
+                        return self._parametric_match(
+                            text, mask_record, extracted, start_time
+                        )
                 else:
-                    # Если required не заданы - считаем confidence по всем non-None полям
-                    non_none = sum(1 for v in extracted_params.values() if v is not None)
-                    regex_confidence = non_none / len(extracted_params) if extracted_params else 0.0
-
-                logger.debug("[REGEX_ONLY] extracted=%s, required=%s, confidence=%.2f", extracted_params, required, regex_confidence)
-
-                # Всегда возвращаем regex_only при непустых extracted (threshold 0.1)
-                if regex_confidence > 0.1:
-                    return ParametricMatch(
-                        ens_code=None,
-                        ens_name=None,
-                        mdm_key=None,
-                        matched_params=extracted_params,
-                        score=0.0,
-                        match_type='regex_only',
-                        confidence=regex_confidence,
-                        details={
-                            'mask_id': getattr(effective_mask, 'id', None),
-                            'pattern': getattr(effective_mask, 'pattern', None)
-                        }
+                    logger.warning(
+                        "Generated mask failed validation: %.2f",
+                        validation_result.score
                     )
 
-        # Fallback: TF-IDF поиск
-        # NOTE: _tfidf_fallback не реализован в ParametricENSClient,
-        # используйте automated_processor для TF-IDF fallback
-        # if self.use_tfidf_fallback and self._ens_index:
-        #     return self._tfidf_fallback(text)
+        # Level 7: TF-IDF Fallback
+        return self._tfidf_fallback(text, extracted, start_time)
 
-        return ParametricMatch(
-            ens_code=None,
-            mdm_key=None,
-            matched_params={},
-            score=0.0,
-            match_type='failed',
-            confidence=0.0,
-            details={'error': 'No mask found and no fallback available'}
+    def _generate_mask(
+        self,
+        standard: str,
+        item_type: str,
+        text: str = "",
+        standard_info: Optional[Any] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Генерация маски через LLM с каскадным keyword resolution."""
+        if not self.llm_generator:
+            return None
+
+        # Получаем примеры из ЕСН
+        examples = self.validator._get_ens_examples(standard, item_type)
+
+        if len(examples) < 10:
+            logger.warning("Not enough examples for %s/%s", standard, item_type)
+            return None
+
+        # Берем точный тип из ЕСН (тип_изделия = 'Наименование типа')
+        ens_item_type = item_type
+        if examples:
+            first_example = examples[0]
+            type_from_ens = first_example.get('тип_изделия')
+            if type_from_ens and type_from_ens.strip():
+                ens_item_type = type_from_ens.strip().lower()
+                logger.info(
+                    "[AutoProcessor] Тип из ЕСН: '%s' (был: '%s')",
+                    ens_item_type, item_type
+                )
+
+        mask, attempts = self.llm_generator.generate_mask(
+            standard=standard,
+            item_type=ens_item_type,
+            examples=examples,
+            name=text,
+            standard_info=standard_info
         )
 
-    def _apply_mask(self, pattern: str, text: str, standard: str = None) -> Optional[Dict[str, Any]]:
-        """Применение regex маски к тексту."""
-        try:
-            compiled = re.compile(pattern, re.IGNORECASE)
-            match = compiled.search(text)
+        if mask:
+            logger.info("Generated mask for %s/%s", standard, item_type)
+            return mask
 
-            if match:
-                return match.groupdict()
-            else:
-                logger.debug("[_apply_mask] Regex did not match. Pattern: %r, Text: %r", pattern[:150], text[:80])
-        except re.error as e:
-            # Логируем маску для диагностики - показываем первые 200 символов
-            logger.error("Invalid mask pattern: %s. Pattern (first 200 chars): %r", e, pattern[:200])
+        return None
+
+    def _validate_mask(
+        self,
+        mask: Dict[str, Any],
+        standard: str,
+        item_type: str
+    ) -> Any:
+        """Валидация сгенерированной маски."""
+        from database.mask_database import MaskRecord
+
+        # Создаем временную запись для валидации
+        temp_mask = MaskRecord(
+            standard=standard,
+            item_type=item_type,
+            pattern=mask['pattern'],
+            params=mask['params'],
+            required=mask['required']
+        )
+
+        # Валидируем
+        result = self.validator.validate_mask(
+            pattern=temp_mask.pattern,
+            params=temp_mask.params,
+            required=temp_mask.required,
+            standard=standard,
+            item_type=item_type
+        )
+
+        return result
+
+    def _save_mask(self, mask: Dict[str, Any], validation: Any) -> Optional[Any]:
+        """Сохранение валидированной маски в БД."""
+        from database.mask_database import MaskRecord
+
+        mask_record = MaskRecord(
+            standard=mask['standard'],
+            item_type=mask['item_type'],
+            pattern=mask['pattern'],
+            params=mask['params'],
+            required=mask['required'],
+            auto_score=validation.score,
+            is_active=validation.passed,
+            source='llm',
+            test_examples=validation.details[:5]  # Сохраняем первые 5 тестов
+        )
+
+        mask_id = self.mask_db.save_mask(mask_record, auto_activate=True)
+
+        if mask_id:
+            mask_record.id = mask_id
+            logger.info("Saved mask with ID: %s", mask_id)
+            return mask_record
 
         return None
 
     @staticmethod
-    def _remap_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    def _token_similarity(a: str, b: str) -> float:
         """
-        Переименование неправильных имён групп из LLM-генерированных масок
-        в корректные ENS-имена параметров.
+        Token-based Jaccard similarity для текстовых параметров.
+        Решает проблему перестановки токенов: 'Окс.Фос.ЭФП' ~ 'Фос.Окс.ЭФП' = 100%
+        Также нормализует цифры: 'Кд3' ~ 'Кд' = 100% (для покрытий/материалов они не значимы)
         """
-        if not params:
-            return params
-        remapped = dict(params)
-        aliases = {
-            'наружный_диаметр_диаметр_вписа': 'номинальный_диаметр_резьбы',
-            'наружный_диаметр': 'номинальный_диаметр_резьбы',
-            'диаметр_вписанной_окружности': 'номинальный_диаметр_резьбы',
-            'd_вп': 'номинальный_диаметр_резьбы',
-            'наружный_диаметр_головки': 'диаметр_головки',
-            'диаметр_резьбы': 'номинальный_диаметр_резьбы',
-        }
-        for wrong, correct in aliases.items():
-            if wrong in remapped:
-                value = remapped.pop(wrong)
-                if correct in remapped and correct == 'номинальный_диаметр_резьбы':
-                    remapped['длина'] = remapped[correct]
-                remapped[correct] = value
-                logger.debug("[REMAP] %s → %s: %s", wrong, correct, value)
-        return remapped
+        import re
+        if not a or not b:
+            return 0.0
+        # Извлекаем токены, убираем цифры (для покрытий/материалов они не значимы)
+        def _extract_tokens(text):
+            raw_tokens = re.findall(r'[a-zA-Zа-яА-Я0-9]+', str(text).lower())
+            # Убираем цифры из токенов: 'Кд3' -> 'кд', 'фос' -> 'фос'
+            cleaned = []
+            for t in raw_tokens:
+                # Отделяем буквы от цифр
+                letters = re.sub(r'[0-9]', '', t)
+                if letters:
+                    cleaned.append(letters)
+            return set(cleaned)
 
-    def _expand_coating_variants(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Expand coating search variants.
-        When coating is 'Кд', also try 'Кд6', 'Кд9.фос.окс' etc.
-        Returns list of param dicts to try.
-        """
-        variants = [params]
-        coating = params.get('покрытие')
+        tokens_a = _extract_tokens(a)
+        tokens_b = _extract_tokens(b)
+        if not tokens_a or not tokens_b:
+            return 0.0
+        intersection = tokens_a & tokens_b
+        union = tokens_a | tokens_b
+        return len(intersection) / len(union)
+
+    def _get_coating_variants(self, coating: str) -> List[str]:
+        """Generate coating search variants (Кд -> Кд6, Кд9.фос.окс etc)."""
         if not coating:
-            return variants
-
+            return [coating]
         coating_str = str(coating).strip().lower()
-
-        # Кд variants
+        variants = [coating]  # original
         if coating_str in ('кд', 'кд.'):
-            for variant in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
-                              'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
-                expanded = dict(params)
-                expanded['покрытие'] = variant
-                variants.append(expanded)
-
+            for v in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
+                      'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
+                variants.append(v)
         return variants
 
-    def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Поиск по параметрам в индексе ЕНС. Fallback: точное совпадение наименования с проверкой типа."""
-        match, _ = self._find_in_ens_debug(params, required, standard, text, item_type)
-        return match
+    def _get_cached_ens_candidates(self, standard: str, item_type: str) -> List[Dict]:
+        """Кэшированная загрузка ENS candidates по (standard, item_type) (thread-safe)."""
+        key = (standard.upper(), item_type.upper())
+        with self._ens_candidates_lock:
+            if key not in self._ens_candidates_cache:
+                candidates = self.validator._get_ens_examples(standard, item_type) or []
+                self._ens_candidates_cache[key] = candidates
+                logger.debug("[ENS_CACHE] Loaded %d candidates for %s (cache miss)", len(candidates), key)
+            else:
+                candidates = self._ens_candidates_cache[key]
+                logger.debug("[ENS_CACHE] Using %d cached candidates for %s (cache hit)", len(candidates), key)
+            return candidates
 
-    def _find_in_ens_debug(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], List[Dict]]:
+    def _load_coating_rules(self) -> Optional[Dict]:
+        """Получение coating_rules: сначала из settings, fallback на прямое чтение YAML (thread-safe)."""
+        with self._coating_rules_lock:
+            if self._coating_rules_loaded:
+                return self._coating_rules_cache
+
+            # Способ 1: через settings (если settings.py обновлён)
+            try:
+                from config.settings import get_settings
+                settings = get_settings()
+                coating_rules = getattr(settings, 'coating_rules', None)
+                if coating_rules:
+                    self._coating_rules_cache = coating_rules
+                    self._coating_rules_loaded = True
+                    logger.info("[COATING_SUBST] Loaded from settings")
+                    return coating_rules
+            except Exception as e:
+                logger.debug("[COATING_SUBST] Settings not available: %s", e)
+
+            # Способ 2: прямое чтение YAML с поиском по всем возможным путям
+            import yaml
+            from pathlib import Path
+            import os
+
+            search_paths = []
+
+            # Относительно CWD и вверх по дереву
+            cwd = Path.cwd()
+            for level in range(6):
+                search_paths.append(cwd / "config" / "config.yaml")
+                search_paths.append(cwd / "config.yaml")
+                cwd = cwd.parent
+
+            # Относительно расположения automated_processor.py
+            try:
+                import inspect
+                script_dir = Path(os.path.dirname(os.path.abspath(inspect.getfile(self.__class__))))
+                search_paths.extend([
+                    script_dir / ".." / "config" / "config.yaml",
+                    script_dir / ".." / ".." / "config" / "config.yaml",
+                ])
+            except Exception:
+                pass
+
+            # Абсолютные пути
+            search_paths.extend([
+                Path("/app/config/config.yaml"),
+                Path("/workspace/config/config.yaml"),
+            ])
+
+            # Переменная окружения
+            env_path = os.environ.get('NSI_CONFIG_PATH')
+            if env_path:
+                search_paths.insert(0, Path(env_path))
+
+            for path in search_paths:
+                try:
+                    if path.exists():
+                        with open(path, 'r', encoding='utf-8') as f:
+                            config = yaml.safe_load(f) or {}
+                        coating_rules = config.get('coating_rules')
+                        if coating_rules:
+                            self._coating_rules_cache = coating_rules
+                            self._coating_rules_loaded = True
+                            logger.info("[COATING_SUBST] Loaded from %s", path)
+                            return coating_rules
+                except Exception:
+                    continue
+
+            logger.warning("[COATING_SUBST] coating_rules not found anywhere")
+            self._coating_rules_cache = {}
+            self._coating_rules_loaded = True
+            return None
+
+    def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Dict[str, str], Optional[Dict]]:
         """
-        Поиск по параметрам в индексе ЕНС с подробным debug-выводом.
+        Применить auto_substitution из coating_rules к extracted_params.
+
+        Логика:
+        1. Делаем пробный fuzzy pass для определения марки материала
+        2. Если марка требует substitution (например, 14Х17Н2 → Н.Кд вместо Кд)
+           → заменяем покрытие в params
+        3. Возвращаем (возможно изменённые) params + информацию о substitution
+
+        Returns:
+            Tuple[extracted_params (возможно изменённые), substitution_info или None]
+            substitution_info содержит: original, corrected, material, reason, rule_note
+        """
+        logger.debug("[COATING_SUBST] Called with coating=%s, candidates=%d", extracted_params.get('покрытие'), len(ens_candidates))
+
+        # Загружаем coating rules напрямую из YAML (не через settings, т.к.
+        # оригинальный settings.py может не иметь поля coating_rules)
+        coating_rules = self._load_coating_rules()
+        if not coating_rules:
+            logger.warning("[COATING_SUBST] No coating_rules in config, skipping substitution")
+            return extracted_params, None
+
+        # Проверяем включена ли auto_substitution
+        if not coating_rules.get('auto_substitution_enabled', False):
+            logger.debug("[COATING_SUBST] auto_substitution_enabled=false, skipping")
+            return extracted_params, None
+
+        # Пробный fuzzy pass для определения марки материала
+        trial_match, trial_debug = self._fuzzy_match_ens_debug(extracted_params, ens_candidates)
+        if not trial_match and not trial_debug:
+            logger.debug("[COATING_SUBST] No candidates for trial match, skipping")
+            return extracted_params, None
+
+        # Определяем марку материала из кандидатов
+        material = None
+        if trial_match:
+            material = trial_match.get('марка_материала') or trial_match.get('марка_стали')
+            # Если лучший match не дал марку — берем из key_ens_params первых кандидатов
+            if not material and trial_debug:
+                for cd in trial_debug[:5]:
+                    key_params = cd.get('key_ens_params', {})
+                    material = key_params.get('марка_материала') or key_params.get('марка_стали')
+                    if material:
+                        break
+
+        if not material:
+            logger.debug("[COATING_SUBST] Could not determine material from candidates")
+            return extracted_params, None
+
+        logger.debug("[COATING_SUBST] Detected material: '%s'", material)
+
+        # Применяем auto_substitution правила
+        import re
+        coating = extracted_params.get('покрытие', '')
+        if not coating:
+            return extracted_params, None
+
+        for rule in coating_rules.get('auto_substitution', []):
+            material_pattern = rule.get('material_pattern', '')
+            wrong_coating = rule.get('wrong_coating', '')
+            correct_coating = rule.get('correct_coating', '')
+
+            # Проверяем material_pattern
+            if not re.search(material_pattern, str(material), re.IGNORECASE):
+                continue
+
+            # Проверяем wrong_coating (fuzzy match)
+            wrong_sim = self._token_similarity(coating, wrong_coating)
+            if wrong_sim < 0.5:
+                continue
+
+            # Substitution применима! — формируем info для details
+            new_params = dict(extracted_params)
+            new_params['покрытие'] = correct_coating
+            substitution_info = {
+                'original': coating,
+                'corrected': correct_coating,
+                'material': str(material),
+                'reason': rule.get('note', ''),
+                'rule': {
+                    'material_pattern': material_pattern,
+                    'wrong_coating': wrong_coating,
+                    'correct_coating': correct_coating,
+                }
+            }
+            logger.info(
+                "[COATING_SUBST] Applied: '%s' → '%s' (material='%s', rule=%s)",
+                coating, correct_coating, material, rule.get('note', '')
+            )
+            return new_params, substitution_info
+
+        logger.debug("[COATING_SUBST] No matching rule for coating='%s', material='%s'", coating, material)
+        return extracted_params, None
+
+    def _fuzzy_match_ens(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Optional[Dict]:
+        """
+        Fuzzy matching извлечённых параметров с кандидатами из ЕСН.
+        Для покрытия пробует expanded variants (Кд -> Кд6/Кд9.фос.окс).
+        Возвращает best_match или None. Для debug используйте _fuzzy_match_ens_debug.
+        """
+        best_match, _ = self._fuzzy_match_ens_debug(extracted_params, ens_candidates)
+        return best_match
+
+    def _fuzzy_match_ens_debug(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Optional[Dict], List[Dict]]:
+        """
+        Fuzzy matching с подробным debug-выводом всех кандидатов.
         Возвращает: (best_match, debug_candidates_list)
+        Каждый элемент debug_candidates_list содержит: name, score, matched_params, key_params
         """
-        debug_candidates = []
-        if not self._ens_index or 'items' not in self._ens_index:
-            logger.warning("[_find_in_ens] ENS index not loaded!")
-            return None, debug_candidates
-
-        # === КЭШИРОВАНИЕ (thread-safe) ===
-        # Кэшируем результат по хешу (params, required, standard, item_type)
-        cache_key = "{}:{}:{}:{}".format(
-            hash(str(sorted(params.items()))),
-            hash(str(required)),
-            standard,
-            item_type
-        )
-        with self._find_in_ens_lock:
-            if cache_key in self._find_in_ens_cache:
-                cached = self._find_in_ens_cache[cache_key]
-                logger.debug("[_find_in_ens] Cache hit for %s/%s", standard, item_type)
-                return cached['match'], cached['debug']
-
+        TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
         best_match = None
         best_score = 0.0
+        debug_candidates = []
 
-        # Нормализуем запрошенный стандарт и тип для сравнения
-        query_std_norm = self._normalize_standard(standard) if standard else None
-        query_type = item_type.upper().strip() if item_type else None
+        # Expand coating variants for matching
+        coating_variants = None
+        if 'покрытие' in extracted_params:
+            coating_variants = self._get_coating_variants(extracted_params['покрытие'])
 
-        # === ИНДЕКСАЦИЯ: получаем кандидатов вместо полного скана ===
-        candidates = self._get_candidates_by_index(query_std_norm, query_type)
-        logger.debug("[_find_in_ens] Candidates via index: %d (std=%s, type=%s)", len(candidates), query_std_norm, query_type)
+        # Debug: выводим извлечённые параметры
+        extracted_str = ", ".join("{}={}".format(k, v) for k, v in extracted_params.items() if v is not None)
+        logger.debug("[FUZZY] Extracted params: %s", extracted_str)
+        logger.debug("[FUZZY] Total candidates to check: %d", len(ens_candidates) if ens_candidates else 0)
 
-        # Try with coating variants
-        param_variants = self._expand_coating_variants(params)
+        for candidate in ens_candidates:
+            total_weight = 0.0
+            matched_weight = 0.0
+            candidate_debug = {
+                'name': candidate.get('наименование', candidate.get('полное_наименование', 'N/A')),
+                'ens_code': candidate.get('код', candidate.get('mdm_key', 'N/A')),
+                'params_matched': {},
+                'params_mismatched': {},
+                'params_missing': [],
+                'params_comparison': {},  # полная сводка по всем параметрам (exact/token_matched/mismatched/missing)
+            }
 
-        for try_params in param_variants:
-            for item in candidates:
-                item_name = item.get('наименование', item.get('полное_наименование', 'N/A'))
-                item_code = item.get('код', item.get('mdm_key', 'N/A'))
+            for param_name, extracted_val in extracted_params.items():
+                if not extracted_val:
+                    continue
+                weight = 2.0 if param_name in TEXT_FIELDS else 1.0
+                total_weight += weight
 
-                # Фильтр по стандарту (нтд) - обязательное совпадение
-                if query_std_norm:
-                    item_std = item.get('нтд') or item.get('standard')
-                    item_std_norm = self._normalize_standard(item_std) if item_std else None
-                    if item_std_norm and query_std_norm != item_std_norm:
-                        continue
+                # Ищем соответствующее поле в кандидате ЕСН
+                candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
-                # Фильтр по типу изделия (если указан)
-                if query_type:
-                    item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
-                    if item_type_field and item_type_field != query_type:
-                        continue
+                if param_name in TEXT_FIELDS:
+                    # For coating: try all variants
+                    if param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
+                        best_sim = max(self._token_similarity(v, candidate_val) for v in coating_variants)
+                        sim = best_sim
+                    else:
+                        sim = self._token_similarity(extracted_val, candidate_val)
+                    matched = sim >= 0.5
+                    # Заполняем полную сводку params_comparison
+                    if sim >= 0.99:
+                        status = 'exact'
+                    elif matched:
+                        status = 'token_matched'
+                    else:
+                        status = 'mismatched'
+                    candidate_debug['params_comparison'][param_name] = {
+                        'status': status,
+                        'extracted': str(extracted_val),
+                        'ens_value': str(candidate_val) if candidate_val else None,
+                        'similarity': round(sim, 3) if candidate_val else 0.0,
+                    }
+                    if matched:
+                        matched_weight += weight * sim
+                        candidate_debug['params_matched'][param_name] = "'{}' ~ '{}' (sim={:.2f})".format(extracted_val, candidate_val, sim)
+                    else:
+                        candidate_debug['params_mismatched'][param_name] = "'{}' vs '{}' (sim={:.2f})".format(extracted_val, candidate_val, sim)
+                else:
+                    # Числовые параметры — точное совпадение (нормализуем int vs float)
+                    try:
+                        matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
+                    except (ValueError, TypeError):
+                        matched = str(extracted_val).strip() == str(candidate_val).strip()
+                    status = 'exact' if matched else 'mismatched'
+                    candidate_debug['params_comparison'][param_name] = {
+                        'status': status,
+                        'extracted': str(extracted_val),
+                        'ens_value': str(candidate_val) if candidate_val else None,
+                        'similarity': 1.0 if matched else 0.0,
+                    }
+                    if matched:
+                        matched_weight += weight
+                        candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
+                    else:
+                        candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
-                score = self._calculate_match_score(try_params, required, item)
+            # Дополнительно: найдём ключевые ENS-параметры кандидата для debug
+            key_ens_params = {}
+            for key_field in ['длина', 'номинальный_диаметр_резьбы', 'исполнение', 'покрытие', 'марка_материала', 'шаг_резьбы', 'тип_резьбы']:
+                if key_field in candidate and candidate[key_field] is not None and str(candidate[key_field]).strip():
+                    key_ens_params[key_field] = candidate[key_field]
+            candidate_debug['key_ens_params'] = key_ens_params
 
-                # Собираем debug info
-                skip_fields = {'_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд', 'тип_изделия', 'наименование_типа'}
-                ens_params = {k: v for k, v in item.items() if k not in skip_fields and not k.startswith('_') and v is not None and str(v).strip()}
-
-                debug_entry = {
-                    'stage': 'parametric',
-                    'name': item_name[:60] if isinstance(item_name, str) else str(item_name)[:60],
-                    'ens_code': str(item_code),
-                    'score': round(score, 3),
-                    'source_params': {k: str(v) for k, v in try_params.items() if v is not None},
-                    'ens_params': {k: str(v)[:50] for k, v in list(ens_params.items())[:8]},
-                    'method': '_calculate_match_score',
-                }
-
-                if score > 0:
-                    debug_candidates.append(debug_entry)
-                    # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
-                    if _get_matching_config().debug_per_parameter:
-                        source_str = ", ".join("{}={}".format(k, v) for k, v in debug_entry['source_params'].items())
-                        ens_str = ", ".join("{}={}".format(k, v) for k, v in debug_entry['ens_params'].items())
-                        logger.debug("[_find_in_ens] Candidate '%s' (code=%s): score=%.3f", debug_entry['name'][:50], debug_entry['ens_code'], score)
-                        logger.debug("[_find_in_ens] Source params: %s", source_str)
-                        logger.debug("[_find_in_ens] ENS params: %s", ens_str)
-
+            if total_weight > 0:
+                score = matched_weight / total_weight
+                candidate_debug['score'] = round(score, 3)
+                candidate_debug['weight'] = round(total_weight, 1)
+                candidate_debug['matched_weight'] = round(matched_weight, 1)
+                logger.debug("[FUZZY] Candidate '%s': score=%.3f, weight=%.1f, matched=%.1f", candidate_debug['name'][:50], score, total_weight, matched_weight)
+                # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
+                if _get_matching_config().debug_per_parameter:
+                    ens_params_str = ", ".join("{}={}".format(k, v) for k, v in key_ens_params.items())
+                    logger.debug("[FUZZY] ENS params: %s", ens_params_str)
+                    if candidate_debug['params_matched']:
+                        matched_str = ", ".join("{}: {}".format(k, v) for k, v in candidate_debug['params_matched'].items())
+                        logger.debug("[FUZZY] MATCHED: %s", matched_str)
+                    if candidate_debug['params_mismatched']:
+                        mismatched_str = ", ".join("{}: {}".format(k, v) for k, v in candidate_debug['params_mismatched'].items())
+                        logger.debug("[FUZZY] MISMATCHED: %s", mismatched_str)
                 if score > best_score:
                     best_score = score
-                    best_match = item
+                    best_match = {**candidate, '_fuzzy_score': best_score}
+            else:
+                candidate_debug['score'] = 0.0
+                candidate_debug['reason'] = 'no comparable params (weight=0)'
+                logger.debug("[FUZZY] Candidate '%s': no comparable params (weight=0)", candidate_debug['name'][:50])
 
-        # Fallback: точное совпадение наименования (с проверкой типа)
-        fallback_matched = False
-        if best_score < 0.99 and text:
-            text_norm = self._normalize_name(text)
-            for item in candidates:
-                if query_std_norm:
-                    item_std = item.get('нтд') or item.get('standard')
-                    item_std_norm = self._normalize_standard(item_std) if item_std else None
-                    if item_std_norm and query_std_norm != item_std_norm:
-                        continue
-                if query_type:
-                    item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
-                    if item_type_field and item_type_field != query_type:
-                        continue
-                for name_field in ['полное_наименование', 'наименование']:
-                    item_name = item.get(name_field)
-                    if item_name and self._normalize_name(str(item_name)) == text_norm:
-                        best_match = item
-                        best_score = 1.0
-                        fallback_matched = True
-                        debug_candidates.append({
-                            'stage': 'name_fallback',
-                            'name': str(item_name)[:60],
-                            'ens_code': str(item.get('код', item.get('mdm_key', 'N/A'))),
-                            'score': 1.0,
-                            'method': 'name_exact',
-                            'matched_name': str(item_name)[:60],
-                        })
-                        break
-                if best_score >= 0.99:
-                    break
+            debug_candidates.append(candidate_debug)
 
         # Сортируем по score убыванию
         debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
@@ -783,256 +743,693 @@ class ParametricENSClient:
         # Итоговый debug: top candidates (только при debug_per_parameter=true)
         if debug_candidates and _get_matching_config().debug_per_parameter:
             top_n = min(5, len(debug_candidates))
-            logger.debug("[_find_in_ens] Top %d parametric candidates:", top_n)
+            logger.debug("[FUZZY] Top %d candidates:", top_n)
             for i, cd in enumerate(debug_candidates[:top_n], 1):
-                ens_p_str = ", ".join("{}={}".format(k, v) for k, v in cd.get('ens_params', {}).items())
-                logger.debug("[_find_in_ens] #%d: '%s' score=%s, code=%s", i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
-                logger.debug("[_find_in_ens] ENS: %s", ens_p_str)
+                logger.debug("[FUZZY] #%d: '%s' score=%s, code=%s", i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
+                if cd.get('params_mismatched'):
+                    for pk, pv in cd['params_mismatched'].items():
+                        logger.debug("[FUZZY] mismatch: %s: %s", pk, pv)
+            logger.debug("[FUZZY] Best score: %.3f, threshold: 0.6, matched: %s", best_score, best_match is not None and best_score >= 0.6)
+        return (best_match if best_score >= 0.6 else None), debug_candidates
 
-        if best_match:
-            best_match = dict(best_match)
-            best_match['_match_score'] = best_score
-            best_match['_match_type'] = 'exact' if best_score > 0.9 else 'partial'
-            logger.info("[_find_in_ens] RETURNING match: score=%.2f, name=%s", best_score, best_match.get('наименование', '')[:50])
-        else:
-            logger.info("[_find_in_ens] No match found (best_score=%.2f < 0.7 threshold)", best_score)
-
-        # Сохраняем в кэш перед возвратом (thread-safe)
-        with self._find_in_ens_lock:
-            self._find_in_ens_cache[cache_key] = {
-                'match': best_match if best_score >= 0.7 else None,
-                'debug': debug_candidates
-            }
-
-        if best_score < 0.7:
-            return None, debug_candidates
-
-        return best_match, debug_candidates
-
-    @staticmethod
-    def _normalize_name(name: str) -> str:
-        """Нормализация наименования: убираем пробелы, нижний регистр."""
-        return re.sub(r'\s+', '', str(name).lower().strip())
-
-    @staticmethod
-    def _normalize_standard(std: Optional[str]) -> str:
-        """Нормализация стандарта для сравнения: ОСТ 1 → ОСТ1."""
-        if not std:
-            return ''
-        s = str(std).strip()
-        s = re.sub(r'ОСТ\s*1', 'ОСТ1', s)
-        return s
-
-    @staticmethod
-    def _normalize_ens_value(val: Any) -> Any:
-        """Нормализация значения для сравнения с ENS:
-        - float 2.0 → int 2
-        - str '2.0' → int 2
-        - str 'abc' → str 'abc'
+    def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        if isinstance(val, float):
-            if val == int(val):
-                return int(val)
-            return val
-        if isinstance(val, str):
+        Переименование неправильных имён групп из LLM-генерированных масок
+        в корректные ENS-имена параметров.
+        """
+        if not params:
+            return params
+
+        remapped = dict(params)
+        aliases = {
+            # Кривые имена групп → правильные ENS-имена
+            'наружный_диаметр_диаметр_вписа': 'номинальный_диаметр_резьбы',
+            'наружный_диаметр': 'номинальный_диаметр_резьбы',
+            'диаметр_вписанной_окружности': 'номинальный_диаметр_резьбы',
+            'd_вп': 'номинальный_диаметр_резьбы',
+            'наружный_диаметр_головки': 'диаметр_головки',
+            'диаметр_резьбы': 'номинальный_диаметр_резьбы',
+        }
+
+        for wrong, correct in aliases.items():
+            if wrong in remapped:
+                value = remapped.pop(wrong)
+                # Если correct уже существует (например, номинальный_диаметр_резьбы=26),
+                # сдвигаем его в "длина" — типичный случай для Болт ОСТ 1 31133-80
+                if correct in remapped and correct == 'номинальный_диаметр_резьбы':
+                    remapped['длина'] = remapped[correct]
+                remapped[correct] = value
+                logger.debug("[REMAP] %s → %s: %s", wrong, correct, value)
+
+        return remapped
+
+    def _get_generic_pattern(self, item_type: str, standard: str = None) -> Optional[str]:
+        """
+        Генерация "generic" паттерна для item_type когда маска БД не срабатывает.
+        Извлекает основные параметры без жёсткой привязки к структуре маски.
+        """
+        _ru_t = chr(0x0442)
+        _ru_b = chr(0x0431)
+        _ru_v = 'В'
+
+        item_upper = (item_type or '').upper()
+
+        # Generic bolt pattern: Болт (исполнение)?-диаметр-длина-покрытие
+        if item_upper in ('БОЛТ', 'БОЛ' + _ru_t, 'BOLT'):
+            # Metric bolt: Болт 2M12x1,25-6gx100.58 ГОСТ 7795-70
+            if standard and '7795' in standard:
+                # ГОСТ 7795-70: Болт 2M12x1,25-6gx100.58 ГОСТ 7795-70
+                # Точка в "100.58" — разделитель: длина=100, группа=5.8
+                return (
+                    r'^Болт\s*(?:(?P<исполнение>\d+)\s*)?'
+                    r'(?:M(?P<номинальный_диаметр_резьбы>\d+)'
+                    r'(?:[xX×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?'
+                    r'[-\s]*(?P<класс_поле_допуска>\d+[a-zA-Z])'
+                    r'[xX×](?P<длина>\d+)\.(?P<группа_класс_прочности>\d+(?:\.\d+)?))'
+                    r'(?:[-\s]*(?P<покрытие>[\w.]+))?'
+                    r'\s*ГОСТ\s*7795-70\s*$'
+                )
+            # Standard bolt: Болт (2)-8-26-Кд-ОСТ 1 31133-80
+            pattern = (
+                r'^Болт\s*(?:\((?P<исполнение>\d+)\)[-\s]*)?'
+                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        # Generic screw pattern: Винт (исполнение)?-диаметр-длина-покрытие
+        if item_upper in ('ВИНТ', 'ВИН' + _ru_t, 'SCREW'):
+            pattern = (
+                r'^Винт\s*(?:\((?P<исполнение>\d+)\)[-\s]*)?'
+                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        # Generic washer pattern: Шайба диаметр-наружный-толщина-покрытие
+        if item_upper in ('ШАЙБА', 'ШАЙ' + _ru_b + chr(0x0430), 'WASHER'):
+            pattern = (
+                r'^Шайба\s*(?:(?P<тип>[A-Z])\s*)?'
+                r'(?P<диаметр>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        # Generic nut pattern: Гайка диаметр-покрытие
+        if item_upper in ('ГАЙКА', 'ГАЙКА', 'NUT'):
+            pattern = (
+                r'^Гайка\s*(?:(?P<исполнение>\d+)\s*)?'
+                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
+                r'[-\s]+(?P<покрытие>[\w.]+)'
+            )
+            if standard:
+                pattern += r'(?:[-\s]*.*)?'
+            else:
+                pattern += r'(?:\s+.*)?'
+            return pattern
+
+        return None
+
+    def _parametric_match(
+        self,
+        text: str,
+        mask,
+        extracted: Dict[str, Any],
+        start_time: float
+    ) -> ProcessingResult:
+        """Параметрическое сопоставление."""
+        import time
+
+        # Информация о coating substitution (если применена)
+        substitution_info: Optional[Dict] = None
+
+        # Гарантируем что у маски есть стандарт
+        extracted_std = None
+        if extracted.get('standard_info'):
+            extracted_std = extracted['standard_info'].normalized
+        effective_standard = getattr(mask, 'standard', None) or extracted_std or ''
+        if not getattr(mask, 'standard', None) and extracted_std:
+            mask.standard = extracted_std
+            logger.info("[PARAM_MATCH] Fixed mask.standard from extracted: '%s'", extracted_std)
+
+        logger.debug("[PARAM_MATCH] text='%s', mask.pattern='%s...', mask.standard='%s', mask.item_type='%s'", text[:50], mask.pattern[:50], effective_standard, mask.item_type)
+
+        match_result = self.parametric_client.match(
+            text=text,
+            standard=effective_standard,
+            item_type=mask.item_type
+        )
+
+        logger.debug("[PARAM_MATCH] score=%s, matched_params=%s, ens_code=%s", match_result.score, match_result.matched_params, match_result.ens_code)
+
+        # Fallback: если parametric_client вернул пустые params но score > 0,
+        # извлекаем params напрямую через regex (используем re.search с IGNORECASE,
+        # как и в parametric_client._apply_mask)
+        fallback_params = None
+        if not match_result.matched_params and match_result.score > 0:
+            import re
             try:
-                f = float(val)
+                relaxed_for_fallback = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                logger.debug("[PARAM_MATCH] Fallback pattern: %s", relaxed_for_fallback[:200])
+                m = re.search(relaxed_for_fallback, text, re.IGNORECASE)
+                if m:
+                    fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                    if fallback_params:
+                        logger.info("[PARAM_MATCH] Fallback extraction: %s", fallback_params)
+                    else:
+                        logger.warning("[PARAM_MATCH] Fallback regex did NOT match. Pattern: %s", relaxed_for_fallback[:120])
+            except Exception as e:
+                logger.warning("[PARAM_MATCH] Fallback extraction error: %s", e)
+
+        # Ultimate fallback: generic pattern по item_type
+        # Когда маска БД имеет неправильную структуру (лишние/отсутствующие параметры),
+        # или regex вообще не сработал — пробуем generic паттерн который извлекает
+        # только основные параметры (номинальный_диаметр, длина, покрытие).
+        if not fallback_params:
+            import re
+            try:
+                generic_pattern = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic_pattern:
+                    # Применяем те же relax-правила к generic pattern
+                    relaxed_generic = self.parametric_client._relax_pattern(generic_pattern, standard=effective_standard)
+                    logger.debug("[PARAM_MATCH] Generic pattern: %s", relaxed_generic[:200])
+                    m = re.search(relaxed_generic, text, re.IGNORECASE)
+                    if m:
+                        fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                        if fallback_params:
+                            logger.info("[PARAM_MATCH] Generic extraction: %s", fallback_params)
+                        else:
+                            logger.debug("[PARAM_MATCH] Generic pattern did NOT match")
+            except Exception as e:
+                logger.warning("[PARAM_MATCH] Generic fallback error: %s", e)
+            # где обязательные скобки/группы делаем опциональными
+            relaxed_result = None
+            if match_result.score == 0 and not match_result.matched_params:
+                try:
+                    relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                    if relaxed_pattern != mask.pattern:
+                        # Создаём временную маску с ослабленным паттерном
+                        relaxed_mask = type(mask)(
+                            id=getattr(mask, 'id', -1),
+                            standard=effective_standard,
+                            item_type=mask.item_type,
+                            pattern=relaxed_pattern,
+                            params=mask.params,
+                            required=mask.required,
+                            auto_score=getattr(mask, 'auto_score', 0),
+                            is_active=True,
+                            source='relaxed',
+                            usage_count=0,
+                            test_examples='[]',
+                            created_at='',
+                            last_used='',
+                            pattern_hash=''
+                        )
+                        relaxed_result = self.parametric_client.match(
+                            text=text,
+                            standard=effective_standard,
+                            item_type=mask.item_type,
+                            pattern=relaxed_pattern
+                        )
+                        if relaxed_result.score > 0:
+                            logger.info("[PARAM_MATCH] Relaxed pattern matched: score=%s", relaxed_result.score)
+                            match_result = relaxed_result
+                except Exception as e:
+                    logger.debug("[PARAM_MATCH] Relaxed pattern error: %s", e)
+
+        # Fuzzy matching fallback: если точный поиск не дал результата,
+        # пробуем token-based matching для текстовых параметров (покрытие, материал)
+        fuzzy_ens_code = None
+        fuzzy_score = 0.0
+        fuzzy_mismatched_params = None  # None = fuzzy не запускался, {} = fuzzy OK, {...} = mismatch
+        fuzzy_debug = []  # список debug-кандидатов (инициализируем для избежания UnboundLocalError)
+
+        # Определяем итоговые params (fallback или обычные)
+        final_matched_params = fallback_params if fallback_params else match_result.matched_params
+
+        # Remap неправильных имён групп на корректные ENS-имена
+        if final_matched_params:
+            final_matched_params = self._remap_params(final_matched_params)
+            logger.debug("[PARAM_MATCH] Remapped params: %s", final_matched_params)
+
+        # === COATING AUTO-SUBSTITUTION ===
+        # Всегда проверяем, даже если score высокий — для корректного покрытия в details.
+        # Используем raw_params (fallback или matched, до remap).
+        raw_params = fallback_params if fallback_params else match_result.matched_params
+        logger.debug("[PARAM_MATCH] Coating substitution check: raw_params=%s", raw_params)
+        if raw_params and raw_params.get('покрытие'):
+            logger.debug("[PARAM_MATCH] Coating substitution: has покрытие='%s', calling _apply_coating_substitution", raw_params.get('покрытие'))
+            try:
+                # Загружаем кандидатов для определения марки материала
+                ens_candidates_sub = self._get_cached_ens_candidates(effective_standard, mask.item_type)
+                logger.debug("[PARAM_MATCH] Coating substitution: got %d candidates", len(ens_candidates_sub))
+                if ens_candidates_sub:
+                    _, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
+                    if substitution_info:
+                        logger.info("[PARAM_MATCH] Coating substitution result: %s", substitution_info)
+                    else:
+                        logger.debug("[PARAM_MATCH] Coating substitution: no substitution applied")
+                else:
+                    logger.debug("[PARAM_MATCH] Coating substitution: no candidates, skipping")
+            except Exception as e:
+                logger.warning("[PARAM_MATCH] Coating substitution error: %s", e, exc_info=True)
+        else:
+            logger.debug("[PARAM_MATCH] Coating substitution: no покрытие in raw_params, skipping")
+
+        # Debug: собираем информацию о всех проверенных кандидатах
+        debug_candidates = []
+
+        if match_result.score < 0.7 or not match_result.ens_code:
+            try:
+                # Получаем кандидатов из ЕСН
+                ens_candidates = self._get_cached_ens_candidates(effective_standard, mask.item_type)
+                logger.info("[PARAM_MATCH] ENS candidates: count=%d, standard=%s, item_type=%s", len(ens_candidates), effective_standard, mask.item_type)
+
+                # === COATING AUTO-SUBSTITUTION для ПОИСКА ===
+                # Если substitution применена — используем исправленные params для поиска.
+                search_params = final_matched_params
+                if substitution_info and ens_candidates:
+                    search_params = dict(final_matched_params)
+                    search_params['покрытие'] = substitution_info['corrected']
+                    logger.info("[PARAM_MATCH] Using substituted params for search: %s", search_params)
+
+                # СНАЧАЛА exact match через _find_in_ens (coating expansion + name_exact)
+                if search_params:
+                    clean_params = {k: v for k, v in search_params.items() if v is not None}
+                    manual_ens, find_debug = self.parametric_client._find_in_ens_debug(
+                        clean_params,
+                        list(clean_params.keys()),
+                        standard=effective_standard,
+                        text=text,
+                        item_type=mask.item_type if mask else None
+                    )
+                    if find_debug:
+                        debug_candidates.extend(find_debug[:10])  # top-10 parametric candidates
+                    ens_code_field = manual_ens.get('код') or manual_ens.get('code') if manual_ens else None
+                    if manual_ens and ens_code_field:
+                        fuzzy_ens_code = ens_code_field
+                        fuzzy_score = manual_ens.get('_match_score', 0.8)
+                        if not match_result.ens_name:
+                            match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
+                        logger.info("[PARAM_MATCH] Exact ENS search matched: ens_code=%s, score=%.2f", fuzzy_ens_code, fuzzy_score)
+
+                # ЗАТЕМ fuzzy match (только если exact не сработал)
+                if not fuzzy_ens_code and ens_candidates and search_params:
+                    logger.info("[PARAM_MATCH] Trying fuzzy match with params: %s", search_params)
+
+                    # Первый fuzzy pass (с already-substituted params)
+                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(search_params, ens_candidates)
+                    if fuzzy_debug:
+                        debug_candidates.extend(fuzzy_debug[:10])
+
+                    # Если substitution была применена и не помогла — пробуем исходные params
+                    if not fuzzy_match and search_params != final_matched_params:
+                        logger.info("[PARAM_MATCH] Substituted params didn't match, trying original: %s", final_matched_params)
+                        fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
+                        if fuzzy_debug:
+                            debug_candidates.extend(fuzzy_debug[:10])
+
+                    if fuzzy_match:
+                        fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
+                        fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
+                        logger.info("[PARAM_MATCH] Fuzzy fallback matched: score=%.2f, ens_code=%s", fuzzy_score, fuzzy_ens_code)
+                    else:
+                        logger.warning("[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
+
+                # Собираем несовпавшие параметры из лучшего кандидата (всегда, для diagnostics)
+                if fuzzy_debug:
+                    best_candidate = fuzzy_debug[0]  # уже отсортированы по score убыванию
+                    if best_candidate.get('params_mismatched'):
+                        fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
+                        logger.info("[PARAM_MATCH] Fuzzy mismatched params: %s", fuzzy_mismatched_params)
+                    else:
+                        # Fuzzy запускался, mismatched нет — пустой dict (явно: несовпадений не было)
+                        fuzzy_mismatched_params = {}
+                elif not ens_candidates:
+                    logger.warning("[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
+                elif not search_params:
+                    logger.warning("[PARAM_MATCH] Fuzzy fallback: empty search_params")
+            except Exception as e:
+                logger.warning("[PARAM_MATCH] Fuzzy fallback error: %s", e)
+
+        # Используем лучший результат (fuzzy или обычный)
+        final_ens_code = match_result.ens_code or fuzzy_ens_code
+        final_ens_name = match_result.ens_name
+        final_mdm_key = match_result.mdm_key if match_result.ens_code else None
+
+        # Если есть ens_code но нет имени — получим name из ENS индекса
+        if final_ens_code and not final_ens_name:
+            try:
+                ens_item = self._get_ens_by_code(final_ens_code)
+                if ens_item:
+                    final_ens_name = ens_item.get('наименование') or ens_item.get('name')
+                    if not final_mdm_key:
+                        final_mdm_key = ens_item.get('mdm_key')
+                    logger.info("[PARAM_MATCH] ENS name resolved: '%s'", final_ens_name)
+            except Exception as e:
+                logger.info("[PARAM_MATCH] Failed to resolve ENS name: %s", e)
+
+        # Fallback: парсим text через generic pattern (всегда, для V2 scoring)
+        generic_params = None
+        if mask:
+            try:
+                import re
+                generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic:
+                    m = re.search(generic, text, re.IGNORECASE)
+                    if m:
+                        generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
+                        generic_params = self._normalize_params(generic_params)
+                        logger.info("[PARAM_MATCH] Params from generic on text: %s", generic_params)
+                        # Если final_matched_params пуст — используем generic
+                        if not final_matched_params:
+                            final_matched_params = generic_params
+            except Exception as e:
+                logger.debug("[PARAM_MATCH] Generic parse on text error: %s", e)
+
+        # НОВАЯ ЛОГИКА: generic pattern → parse ens_name → _calculate_match_score_v2
+        v2_score = 0.0
+        v2_match_type = None
+        v2_computed = False  # был ли V2 score вычислен
+        params_for_v2 = final_matched_params or generic_params
+        # V2 работает если есть params и есть либо ens_name, либо ens_code (для получения имени)
+        if params_for_v2 and (final_ens_name or final_ens_code):
+            # Если нет имени но есть код — попробуем получить имя ещё раз
+            if not final_ens_name and final_ens_code:
+                try:
+                    ens_item = self._get_ens_by_code(final_ens_code)
+                    if ens_item:
+                        final_ens_name = ens_item.get('наименование') or ens_item.get('name')
+                        logger.info("[PARAM_MATCH] ENS name resolved (V2): '%s'", final_ens_name)
+                except Exception as e:
+                    logger.info("[PARAM_MATCH] ENS name resolution failed (V2): %s", e)
+            try:
+                import re
+                generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic and final_ens_name:
+                    ens_name_str = str(final_ens_name)
+                    logger.info("[PARAM_MATCH] V2 trying generic on ENS name: '%s', pattern: %s...", ens_name_str[:60], generic[:80])
+                    m = re.search(generic, ens_name_str, re.IGNORECASE)
+                    if m:
+                        generic_ens_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                        logger.info("[PARAM_MATCH] Generic parsed ENS name: %s", generic_ens_mask)
+                        v2_score, v2_match_type, v2_details = self.parametric_client._calculate_match_score_v2(
+                            text=text,
+                            ens_name=final_ens_name,
+                            params=params_for_v2,
+                            ens_params={},  # не используем ens_params из индекса
+                            ens_params_mask=generic_ens_mask,
+                            required=list(params_for_v2.keys())
+                        )
+                        v2_computed = True
+                        logger.info("[PARAM_MATCH] V2 score: %s, type: %s", v2_score, v2_match_type)
+                    else:
+                        logger.info("[PARAM_MATCH] V2: generic pattern did NOT match ENS name")
+                elif not final_ens_name:
+                    logger.info("[PARAM_MATCH] V2 skipped: no ENS name for code %s", final_ens_code)
+                elif not generic:
+                    logger.info("[PARAM_MATCH] V2 skipped: no generic pattern for %s", mask.item_type)
+            except Exception as e:
+                logger.info("[PARAM_MATCH] V2 scoring error: %s", e)
+
+        # Финальный score: V2 + fuzzy — берём лучший результат
+        # V2 scoring строгий (1.0 или 0.0), fuzzy — мягкий (0.0..1.0)
+        # Если V2 дал точный match (1.0) — используем его
+        # Если V2 дал 0.0, но fuzzy нашёл кандидата — используем fuzzy
+        if v2_computed:
+            if v2_score >= _get_matching_config().v2_exact_threshold:
+                final_score = v2_score
+                if v2_match_type:
+                    match_result.match_type = v2_match_type
+            else:
+                # V2 не подтвердил match — доверяем fuzzy/parametric результату
+                final_score = max(match_result.score, fuzzy_score)
+        else:
+            final_score = max(match_result.score, fuzzy_score)
+
+        # Получаем параметры из ENS записи (не из текста!)
+        ens_params_from_index = None
+        if final_ens_code:
+            try:
+                ens_item = self._get_ens_by_code(final_ens_code)
+                if ens_item:
+                    import math
+                    # Жёсткая фильтрация: только технические параметры изделия
+                    skip_fields = {
+                        'нтд', 'код', 'наименование', 'name', 'mdm_key',
+                        'полное_наименование', 'наименование_типа', 'наименование_типа.1',
+                        'единицы_измерения', 'тип', '_implicit_тип',
+                        '_match_score', '_match_type', 'item_type', 'standard'
+                    }
+                    ens_params_from_index = {}
+                    for k, v in ens_item.items():
+                        # Пропускаем служебные поля: всё что начинается с _
+                        if k.startswith('_'):
+                            continue
+                        # Пропускаем служебные поля по имени
+                        if k in skip_fields:
+                            continue
+                        # Пропускаем пустые значения
+                        if v is None or v == '':
+                            continue
+                        # Пропускаем NaN (float nan)
+                        if isinstance(v, float) and math.isnan(v):
+                            continue
+                        # Пропускаем списки (например _available_columns — но оно уже отфильтровано по _)
+                        if isinstance(v, list):
+                            continue
+                        ens_params_from_index[k] = v
+                    logger.debug("[PARAM_MATCH] ENS params from index: %s", ens_params_from_index)
+            except Exception as e:
+                logger.warning("[PARAM_MATCH] Failed to get ENS params: %s", e)
+
+        # Нормализация типов: float 12.0 → int 12, str "2.0" → int 2
+        if final_matched_params:
+            final_matched_params = self._normalize_params(final_matched_params)
+            logger.debug("[PARAM_MATCH] Normalized params: %s", final_matched_params)
+        if ens_params_from_index:
+            ens_params_from_index = self._normalize_params(ens_params_from_index)
+            logger.debug("[PARAM_MATCH] Normalized ens_params: %s", ens_params_from_index)
+
+        # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
+        ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
+        if not ens_params_mask and final_ens_name:
+            # Fallback A: маска БД с релаксацией
+            if mask and mask.pattern:
+                try:
+                    import re
+                    relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                    m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
+                    if m:
+                        ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                        logger.debug("[PARAM_MATCH] ENS params mask (from mask): %s", ens_params_mask)
+                except Exception as e:
+                    logger.debug("[PARAM_MATCH] Failed to parse ens_name with mask: %s", e)
+            # Fallback B: generic pattern (если маска БД не сработала)
+            if not ens_params_mask and mask:
+                try:
+                    generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                    if generic:
+                        m = re.search(generic, str(final_ens_name), re.IGNORECASE)
+                        if m:
+                            ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                            logger.debug("[PARAM_MATCH] ENS params mask (from generic): %s", ens_params_mask)
+                except Exception as e:
+                    logger.debug("[PARAM_MATCH] Generic pattern parse error: %s", e)
+
+        # Для JSON вывода: remap params и ens_params_mask на правильные ENS-имена
+        display_params = self._remap_params(final_matched_params) if final_matched_params else {}
+        display_ens_params_mask = self._remap_params(ens_params_mask) if ens_params_mask else {}
+
+        processing_time = (time.time() - start_time) * 1000
+
+        # Определяем match_type для вывода в JSON (eng + ru)
+        # Приоритет: coating_substituted > name_exact (text==ens_name) > parametric_full > v2_exact > fuzzy_fallback
+        text_norm = self.parametric_client._normalize_name(text) if text else ''
+        ens_name_norm = self.parametric_client._normalize_name(final_ens_name) if final_ens_name else ''
+        is_name_exact = text_norm and ens_name_norm and text_norm == ens_name_norm
+
+        if substitution_info and final_ens_code:
+            match_type_out = 'coating_substituted'
+            match_type_ru = 'Совпадение после подбора правильного покрытия'
+        elif is_name_exact and final_ens_code:
+            match_type_out = 'name_exact'
+            match_type_ru = 'Совпадение по наименованию'
+        elif match_result.ens_code and match_result.match_type in ('exact', 'params_ens_exact'):
+            match_type_out = 'parametric_full'
+            match_type_ru = 'Полное совпадение параметров с индексом'
+        elif match_result.ens_code and match_result.match_type == 'params_mask_exact':
+            match_type_out = 'parametric_full'
+            match_type_ru = 'Полное совпадение параметров с маской ENS'
+        elif match_result.ens_code and match_result.match_type == 'v2_exact':
+            match_type_out = 'v2_exact'
+            match_type_ru = 'Полное совпадение V2'
+        elif fuzzy_ens_code and not match_result.ens_code:
+            # Если fuzzy нашел, но V2 подтвердил exact — это parametric_full
+            if v2_computed and v2_score >= 0.99:
+                match_type_out = 'parametric_full'
+                match_type_ru = 'Полное совпадение параметров (V2 + fuzzy)'
+            else:
+                match_type_out = 'fuzzy_fallback'
+                match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
+        else:
+            match_type_out = match_result.match_type or None
+            match_type_ru = 'Не определено'
+
+        # Логирование coating_substitution и match_type перед возвратом
+        logger.info("[PARAM_MATCH] RETURN substitution_info=%s: %s", 'SET' if substitution_info else 'NONE', substitution_info)
+        logger.info("[PARAM_MATCH] RETURN match_type=%s", match_type_out)
+
+        return ProcessingResult(
+            text=text,
+            level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
+            success=final_score >= _get_matching_config().success_threshold,
+            params=display_params,
+            ens_match={
+                'code': final_ens_code,
+                'name': final_ens_name,
+                'mdm_key': final_mdm_key or final_ens_code,
+                'score': final_score,
+                'type': match_type_out,
+                'params': ens_params_from_index  # ← из ENS индекса, нормализованные типы
+            } if final_ens_code else None,
+            confidence=final_score,
+            ens_params=ens_params_from_index,
+            ens_params_mask=display_ens_params_mask,
+            processing_time_ms=processing_time,
+            details={
+                'mask_id': mask.id,
+                'mask_pattern': mask.pattern,
+                'match_type': match_type_out,  # ← тип сопоставления (eng)
+                'match_type_ru': match_type_ru,  # ← тип сопоставления (rus)
+                'extracted_standard': extracted.get('standard_info'),
+                'extracted_type': extracted.get('item_type'),
+                'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,
+                'debug_candidates': debug_candidates[:15] if debug_candidates else [],
+                'fuzzy_score': round(fuzzy_score, 3) if fuzzy_score else 0,
+                'match_result_score': round(match_result.score, 3) if match_result else 0,
+                'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
+                'v2_computed': v2_computed if 'v2_computed' in locals() else False,
+                'coating_substitution': substitution_info,
+                'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
+                **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().debug_per_parameter and fuzzy_debug else {}),
+            },
+            item_type=mask.item_type,
+            standard=mask.standard
+        )
+
+    def _normalize_value_types(self, value: Any) -> Any:
+        """
+        Нормализация типов значений параметров.
+        - float 12.0 → int 12
+        - str "2.0" → int 2
+        - str "abc" → str "abc" (не меняем)
+        """
+        if isinstance(value, float):
+            if value == int(value):
+                return int(value)
+            return value
+        if isinstance(value, str):
+            try:
+                f = float(value)
                 if f == int(f):
                     return int(f)
                 return f
             except ValueError:
-                return val.strip()
-        return val
+                return value
+        return value
 
-    def _calculate_confidence(self, params: Dict[str, Any], required: List[str]) -> float:
-        """Расчет уверенности в извлечении (заполненность required-полей)."""
-        if isinstance(required, str):
-            try:
-                import json as _json
-                required = _json.loads(required)
-            except (ValueError, TypeError):
-                required = []
-        if not required:
-            return 0.0
-        found = sum(1 for p in required if p in params and params[p] is not None)
-        return found / len(required)
+    def _normalize_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Нормализация типов для всех значений в словаре параметров."""
+        if not params:
+            return params
+        return {k: self._normalize_value_types(v) for k, v in params.items()}
 
-    def _calculate_match_score(
-        self,
-        params: Dict[str, Any],
-        required: List[str],
-        ens_item: Dict[str, Any]
-    ) -> float:
-        """
-        Сравнение params с ENS записью через _compare_param_sets.
-        Используем только required поля для поиска кандидатов.
-        """
-        # Извлекаем параметры из ENS записи (без служебных полей)
-        skip_fields = {
-            '_match_score', '_match_type', 'код', 'полное_наименование',
-            'наименование', 'mdm_key', 'нтд', 'тип_изделия', 'наименование_типа',
-            'item_type', 'standard'
-        }
-        ens_params = {k: v for k, v in ens_item.items()
-                     if k not in skip_fields and not k.startswith('_')}
+    def _get_ens_by_code(self, ens_code: str) -> Optional[Dict[str, Any]]:
+        """Поиск записи ЕСН по коду через индекс (O(1))."""
+        if not self.parametric_client:
+            return None
+        return self.parametric_client._get_ens_by_code(ens_code)
 
-        # Берём только required поля из params
-        if not required:
-            return 0.0
-        subset = {k: params[k] for k in required if k in params and params[k] is not None}
-        if not subset:
-            return 0.0
-
-        return self._compare_param_sets(subset, ens_params)
-
-    def _calculate_match_score_v2(
+    def _tfidf_fallback(
         self,
         text: str,
-        ens_name: Optional[str],
-        params: Dict[str, Any],
-        ens_params: Dict[str, Any],
-        ens_params_mask: Optional[Dict[str, Any]],
-        required: List[str]
-    ) -> Tuple[float, str, Dict[str, Any]]:
-        """
-        Новая логика (3 уровня):
-        1. name_exact: text vs ens_name
-        2. params vs ens_params
-        3. params vs ens_params_mask
-        Возвращает: (score, match_type, details)
-        """
-        details = {}
+        extracted: Dict[str, Any],
+        start_time: float
+    ) -> ProcessingResult:
+        """TF-IDF fallback — всегда success=False, т.к. параметры не извлечены."""
+        import time
 
-        # LEVEL 1: name exact
-        if text and ens_name:
-            text_norm = self._normalize_name(text)
-            ens_norm = self._normalize_name(ens_name)
-            if text_norm == ens_norm:
-                logger.debug("[_match_v2] LEVEL 1: name EXACT")
-                return 1.0, 'name_exact', {'level': 'name_exact'}
+        match_result = self.parametric_client._tfidf_fallback(text)
+        processing_time = (time.time() - start_time) * 1000
 
-        # LEVEL 2: params vs ens_params
-        score_ens = self._compare_param_sets(params, ens_params)
-        if score_ens >= 0.99:
-            logger.debug("[_match_v2] LEVEL 2: params vs ens_params EXACT")
-            return 1.0, 'params_ens_exact', {'level': 'params_ens', 'score': score_ens}
-
-        # LEVEL 3: params vs ens_params_mask
-        if ens_params_mask:
-            score_mask = self._compare_param_sets(params, ens_params_mask)
-            if score_mask >= 0.99:
-                logger.debug("[_match_v2] LEVEL 3: params vs ens_params_mask EXACT")
-                return 1.0, 'params_mask_exact', {'level': 'params_mask', 'score': score_mask}
-
-        best_score = max(score_ens, score_mask if ens_params_mask else 0.0)
-        return best_score, 'partial', {'level': 'partial', 'score_ens': score_ens, 'score_mask': score_mask if ens_params_mask else None}
-
-    def _compare_param_sets(self, params_a: Dict[str, Any], params_b: Dict[str, Any]) -> float:
-        """
-        Сравнение двух наборов параметров.
-        Score=1.0 если все НЕ-ПУСТЫЕ параметры из ОБОИХ наборов совпадают.
-        Ключи, пустые в ОБОИХ наборах — игнорируются.
-        Ключ, пустой только в одном наборе:
-        - strict_union_keys=true → mismatch (return 0.0)
-        - strict_union_keys=false → skip (continue)
-        """
-        if not params_a or not params_b:
-            return 0.0
-
-        config = _get_matching_config()
-        debug_detail = config.debug_per_parameter
-        strict_mode = getattr(config, 'strict_union_keys', False)
-
-        # Параметры, которые не участвуют в сравнении (метаданные/служебные)
-        skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
-
-        # Сравниваем по ОБЪЕДИНЕНИЮ ключей
-        all_keys = set(params_a.keys()) | set(params_b.keys())
-        checked = 0
-        matched = 0
-
-        for param in all_keys:
-            if param in skip_params:
-                continue
-
-            val_a = params_a.get(param)
-            val_b = params_b.get(param)
-            str_a = str(val_a).lower().strip() if val_a is not None else ''
-            str_b = str(val_b).lower().strip() if val_b is not None else ''
-
-            # Если оба пустые — пропускаем (не влияет на score)
-            if not str_a and not str_b:
-                continue
-
-            # Если один пустой (None/''), а другой нет
-            if not str_a or not str_b:
-                if strict_mode:
-                    # Строгий режим: пустой ключ = mismatch
-                    if debug_detail:
-                        logger.debug("[_compare] KEY MISSING (strict): %s = '%s' vs '%s'", param, val_a, val_b)
-                    return 0.0
-                else:
-                    # Нестрогий режим: пустой ключ = skip (не влияет на score)
-                    if debug_detail:
-                        logger.debug("[_compare] KEY SKIP (non-strict): %s = '%s' vs '%s'", param, val_a, val_b)
-                    continue
-
-            checked += 1
-
-            # Сравниваем значения
-            if param == 'покрытие':
-                norm_a = self._normalize_coating(str_a)
-                norm_b = self._normalize_coating(str_b)
-                sim = _text_similarity(norm_a, norm_b)
-                if sim < 0.8:
-                    if debug_detail:
-                        logger.debug("[_compare] COATING MISMATCH: '%s' vs '%s' (sim=%.2f)", norm_a, norm_b, sim)
-                    return 0.0
-                matched += 1
-            else:
-                try:
-                    num_a = float(str_a.replace(',', '.'))
-                    num_b = float(str_b.replace(',', '.'))
-                    if num_a != num_b:
-                        if debug_detail:
-                            logger.debug("[_compare] NUM MISMATCH: %s vs %s", val_a, val_b)
-                        return 0.0
-                    matched += 1
-                except ValueError:
-                    if str_a != str_b:
-                        if debug_detail:
-                            logger.debug("[_compare] STR MISMATCH: '%s' vs '%s'", val_a, val_b)
-                        return 0.0
-                    matched += 1
-
-        # Если нечего сравнивать (все поля пустые) — mismatch
-        if checked == 0:
-            return 0.0
-
-        return 1.0
-
-    def _normalize_coating(self, coating: str) -> str:
-        """
-        Нормализация покрытия:
-        - Убирает технологические коды: Кд3 → Кд, Ц9 → Ц
-        - Убирает суффиксы: Кд3.хр → Кд
-        """
-        if not coating:
-            return coating
-        coating_str = str(coating).strip().lower()
-        # Убираем цифры после базового покрытия
-        base = re.sub(r'^(кд|ц|окс|фос|н|ан|хим|пас|бп|неп)\d+', r'\1', coating_str)
-        # Убираем суффиксы .хр, .фос
-        base = re.sub(r'\.(хр|фос|окс|пас)$', '', base)
-        return base
-
-    def _normalize_name(self, name: str) -> str:
-        """Нормализация наименования: убираем пробелы, нижний регистр."""
-        return re.sub(r'\s+', '', str(name).lower().strip())
-
-    def _tfidf_fallback(self, text: str) -> 'ParametricMatch':
-        """TF-IDF fallback — возвращает пустой результат."""
-        return ParametricMatch(
-            ens_code=None, ens_name=None, mdm_key=None,
-            score=0.0, match_type='failed', confidence=0.0
+        # TF-IDF fallback не извлекает параметры -> всегда неуспешен
+        # ens_code сохраняем как candidate для справки, но не как match
+        return ProcessingResult(
+            text=text,
+            level=ProcessingLevel.LEVEL_7_TFIDF_FALLBACK,
+            success=False,
+            params={},
+            ens_match=None,  # Не возвращаем match без параметров
+            confidence=0.0,
+            processing_time_ms=processing_time,
+            details={
+                'fallback': True,
+                'tfidf_score': match_result.score,
+                'tfidf_ens_candidate': match_result.ens_code,
+                'extracted': extracted
+            },
+            item_type=extracted.get('item_type', ''),
+            standard=extracted.get('standard_info', {}).get('standard', '') if isinstance(extracted.get('standard_info'), dict) else ''
         )
+
+    def _llm_direct_process(self, text: str, start_time: float) -> ProcessingResult:
+        """Прямая обработка через LLM (без маски)."""
+        import time
+
+        # Здесь можно добавить прямой вызов LLM
+        # Пока возвращаем failed result
+        processing_time = (time.time() - start_time) * 1000
+
+        return ProcessingResult(
+            text=text,
+            level=ProcessingLevel.LEVEL_0_EXTRACT,
+            success=False,
+            params={},
+            ens_match=None,
+            confidence=0.0,
+            processing_time_ms=processing_time,
+            details={'error': 'Could not extract standard or type'},
+            item_type='',
+            standard=''
+        )
+
+    def batch_process(self, texts: List[str]) -> List[ProcessingResult]:
+        """Пакетная обработка."""
+        return [self.process(text) for text in texts]
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Статистика процессора."""
+        return {
+            'mask_db_stats': self.mask_db.get_statistics(),
+            'parametric_client_stats': self.parametric_client.get_stats(),
+            'llm_generation_enabled': self.use_llm_generation,
+            'min_mask_score': self.min_mask_score,
+            'max_llm_retries': self.max_llm_retries
+        }
