@@ -467,7 +467,7 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.json
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 8 -o output/quality.xlsx -j output/quality.json
 
 # Запуск с логированием DEBUG — видно все шаги PARAM_MATCH, Fallback, _apply_mask
 python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --output output/results.json 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
@@ -486,7 +486,7 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o mod
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 
 # Batch-обработка
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 8 -o output/results.json
 
 # Анализ качества
 python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json

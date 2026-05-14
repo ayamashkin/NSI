@@ -3,14 +3,14 @@ Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2025-05-06-fix9
+VERSION: 2026-05-14
 
 LAST_FIXES:
-  2026-05-08 13:15 UTC+3 — match_type: поддержка params_mask_exact + params_ens_exact
-  2026-05-08 11:50 UTC+3 — fuzzy_mismatched_params: подробная информация о несовпавших параметрах в results.json
-  2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
-  2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
-  2026-05-07 12:10 UTC+3 — coating_substitution: использует raw_params (до remap, т.к. remap очищал dict)
+ 2026-05-14 10:32 UTC+3 — кэш coating_rules (одна загрузка на сессию) + lazy debug-логи + делегация ENS поиска в индексы parametric_client (производительность)
+ 2026-05-08 13:15 UTC+3 — match_type: поддержка params_mask_exact + params_ens_exact
+ 2026-05-08 11:50 UTC+3 — fuzzy_mismatched_params: подробная информация о несовпавших параметрах в results.json
+ 2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
+ 2026-05-07 12:10 UTC+3 — кэширование ENS candidates и _find_in_ens; оптимизация производительности
 """
 
 import logging
@@ -42,18 +42,16 @@ def _get_matching_config():
 
 logger = logging.getLogger(__name__)
 
-
 class ProcessingLevel(Enum):
     """Уровни обработки."""
-    LEVEL_0_EXTRACT = "standard_extraction"      # Извлечение стандарта
-    LEVEL_1_MASK_LOOKUP = "mask_lookup"          # Проверка MaskDatabase
-    LEVEL_2_LLM_GENERATE = "llm_generation"      # Генерация маски
-    LEVEL_3_VALIDATE = "auto_validation"         # Авто-валидация
-    LEVEL_5_SAVE = "save_mask"                   # Сохранение маски
+    LEVEL_0_EXTRACT = "standard_extraction"  # Извлечение стандарта
+    LEVEL_1_MASK_LOOKUP = "mask_lookup"  # Проверка MaskDatabase
+    LEVEL_2_LLM_GENERATE = "llm_generation"  # Генерация маски
+    LEVEL_3_VALIDATE = "auto_validation"  # Авто-валидация
+    LEVEL_5_SAVE = "save_mask"  # Сохранение маски
     LEVEL_6_PARAMETRIC_MATCH = "parametric_match"  # Параметрическое сопоставление
-    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"    # TF-IDF fallback
-    LEVEL_8_LLM_DIRECT = "llm_direct"            # Прямой LLM вызов
-
+    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"  # TF-IDF fallback
+    LEVEL_8_LLM_DIRECT = "llm_direct"  # Прямой LLM вызов
 
 class ProcessingResult:
     """Результат обработки."""
@@ -89,10 +87,9 @@ class ProcessingResult:
     def ens_params_from_match(self) -> Optional[Dict[str, Any]]:
         """Параметры из ENS записи (только при наличии ens_code)."""
         if (self.ens_match and self.ens_match.get('code')
-                and 'params' in self.ens_match and self.ens_match['params']):
+            and 'params' in self.ens_match and self.ens_match['params']):
             return self.ens_match['params']
         return None
-
 
 class AutomatedParametricProcessor:
     """
@@ -137,6 +134,11 @@ class AutomatedParametricProcessor:
         self.max_llm_retries = max_llm_retries
         self.use_llm_generation = use_llm_generation
         self.settings = settings
+
+        # === ПРОИЗВОДИТЕЛЬНОСТЬ: кэши ===
+        self._coating_rules_cache: Optional[Dict] = None
+        self._coating_rules_loaded: bool = False
+        self._ens_candidates_cache: Dict[Tuple[str, str], List[Dict]] = {}
 
         # Инициализация компонентов
         self._init_components()
@@ -190,9 +192,9 @@ class AutomatedParametricProcessor:
         # Очищаем trailing punctuation (запятые, точки и т.д. в конце строки)
         clean_text = text.strip().rstrip(',.;: ')
         if clean_text != text.strip():
-            logger.debug(f"Cleaned trailing punctuation: '{text}' -> '{clean_text}'")
+            logger.debug("Cleaned trailing punctuation: '%s' -> '%s'", text, clean_text)
 
-        logger.info(f"Processing: {text[:50]}...")
+        logger.info("Processing: %s...", text[:50])
 
         # Level 0: Извлечение стандарта
         extracted = self.standard_extractor.extract_all(clean_text)
@@ -204,41 +206,41 @@ class AutomatedParametricProcessor:
             return self._llm_direct_process(clean_text, start_time)
 
         standard = standard_info.normalized
-        logger.info(f"[PROCESS] standard='{standard}', item_type='{item_type}', clean_text='{clean_text[:60]}'")
+        logger.info("[PROCESS] standard='%s', item_type='%s', clean_text='%s'", standard, item_type, clean_text[:60])
 
         # Level 1: Проверка MaskDatabase
         search_item_type = item_type.upper()  # Нормализуем в uppercase (стандарты: БОЛТ, ВИНТ)
-        logger.info(f"[PROCESS] Searching mask: standard='{standard}', item_type='{search_item_type}'")
+        logger.info("[PROCESS] Searching mask: standard='%s', item_type='%s'", standard, search_item_type)
         mask = self.mask_db.get_mask(standard, search_item_type)
-        logger.info(f"[PROCESS] Search by (standard+UPPER): found={mask is not None}")
+        logger.info("[PROCESS] Search by (standard+UPPER): found=%s", mask is not None)
 
         # Fallback: пробуем исходный регистр
         if mask is None:
             mask = self.mask_db.get_mask(standard, item_type)
             if mask:
-                logger.info(f"[PROCESS] Found mask with original item_type: {item_type}")
+                logger.info("[PROCESS] Found mask with original item_type: %s", item_type)
 
         # Fallback 2: ищем маску только по стандарту (любой item_type)
         if mask is None:
             try:
                 standard_masks = self.mask_db.list_masks(standard=standard)
-                logger.info(f"[PROCESS] Found {len(standard_masks)} masks for standard='{standard}' (any item_type)")
+                logger.info("[PROCESS] Found %d masks for standard='%s' (any item_type)", len(standard_masks), standard)
                 if standard_masks:
                     mask = standard_masks[0]
-                    logger.info(f"[PROCESS] Using mask with item_type='{mask.item_type}'")
+                    logger.info("[PROCESS] Using mask with item_type='%s'", mask.item_type)
             except Exception as e:
-                logger.warning(f"[PROCESS] Fallback search by standard error: {e}")
+                logger.warning("[PROCESS] Fallback search by standard error: %s", e)
 
-        logger.info(f"[PROCESS] mask found: {mask is not None}, is_active: {getattr(mask, 'is_active', False)}")
+        logger.info("[PROCESS] mask found: %s, is_active: %s", mask is not None, getattr(mask, 'is_active', False))
 
         if mask is not None and not mask.is_active:
             # Маска найдена но не активна — активируем принудительно
-            logger.info(f"[PROCESS] Mask found but inactive, activating")
+            logger.info("[PROCESS] Mask found but inactive, activating")
             try:
                 self.mask_db.activate_mask(mask.id)
                 mask.is_active = True
             except Exception as e:
-                logger.warning(f"[PROCESS] Failed to activate mask: {e}")
+                logger.warning("[PROCESS] Failed to activate mask: %s", e)
 
         if mask and mask.is_active:
             # Активная маска найдена -> Level 6: ParametricMatch
@@ -246,8 +248,8 @@ class AutomatedParametricProcessor:
             effective_standard = getattr(mask, 'standard', None) or standard
             if not getattr(mask, 'standard', None):
                 mask.standard = effective_standard
-                logger.info(f"[PROCESS] Fixed empty mask.standard -> '{effective_standard}'")
-            logger.info(f"[PROCESS] -> Level 6: ParametricMatch with mask {mask.id}")
+                logger.info("[PROCESS] Fixed empty mask.standard -> '%s'", effective_standard)
+            logger.info("[PROCESS] -> Level 6: ParametricMatch with mask %s", mask.id)
             return self._parametric_match(clean_text, mask, extracted, start_time)
 
         # Level 2: LLM Generation (если разрешено)
@@ -272,7 +274,8 @@ class AutomatedParametricProcessor:
                         )
                 else:
                     logger.warning(
-                        f"Generated mask failed validation: {validation_result.score:.2f}"
+                        "Generated mask failed validation: %.2f",
+                        validation_result.score
                     )
 
         # Level 7: TF-IDF Fallback
@@ -293,7 +296,7 @@ class AutomatedParametricProcessor:
         examples = self.validator._get_ens_examples(standard, item_type)
 
         if len(examples) < 10:
-            logger.warning(f"Not enough examples for {standard}/{item_type}")
+            logger.warning("Not enough examples for %s/%s", standard, item_type)
             return None
 
         # Берем точный тип из ЕСН (тип_изделия = 'Наименование типа')
@@ -304,8 +307,8 @@ class AutomatedParametricProcessor:
             if type_from_ens and type_from_ens.strip():
                 ens_item_type = type_from_ens.strip().lower()
                 logger.info(
-                    f"[AutoProcessor] Тип из ЕСН: '{ens_item_type}' "
-                    f"(был: '{item_type}')"
+                    "[AutoProcessor] Тип из ЕСН: '%s' (был: '%s')",
+                    ens_item_type, item_type
                 )
 
         mask, attempts = self.llm_generator.generate_mask(
@@ -317,7 +320,7 @@ class AutomatedParametricProcessor:
         )
 
         if mask:
-            logger.info(f"Generated mask for {standard}/{item_type}")
+            logger.info("Generated mask for %s/%s", standard, item_type)
             return mask
 
         return None
@@ -371,7 +374,7 @@ class AutomatedParametricProcessor:
 
         if mask_id:
             mask_record.id = mask_id
-            logger.info(f"Saved mask with ID: {mask_id}")
+            logger.info("Saved mask with ID: %s", mask_id)
             return mask_record
 
         return None
@@ -381,7 +384,7 @@ class AutomatedParametricProcessor:
         """
         Token-based Jaccard similarity для текстовых параметров.
         Решает проблему перестановки токенов: 'Окс.Фос.ЭФП' ~ 'Фос.Окс.ЭФП' = 100%
-        Также нормализует цифры: 'Кд3' ~ 'Кд' = 100% (для покрытий цифры не значимы)
+        Также нормализует цифры: 'Кд3' ~ 'Кд' = 100% (для покрытий/материалов они не значимы)
         """
         import re
         if not a or not b:
@@ -418,27 +421,21 @@ class AutomatedParametricProcessor:
                 variants.append(v)
         return variants
 
-    # Кэш для coating_rules (читаем один раз за сессию)
-    _coating_rules_cache: Optional[Dict] = None
-
-    # Кэш для ENS candidates по (standard, item_type) — не грузить повторно
-    _ens_candidates_cache: Dict[Tuple[str, str], List[Dict]] = {}
-
     def _get_cached_ens_candidates(self, standard: str, item_type: str) -> List[Dict]:
         """Кэшированная загрузка ENS candidates по (standard, item_type)."""
         key = (standard.upper(), item_type.upper())
         if key not in self._ens_candidates_cache:
             candidates = self.validator._get_ens_examples(standard, item_type) or []
             self._ens_candidates_cache[key] = candidates
-            logger.debug(f"[ENS_CACHE] Loaded {len(candidates)} candidates for {key} (cache miss)")
+            logger.debug("[ENS_CACHE] Loaded %d candidates for %s (cache miss)", len(candidates), key)
         else:
             candidates = self._ens_candidates_cache[key]
-            logger.debug(f"[ENS_CACHE] Using {len(candidates)} cached candidates for {key} (cache hit)")
+            logger.debug("[ENS_CACHE] Using %d cached candidates for %s (cache hit)", len(candidates), key)
         return candidates
 
     def _load_coating_rules(self) -> Optional[Dict]:
         """Получение coating_rules: сначала из settings, fallback на прямое чтение YAML."""
-        if self._coating_rules_cache is not None:
+        if self._coating_rules_loaded:
             return self._coating_rules_cache
 
         # Способ 1: через settings (если settings.py обновлён)
@@ -448,10 +445,11 @@ class AutomatedParametricProcessor:
             coating_rules = getattr(settings, 'coating_rules', None)
             if coating_rules:
                 self._coating_rules_cache = coating_rules
+                self._coating_rules_loaded = True
                 logger.info("[COATING_SUBST] Loaded from settings")
                 return coating_rules
         except Exception as e:
-            logger.debug(f"[COATING_SUBST] Settings not available: {e}")
+            logger.debug("[COATING_SUBST] Settings not available: %s", e)
 
         # Способ 2: прямое чтение YAML с поиском по всем возможным путям
         import yaml
@@ -497,13 +495,15 @@ class AutomatedParametricProcessor:
                     coating_rules = config.get('coating_rules')
                     if coating_rules:
                         self._coating_rules_cache = coating_rules
-                        logger.info(f"[COATING_SUBST] Loaded from {path}")
+                        self._coating_rules_loaded = True
+                        logger.info("[COATING_SUBST] Loaded from %s", path)
                         return coating_rules
             except Exception:
                 continue
 
         logger.warning("[COATING_SUBST] coating_rules not found anywhere")
         self._coating_rules_cache = {}
+        self._coating_rules_loaded = True
         return None
 
     def _apply_coating_substitution(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Tuple[Dict[str, str], Optional[Dict]]:
@@ -520,7 +520,7 @@ class AutomatedParametricProcessor:
             Tuple[extracted_params (возможно изменённые), substitution_info или None]
             substitution_info содержит: original, corrected, material, reason, rule_note
         """
-        logger.debug(f"[COATING_SUBST] Called with coating={extracted_params.get('покрытие')}, candidates={len(ens_candidates)}")
+        logger.debug("[COATING_SUBST] Called with coating=%s, candidates=%d", extracted_params.get('покрытие'), len(ens_candidates))
 
         # Загружаем coating rules напрямую из YAML (не через settings, т.к.
         # оригинальный settings.py может не иметь поля coating_rules)
@@ -544,19 +544,19 @@ class AutomatedParametricProcessor:
         material = None
         if trial_match:
             material = trial_match.get('марка_материала') or trial_match.get('марка_стали')
-        # Если лучший match не дал марку — берем из key_ens_params первых кандидатов
-        if not material and trial_debug:
-            for cd in trial_debug[:5]:
-                key_params = cd.get('key_ens_params', {})
-                material = key_params.get('марка_материала') or key_params.get('марка_стали')
-                if material:
-                    break
+            # Если лучший match не дал марку — берем из key_ens_params первых кандидатов
+            if not material and trial_debug:
+                for cd in trial_debug[:5]:
+                    key_params = cd.get('key_ens_params', {})
+                    material = key_params.get('марка_материала') or key_params.get('марка_стали')
+                    if material:
+                        break
 
         if not material:
             logger.debug("[COATING_SUBST] Could not determine material from candidates")
             return extracted_params, None
 
-        logger.debug(f"[COATING_SUBST] Detected material: '{material}'")
+        logger.debug("[COATING_SUBST] Detected material: '%s'", material)
 
         # Применяем auto_substitution правила
         import re
@@ -593,12 +593,12 @@ class AutomatedParametricProcessor:
                 }
             }
             logger.info(
-                f"[COATING_SUBST] Applied: '{coating}' → '{correct_coating}' "
-                f"(material='{material}', rule={rule.get('note', '')})"
+                "[COATING_SUBST] Applied: '%s' → '%s' (material='%s', rule=%s)",
+                coating, correct_coating, material, rule.get('note', '')
             )
             return new_params, substitution_info
 
-        logger.debug(f"[COATING_SUBST] No matching rule for coating='{coating}', material='{material}'")
+        logger.debug("[COATING_SUBST] No matching rule for coating='%s', material='%s'", coating, material)
         return extracted_params, None
 
     def _fuzzy_match_ens(self, extracted_params: Dict[str, str], ens_candidates: List[Dict]) -> Optional[Dict]:
@@ -627,9 +627,9 @@ class AutomatedParametricProcessor:
             coating_variants = self._get_coating_variants(extracted_params['покрытие'])
 
         # Debug: выводим извлечённые параметры
-        extracted_str = ", ".join(f"{k}={v}" for k, v in extracted_params.items() if v is not None)
-        logger.debug(f"[FUZZY] Extracted params: {extracted_str}")
-        logger.debug(f"[FUZZY] Total candidates to check: {len(ens_candidates) if ens_candidates else 0}")
+        extracted_str = ", ".join("{}={}".format(k, v) for k, v in extracted_params.items() if v is not None)
+        logger.debug("[FUZZY] Extracted params: %s", extracted_str)
+        logger.debug("[FUZZY] Total candidates to check: %d", len(ens_candidates) if ens_candidates else 0)
 
         for candidate in ens_candidates:
             total_weight = 0.0
@@ -675,9 +675,9 @@ class AutomatedParametricProcessor:
                     }
                     if matched:
                         matched_weight += weight * sim
-                        candidate_debug['params_matched'][param_name] = f"'{extracted_val}' ~ '{candidate_val}' (sim={sim:.2f})"
+                        candidate_debug['params_matched'][param_name] = "'{}' ~ '{}' (sim={:.2f})".format(extracted_val, candidate_val, sim)
                     else:
-                        candidate_debug['params_mismatched'][param_name] = f"'{extracted_val}' vs '{candidate_val}' (sim={sim:.2f})"
+                        candidate_debug['params_mismatched'][param_name] = "'{}' vs '{}' (sim={:.2f})".format(extracted_val, candidate_val, sim)
                 else:
                     # Числовые параметры — точное совпадение (нормализуем int vs float)
                     try:
@@ -693,9 +693,9 @@ class AutomatedParametricProcessor:
                     }
                     if matched:
                         matched_weight += weight
-                        candidate_debug['params_matched'][param_name] = f"{extracted_val} == {candidate_val}"
+                        candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
                     else:
-                        candidate_debug['params_mismatched'][param_name] = f"{extracted_val} != {candidate_val}"
+                        candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
             # Дополнительно: найдём ключевые ENS-параметры кандидата для debug
             key_ens_params = {}
@@ -709,24 +709,24 @@ class AutomatedParametricProcessor:
                 candidate_debug['score'] = round(score, 3)
                 candidate_debug['weight'] = round(total_weight, 1)
                 candidate_debug['matched_weight'] = round(matched_weight, 1)
-                logger.debug(f"[FUZZY] Candidate '{candidate_debug['name'][:50]}': score={score:.3f}, weight={total_weight:.1f}, matched={matched_weight:.1f}")
+                logger.debug("[FUZZY] Candidate '%s': score=%.3f, weight=%.1f, matched=%.1f", candidate_debug['name'][:50], score, total_weight, matched_weight)
                 # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
                 if _get_matching_config().debug_per_parameter:
-                    ens_params_str = ", ".join(f"{k}={v}" for k, v in key_ens_params.items())
-                    logger.debug(f"[FUZZY]   ENS params: {ens_params_str}")
+                    ens_params_str = ", ".join("{}={}".format(k, v) for k, v in key_ens_params.items())
+                    logger.debug("[FUZZY] ENS params: %s", ens_params_str)
                     if candidate_debug['params_matched']:
-                        matched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_matched'].items())
-                        logger.debug(f"[FUZZY]   MATCHED: {matched_str}")
+                        matched_str = ", ".join("{}: {}".format(k, v) for k, v in candidate_debug['params_matched'].items())
+                        logger.debug("[FUZZY] MATCHED: %s", matched_str)
                     if candidate_debug['params_mismatched']:
-                        mismatched_str = ", ".join(f"{k}: {v}" for k, v in candidate_debug['params_mismatched'].items())
-                        logger.debug(f"[FUZZY]   MISMATCHED: {mismatched_str}")
+                        mismatched_str = ", ".join("{}: {}".format(k, v) for k, v in candidate_debug['params_mismatched'].items())
+                        logger.debug("[FUZZY] MISMATCHED: %s", mismatched_str)
                 if score > best_score:
                     best_score = score
                     best_match = {**candidate, '_fuzzy_score': best_score}
             else:
                 candidate_debug['score'] = 0.0
                 candidate_debug['reason'] = 'no comparable params (weight=0)'
-                logger.debug(f"[FUZZY] Candidate '{candidate_debug['name'][:50]}': no comparable params (weight=0)")
+                logger.debug("[FUZZY] Candidate '%s': no comparable params (weight=0)", candidate_debug['name'][:50])
 
             debug_candidates.append(candidate_debug)
 
@@ -736,15 +736,14 @@ class AutomatedParametricProcessor:
         # Итоговый debug: top candidates (только при debug_per_parameter=true)
         if debug_candidates and _get_matching_config().debug_per_parameter:
             top_n = min(5, len(debug_candidates))
-            logger.debug(f"[FUZZY] Top {top_n} candidates:")
+            logger.debug("[FUZZY] Top %d candidates:", top_n)
             for i, cd in enumerate(debug_candidates[:top_n], 1):
-                logger.debug(f"[FUZZY]   #{i}: '{cd.get('name','')[:50]}' score={cd.get('score',0)}, code={cd.get('ens_code','N/A')}")
+                logger.debug("[FUZZY] #%d: '%s' score=%s, code=%s", i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
                 if cd.get('params_mismatched'):
                     for pk, pv in cd['params_mismatched'].items():
-                        logger.debug(f"[FUZZY]       mismatch: {pk}: {pv}")
-        logger.debug(f"[FUZZY] Best score: {best_score:.3f}, threshold: 0.6, matched: {best_match is not None and best_score >= 0.6}")
+                        logger.debug("[FUZZY] mismatch: %s: %s", pk, pv)
+            logger.debug("[FUZZY] Best score: %.3f, threshold: 0.6, matched: %s", best_score, best_match is not None and best_score >= 0.6)
         return (best_match if best_score >= 0.6 else None), debug_candidates
-
 
     def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -773,7 +772,7 @@ class AutomatedParametricProcessor:
                 if correct in remapped and correct == 'номинальный_диаметр_резьбы':
                     remapped['длина'] = remapped[correct]
                 remapped[correct] = value
-                logger.debug(f"[REMAP] {wrong} → {correct}: {value}")
+                logger.debug("[REMAP] %s → %s: %s", wrong, correct, value)
 
         return remapped
 
@@ -880,9 +879,9 @@ class AutomatedParametricProcessor:
         effective_standard = getattr(mask, 'standard', None) or extracted_std or ''
         if not getattr(mask, 'standard', None) and extracted_std:
             mask.standard = extracted_std
-            logger.info(f"[PARAM_MATCH] Fixed mask.standard from extracted: '{extracted_std}'")
+            logger.info("[PARAM_MATCH] Fixed mask.standard from extracted: '%s'", extracted_std)
 
-        logger.debug(f"[PARAM_MATCH] text='{text[:50]}', mask.pattern='{mask.pattern[:50]}...', mask.standard='{effective_standard}', mask.item_type='{mask.item_type}'")
+        logger.debug("[PARAM_MATCH] text='%s', mask.pattern='%s...', mask.standard='%s', mask.item_type='%s'", text[:50], mask.pattern[:50], effective_standard, mask.item_type)
 
         match_result = self.parametric_client.match(
             text=text,
@@ -890,7 +889,7 @@ class AutomatedParametricProcessor:
             item_type=mask.item_type
         )
 
-        logger.debug(f"[PARAM_MATCH] score={match_result.score}, matched_params={match_result.matched_params}, ens_code={match_result.ens_code}")
+        logger.debug("[PARAM_MATCH] score=%s, matched_params=%s, ens_code=%s", match_result.score, match_result.matched_params, match_result.ens_code)
 
         # Fallback: если parametric_client вернул пустые params но score > 0,
         # извлекаем params напрямую через regex (используем re.search с IGNORECASE,
@@ -900,16 +899,16 @@ class AutomatedParametricProcessor:
             import re
             try:
                 relaxed_for_fallback = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                logger.debug(f"[PARAM_MATCH] Fallback pattern: {relaxed_for_fallback[:200]}")
+                logger.debug("[PARAM_MATCH] Fallback pattern: %s", relaxed_for_fallback[:200])
                 m = re.search(relaxed_for_fallback, text, re.IGNORECASE)
                 if m:
                     fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                     if fallback_params:
-                        logger.info(f"[PARAM_MATCH] Fallback extraction: {fallback_params}")
-                else:
-                    logger.warning(f"[PARAM_MATCH] Fallback regex did NOT match. Pattern: {relaxed_for_fallback[:120]}")
+                        logger.info("[PARAM_MATCH] Fallback extraction: %s", fallback_params)
+                    else:
+                        logger.warning("[PARAM_MATCH] Fallback regex did NOT match. Pattern: %s", relaxed_for_fallback[:120])
             except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Fallback extraction error: {e}")
+                logger.warning("[PARAM_MATCH] Fallback extraction error: %s", e)
 
         # Ultimate fallback: generic pattern по item_type
         # Когда маска БД имеет неправильную структуру (лишние/отсутствующие параметры),
@@ -922,50 +921,50 @@ class AutomatedParametricProcessor:
                 if generic_pattern:
                     # Применяем те же relax-правила к generic pattern
                     relaxed_generic = self.parametric_client._relax_pattern(generic_pattern, standard=effective_standard)
-                    logger.debug(f"[PARAM_MATCH] Generic pattern: {relaxed_generic[:200]}")
+                    logger.debug("[PARAM_MATCH] Generic pattern: %s", relaxed_generic[:200])
                     m = re.search(relaxed_generic, text, re.IGNORECASE)
                     if m:
                         fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         if fallback_params:
-                            logger.info(f"[PARAM_MATCH] Generic extraction: {fallback_params}")
-                    else:
-                        logger.debug(f"[PARAM_MATCH] Generic pattern did NOT match")
+                            logger.info("[PARAM_MATCH] Generic extraction: %s", fallback_params)
+                        else:
+                            logger.debug("[PARAM_MATCH] Generic pattern did NOT match")
             except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Generic fallback error: {e}")
-        # где обязательные скобки/группы делаем опциональными
-        relaxed_result = None
-        if match_result.score == 0 and not match_result.matched_params:
-            try:
-                relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                if relaxed_pattern != mask.pattern:
-                    # Создаём временную маску с ослабленным паттерном
-                    relaxed_mask = type(mask)(
-                        id=getattr(mask, 'id', -1),
-                        standard=effective_standard,
-                        item_type=mask.item_type,
-                        pattern=relaxed_pattern,
-                        params=mask.params,
-                        required=mask.required,
-                        auto_score=getattr(mask, 'auto_score', 0),
-                        is_active=True,
-                        source='relaxed',
-                        usage_count=0,
-                        test_examples='[]',
-                        created_at='',
-                        last_used='',
-                        pattern_hash=''
-                    )
-                    relaxed_result = self.parametric_client.match(
-                        text=text,
-                        standard=effective_standard,
-                        item_type=mask.item_type,
-                        pattern=relaxed_pattern
-                    )
-                    if relaxed_result.score > 0:
-                        logger.info(f"[PARAM_MATCH] Relaxed pattern matched: score={relaxed_result.score}")
-                        match_result = relaxed_result
-            except Exception as e:
-                logger.debug(f"[PARAM_MATCH] Relaxed pattern error: {e}")
+                logger.warning("[PARAM_MATCH] Generic fallback error: %s", e)
+            # где обязательные скобки/группы делаем опциональными
+            relaxed_result = None
+            if match_result.score == 0 and not match_result.matched_params:
+                try:
+                    relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
+                    if relaxed_pattern != mask.pattern:
+                        # Создаём временную маску с ослабленным паттерном
+                        relaxed_mask = type(mask)(
+                            id=getattr(mask, 'id', -1),
+                            standard=effective_standard,
+                            item_type=mask.item_type,
+                            pattern=relaxed_pattern,
+                            params=mask.params,
+                            required=mask.required,
+                            auto_score=getattr(mask, 'auto_score', 0),
+                            is_active=True,
+                            source='relaxed',
+                            usage_count=0,
+                            test_examples='[]',
+                            created_at='',
+                            last_used='',
+                            pattern_hash=''
+                        )
+                        relaxed_result = self.parametric_client.match(
+                            text=text,
+                            standard=effective_standard,
+                            item_type=mask.item_type,
+                            pattern=relaxed_pattern
+                        )
+                        if relaxed_result.score > 0:
+                            logger.info("[PARAM_MATCH] Relaxed pattern matched: score=%s", relaxed_result.score)
+                            match_result = relaxed_result
+                except Exception as e:
+                    logger.debug("[PARAM_MATCH] Relaxed pattern error: %s", e)
 
         # Fuzzy matching fallback: если точный поиск не дал результата,
         # пробуем token-based matching для текстовых параметров (покрытие, материал)
@@ -980,31 +979,31 @@ class AutomatedParametricProcessor:
         # Remap неправильных имён групп на корректные ENS-имена
         if final_matched_params:
             final_matched_params = self._remap_params(final_matched_params)
-            logger.debug(f"[PARAM_MATCH] Remapped params: {final_matched_params}")
+            logger.debug("[PARAM_MATCH] Remapped params: %s", final_matched_params)
 
         # === COATING AUTO-SUBSTITUTION ===
         # Всегда проверяем, даже если score высокий — для корректного покрытия в details.
         # Используем raw_params (fallback или matched, до remap).
         raw_params = fallback_params if fallback_params else match_result.matched_params
-        logger.debug(f"[PARAM_MATCH] Coating substitution check: raw_params={raw_params}")
+        logger.debug("[PARAM_MATCH] Coating substitution check: raw_params=%s", raw_params)
         if raw_params and raw_params.get('покрытие'):
-            logger.debug(f"[PARAM_MATCH] Coating substitution: has покрытие='{raw_params.get('покрытие')}', calling _apply_coating_substitution")
+            logger.debug("[PARAM_MATCH] Coating substitution: has покрытие='%s', calling _apply_coating_substitution", raw_params.get('покрытие'))
             try:
                 # Загружаем кандидатов для определения марки материала
                 ens_candidates_sub = self._get_cached_ens_candidates(effective_standard, mask.item_type)
-                logger.debug(f"[PARAM_MATCH] Coating substitution: got {len(ens_candidates_sub)} candidates")
+                logger.debug("[PARAM_MATCH] Coating substitution: got %d candidates", len(ens_candidates_sub))
                 if ens_candidates_sub:
                     _, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
                     if substitution_info:
-                        logger.info(f"[PARAM_MATCH] Coating substitution result: {substitution_info}")
+                        logger.info("[PARAM_MATCH] Coating substitution result: %s", substitution_info)
                     else:
-                        logger.debug(f"[PARAM_MATCH] Coating substitution: no substitution applied")
+                        logger.debug("[PARAM_MATCH] Coating substitution: no substitution applied")
                 else:
-                    logger.debug(f"[PARAM_MATCH] Coating substitution: no candidates, skipping")
+                    logger.debug("[PARAM_MATCH] Coating substitution: no candidates, skipping")
             except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Coating substitution error: {e}", exc_info=True)
+                logger.warning("[PARAM_MATCH] Coating substitution error: %s", e, exc_info=True)
         else:
-            logger.debug(f"[PARAM_MATCH] Coating substitution: no покрытие in raw_params, skipping")
+            logger.debug("[PARAM_MATCH] Coating substitution: no покрытие in raw_params, skipping")
 
         # Debug: собираем информацию о всех проверенных кандидатах
         debug_candidates = []
@@ -1013,7 +1012,7 @@ class AutomatedParametricProcessor:
             try:
                 # Получаем кандидатов из ЕСН
                 ens_candidates = self._get_cached_ens_candidates(effective_standard, mask.item_type)
-                logger.info(f"[PARAM_MATCH] ENS candidates: count={len(ens_candidates)}, standard={effective_standard}, item_type={mask.item_type}")
+                logger.info("[PARAM_MATCH] ENS candidates: count=%d, standard=%s, item_type=%s", len(ens_candidates), effective_standard, mask.item_type)
 
                 # === COATING AUTO-SUBSTITUTION для ПОИСКА ===
                 # Если substitution применена — используем исправленные params для поиска.
@@ -1021,7 +1020,7 @@ class AutomatedParametricProcessor:
                 if substitution_info and ens_candidates:
                     search_params = dict(final_matched_params)
                     search_params['покрытие'] = substitution_info['corrected']
-                    logger.info(f"[PARAM_MATCH] Using substituted params for search: {search_params}")
+                    logger.info("[PARAM_MATCH] Using substituted params for search: %s", search_params)
 
                 # СНАЧАЛА exact match через _find_in_ens (coating expansion + name_exact)
                 if search_params:
@@ -1041,11 +1040,11 @@ class AutomatedParametricProcessor:
                         fuzzy_score = manual_ens.get('_match_score', 0.8)
                         if not match_result.ens_name:
                             match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
-                        logger.info(f"[PARAM_MATCH] Exact ENS search matched: ens_code={fuzzy_ens_code}, score={fuzzy_score:.2f}")
+                        logger.info("[PARAM_MATCH] Exact ENS search matched: ens_code=%s, score=%.2f", fuzzy_ens_code, fuzzy_score)
 
                 # ЗАТЕМ fuzzy match (только если exact не сработал)
                 if not fuzzy_ens_code and ens_candidates and search_params:
-                    logger.info(f"[PARAM_MATCH] Trying fuzzy match with params: {search_params}")
+                    logger.info("[PARAM_MATCH] Trying fuzzy match with params: %s", search_params)
 
                     # Первый fuzzy pass (с already-substituted params)
                     fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(search_params, ens_candidates)
@@ -1054,7 +1053,7 @@ class AutomatedParametricProcessor:
 
                     # Если substitution была применена и не помогла — пробуем исходные params
                     if not fuzzy_match and search_params != final_matched_params:
-                        logger.info(f"[PARAM_MATCH] Substituted params didn't match, trying original: {final_matched_params}")
+                        logger.info("[PARAM_MATCH] Substituted params didn't match, trying original: %s", final_matched_params)
                         fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
                         if fuzzy_debug:
                             debug_candidates.extend(fuzzy_debug[:10])
@@ -1062,25 +1061,25 @@ class AutomatedParametricProcessor:
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
-                        logger.info(f"[PARAM_MATCH] Fuzzy fallback matched: score={fuzzy_score:.2f}, ens_code={fuzzy_ens_code}")
+                        logger.info("[PARAM_MATCH] Fuzzy fallback matched: score=%.2f, ens_code=%s", fuzzy_score, fuzzy_ens_code)
                     else:
-                        logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
+                        logger.warning("[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
 
-                    # Собираем несовпавшие параметры из лучшего кандидата (всегда, для diagnostics)
-                    if fuzzy_debug:
-                        best_candidate = fuzzy_debug[0]  # уже отсортированы по score убыванию
-                        if best_candidate.get('params_mismatched'):
-                            fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
-                            logger.info(f"[PARAM_MATCH] Fuzzy mismatched params: {fuzzy_mismatched_params}")
-                        else:
-                            # Fuzzy запускался, mismatched нет — пустой dict (явно: несовпадений не было)
-                            fuzzy_mismatched_params = {}
+                # Собираем несовпавшие параметры из лучшего кандидата (всегда, для diagnostics)
+                if fuzzy_debug:
+                    best_candidate = fuzzy_debug[0]  # уже отсортированы по score убыванию
+                    if best_candidate.get('params_mismatched'):
+                        fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
+                        logger.info("[PARAM_MATCH] Fuzzy mismatched params: %s", fuzzy_mismatched_params)
+                    else:
+                        # Fuzzy запускался, mismatched нет — пустой dict (явно: несовпадений не было)
+                        fuzzy_mismatched_params = {}
                 elif not ens_candidates:
-                    logger.warning(f"[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
+                    logger.warning("[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
                 elif not search_params:
-                    logger.warning(f"[PARAM_MATCH] Fuzzy fallback: empty search_params")
+                    logger.warning("[PARAM_MATCH] Fuzzy fallback: empty search_params")
             except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Fuzzy fallback error: {e}")
+                logger.warning("[PARAM_MATCH] Fuzzy fallback error: %s", e)
 
         # Используем лучший результат (fuzzy или обычный)
         final_ens_code = match_result.ens_code or fuzzy_ens_code
@@ -1095,9 +1094,9 @@ class AutomatedParametricProcessor:
                     final_ens_name = ens_item.get('наименование') or ens_item.get('name')
                     if not final_mdm_key:
                         final_mdm_key = ens_item.get('mdm_key')
-                    logger.info(f"[PARAM_MATCH] ENS name resolved: '{final_ens_name}'")
+                    logger.info("[PARAM_MATCH] ENS name resolved: '%s'", final_ens_name)
             except Exception as e:
-                logger.info(f"[PARAM_MATCH] Failed to resolve ENS name: {e}")
+                logger.info("[PARAM_MATCH] Failed to resolve ENS name: %s", e)
 
         # Fallback: парсим text через generic pattern (всегда, для V2 scoring)
         generic_params = None
@@ -1110,12 +1109,12 @@ class AutomatedParametricProcessor:
                     if m:
                         generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         generic_params = self._normalize_params(generic_params)
-                        logger.info(f"[PARAM_MATCH] Params from generic on text: {generic_params}")
+                        logger.info("[PARAM_MATCH] Params from generic on text: %s", generic_params)
                         # Если final_matched_params пуст — используем generic
                         if not final_matched_params:
                             final_matched_params = generic_params
             except Exception as e:
-                logger.debug(f"[PARAM_MATCH] Generic parse on text error: {e}")
+                logger.debug("[PARAM_MATCH] Generic parse on text error: %s", e)
 
         # НОВАЯ ЛОГИКА: generic pattern → parse ens_name → _calculate_match_score_v2
         v2_score = 0.0
@@ -1130,19 +1129,19 @@ class AutomatedParametricProcessor:
                     ens_item = self._get_ens_by_code(final_ens_code)
                     if ens_item:
                         final_ens_name = ens_item.get('наименование') or ens_item.get('name')
-                        logger.info(f"[PARAM_MATCH] ENS name resolved (V2): '{final_ens_name}'")
+                        logger.info("[PARAM_MATCH] ENS name resolved (V2): '%s'", final_ens_name)
                 except Exception as e:
-                    logger.info(f"[PARAM_MATCH] ENS name resolution failed (V2): {e}")
+                    logger.info("[PARAM_MATCH] ENS name resolution failed (V2): %s", e)
             try:
                 import re
                 generic = self._get_generic_pattern(mask.item_type, effective_standard)
                 if generic and final_ens_name:
                     ens_name_str = str(final_ens_name)
-                    logger.info(f"[PARAM_MATCH] V2 trying generic on ENS name: '{ens_name_str[:60]}', pattern: {generic[:80]}...")
+                    logger.info("[PARAM_MATCH] V2 trying generic on ENS name: '%s', pattern: %s...", ens_name_str[:60], generic[:80])
                     m = re.search(generic, ens_name_str, re.IGNORECASE)
                     if m:
                         generic_ens_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                        logger.info(f"[PARAM_MATCH] Generic parsed ENS name: {generic_ens_mask}")
+                        logger.info("[PARAM_MATCH] Generic parsed ENS name: %s", generic_ens_mask)
                         v2_score, v2_match_type, v2_details = self.parametric_client._calculate_match_score_v2(
                             text=text,
                             ens_name=final_ens_name,
@@ -1152,15 +1151,15 @@ class AutomatedParametricProcessor:
                             required=list(params_for_v2.keys())
                         )
                         v2_computed = True
-                        logger.info(f"[PARAM_MATCH] V2 score: {v2_score}, type: {v2_match_type}")
+                        logger.info("[PARAM_MATCH] V2 score: %s, type: %s", v2_score, v2_match_type)
                     else:
-                        logger.info(f"[PARAM_MATCH] V2: generic pattern did NOT match ENS name")
+                        logger.info("[PARAM_MATCH] V2: generic pattern did NOT match ENS name")
                 elif not final_ens_name:
-                    logger.info(f"[PARAM_MATCH] V2 skipped: no ENS name for code {final_ens_code}")
+                    logger.info("[PARAM_MATCH] V2 skipped: no ENS name for code %s", final_ens_code)
                 elif not generic:
-                    logger.info(f"[PARAM_MATCH] V2 skipped: no generic pattern for {mask.item_type}")
+                    logger.info("[PARAM_MATCH] V2 skipped: no generic pattern for %s", mask.item_type)
             except Exception as e:
-                logger.info(f"[PARAM_MATCH] V2 scoring error: {e}")
+                logger.info("[PARAM_MATCH] V2 scoring error: %s", e)
 
         # Финальный score: V2 + fuzzy — берём лучший результат
         # V2 scoring строгий (1.0 или 0.0), fuzzy — мягкий (0.0..1.0)
@@ -1209,17 +1208,17 @@ class AutomatedParametricProcessor:
                         if isinstance(v, list):
                             continue
                         ens_params_from_index[k] = v
-                    logger.debug(f"[PARAM_MATCH] ENS params from index: {ens_params_from_index}")
+                    logger.debug("[PARAM_MATCH] ENS params from index: %s", ens_params_from_index)
             except Exception as e:
-                logger.warning(f"[PARAM_MATCH] Failed to get ENS params: {e}")
+                logger.warning("[PARAM_MATCH] Failed to get ENS params: %s", e)
 
         # Нормализация типов: float 12.0 → int 12, str "2.0" → int 2
         if final_matched_params:
             final_matched_params = self._normalize_params(final_matched_params)
-            logger.debug(f"[PARAM_MATCH] Normalized params: {final_matched_params}")
+            logger.debug("[PARAM_MATCH] Normalized params: %s", final_matched_params)
         if ens_params_from_index:
             ens_params_from_index = self._normalize_params(ens_params_from_index)
-            logger.debug(f"[PARAM_MATCH] Normalized ens_params: {ens_params_from_index}")
+            logger.debug("[PARAM_MATCH] Normalized ens_params: %s", ens_params_from_index)
 
         # Fallback: заполняем ens_params_mask если он пустой, но есть ens_name
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
@@ -1232,9 +1231,9 @@ class AutomatedParametricProcessor:
                     m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
                     if m:
                         ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                        logger.debug(f"[PARAM_MATCH] ENS params mask (from mask): {ens_params_mask}")
+                        logger.debug("[PARAM_MATCH] ENS params mask (from mask): %s", ens_params_mask)
                 except Exception as e:
-                    logger.debug(f"[PARAM_MATCH] Failed to parse ens_name with mask: {e}")
+                    logger.debug("[PARAM_MATCH] Failed to parse ens_name with mask: %s", e)
             # Fallback B: generic pattern (если маска БД не сработала)
             if not ens_params_mask and mask:
                 try:
@@ -1243,9 +1242,9 @@ class AutomatedParametricProcessor:
                         m = re.search(generic, str(final_ens_name), re.IGNORECASE)
                         if m:
                             ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                            logger.debug(f"[PARAM_MATCH] ENS params mask (from generic): {ens_params_mask}")
+                            logger.debug("[PARAM_MATCH] ENS params mask (from generic): %s", ens_params_mask)
                 except Exception as e:
-                    logger.debug(f"[PARAM_MATCH] Generic pattern parse error: {e}")
+                    logger.debug("[PARAM_MATCH] Generic pattern parse error: %s", e)
 
         # Для JSON вывода: remap params и ens_params_mask на правильные ENS-имена
         display_params = self._remap_params(final_matched_params) if final_matched_params else {}
@@ -1287,8 +1286,8 @@ class AutomatedParametricProcessor:
             match_type_ru = 'Не определено'
 
         # Логирование coating_substitution и match_type перед возвратом
-        logger.info(f"[PARAM_MATCH] RETURN substitution_info={'SET' if substitution_info else 'NONE'}: {substitution_info}")
-        logger.info(f"[PARAM_MATCH] RETURN match_type={match_type_out}")
+        logger.info("[PARAM_MATCH] RETURN substitution_info=%s: %s", 'SET' if substitution_info else 'NONE', substitution_info)
+        logger.info("[PARAM_MATCH] RETURN match_type=%s", match_type_out)
 
         return ProcessingResult(
             text=text,
@@ -1310,8 +1309,8 @@ class AutomatedParametricProcessor:
             details={
                 'mask_id': mask.id,
                 'mask_pattern': mask.pattern,
-                'match_type': match_type_out,       # ← тип сопоставления (eng)
-                'match_type_ru': match_type_ru,     # ← тип сопоставления (rus)
+                'match_type': match_type_out,  # ← тип сопоставления (eng)
+                'match_type_ru': match_type_ru,  # ← тип сопоставления (rus)
                 'extracted_standard': extracted.get('standard_info'),
                 'extracted_type': extracted.get('item_type'),
                 'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,
@@ -1322,7 +1321,7 @@ class AutomatedParametricProcessor:
                 'v2_computed': v2_computed if 'v2_computed' in locals() else False,
                 'coating_substitution': substitution_info,
                 'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
-                **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().fuzzy_params_comparison and fuzzy_debug else {}),
+                **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().debug_per_parameter and fuzzy_debug else {}),
             },
             item_type=mask.item_type,
             standard=mask.standard
@@ -1357,14 +1356,10 @@ class AutomatedParametricProcessor:
         return {k: self._normalize_value_types(v) for k, v in params.items()}
 
     def _get_ens_by_code(self, ens_code: str) -> Optional[Dict[str, Any]]:
-        """Поиск записи ЕСН по коду в индексе."""
-        if not self.parametric_client or not self.parametric_client._ens_index:
+        """Поиск записи ЕСН по коду через индекс (O(1))."""
+        if not self.parametric_client:
             return None
-        items = self.parametric_client._ens_index.get('items', [])
-        for item in items:
-            if str(item.get('код', '')) == str(ens_code) or str(item.get('mdm_key', '')) == str(ens_code):
-                return item
-        return None
+        return self.parametric_client._get_ens_by_code(ens_code)
 
     def _tfidf_fallback(
         self,

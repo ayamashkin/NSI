@@ -2,23 +2,26 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
-LAST_FIX: 2026-05-08 12:00 UTC+3 — fuzzy_mismatched_params добавлен в выходной JSON row
-  2026-05-08 11:50 UTC+3 — match_type, match_type_ru, coating_substitution, mask_pattern в JSON row
-  2026-05-08 11:30 UTC+3 — ens auto-mapping: автогенерация ens_column_mapping.yaml из Excel
+LAST_FIX:
+ 2026-05-14 10:32 UTC+3 — multiprocessing batch через ProcessPoolExecutor + опции --workers/--chunk-size (производительность)
+ 2026-05-08 12:00 UTC+3 — fuzzy_mismatched_params добавлен в выходной JSON row
+ 2026-05-08 11:50 UTC+3 — match_type, match_type_ru, coating_substitution, mask_pattern в JSON row
+ 2026-05-08 11:30 UTC+3 — ens auto-mapping: автогенерация ens_column_mapping.yaml из Excel
 """
 
 import click
 import logging
 import yaml
 import json
+import multiprocessing
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from config.settings import setup_logging
 
 logger = logging.getLogger(__name__)
-
 
 @click.group()
 @click.option('--config', '-c', default='config/config.yaml', help='Путь к конфигу')
@@ -31,15 +34,14 @@ def cli(ctx, config):
         with open(config_path, 'r', encoding='utf-8') as f:
             ctx.obj['config'] = yaml.safe_load(f)
     else:
-        logger.warning(f"Config not found: {config}")
+        logger.warning("Config not found: %s", config)
         ctx.obj['config'] = {}
 
     # Настройка логирования из config.yaml
     try:
         setup_logging(str(config_path))
     except Exception as e:
-        logger.warning(f"Failed to setup logging from config: {e}")
-
+        logger.warning("Failed to setup logging from config: %s", e)
 
 # =============================================================================
 # LEGACY COMMANDS (LLM Mode)
@@ -54,12 +56,11 @@ def prompts():
     click.echo("📋 Доступные промпты:")
     for pid, cfg in settings.prompts.items():
         click.echo(f"\n🔹 {pid}")
-        click.echo(f"   Название: {cfg.name}")
-        click.echo(f"   Категория: {cfg.category}")
-        click.echo(f"   Сервис: {cfg.resolve_service(settings)}")
-        click.echo(f"   Модель: {cfg.resolve_model(settings)}")
-        click.echo(f"   Ключевые слова: {', '.join(cfg.keywords[:5])}...")
-
+        click.echo(f"  Название: {cfg.name}")
+        click.echo(f"  Категория: {cfg.category}")
+        click.echo(f"  Сервис: {cfg.resolve_service(settings)}")
+        click.echo(f"  Модель: {cfg.resolve_model(settings)}")
+        click.echo(f"  Ключевые слова: {', '.join(cfg.keywords[:5])}...")
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -104,7 +105,6 @@ def process(ctx, input_file, prompt, auto, workers, force):
     stats = db.get_statistics()
     click.echo(f"📈 Всего в БД: {stats.get('total', 0)}")
 
-
 @cli.command()
 @click.option('--output', '-o', default='results.json', help='Файл для экспорта')
 @click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
@@ -131,7 +131,7 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
     )
 
     if not results:
-        click.echo("⚠️  Нет данных для экспорта")
+        click.echo("⚠️ Нет данных для экспорта")
         return
 
     export_data = db.export_filtered_to_json(
@@ -143,7 +143,6 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
     )
 
     click.echo(f"✅ Экспортировано: {len(results)} записей → {output}")
-
 
 @cli.command()
 def stats():
@@ -157,17 +156,16 @@ def stats():
     stats = db.get_statistics()
 
     click.echo("📊 Статистика результатов:")
-    click.echo(f"   Всего записей: {stats.get('total', 0)}")
-    click.echo(f"   По статусам:")
+    click.echo(f"  Всего записей: {stats.get('total', 0)}")
+    click.echo(f"  По статусам:")
     for status, count in stats.get('by_status', {}).items():
-        click.echo(f"      {status}: {count}")
-    click.echo(f"   По категориям:")
+        click.echo(f"    {status}: {count}")
+    click.echo(f"  По категориям:")
     for cat, count in stats.get('by_category', {}).items():
-        click.echo(f"      {cat}: {count}")
-    click.echo(f"   По API:")
+        click.echo(f"    {cat}: {count}")
+    click.echo(f"  По API:")
     for api, count in stats.get('by_api', {}).items():
-        click.echo(f"      {api}: {count}")
-
+        click.echo(f"    {api}: {count}")
 
 @cli.command()
 @click.option('--limit', '-l', default=10, help='Количество ошибок')
@@ -193,7 +191,6 @@ def errors(limit, prompt):
         click.echo(f"   Промпт: {result.get('prompt_id', 'N/A')}")
         click.echo(f"   Ошибка: {result.get('error_message', 'N/A')[:100]}...")
         click.echo()
-
 
 @cli.command()
 @click.argument('text')
@@ -226,7 +223,6 @@ def detect(text):
 
     click.echo("❌ Категория не определена")
 
-
 @cli.command()
 @click.option('--api', 'api_name', help='Проверить конкретный API (openwebui, mws, gigachat)')
 def models(api_name):
@@ -244,7 +240,7 @@ def models(api_name):
             continue
 
         click.echo(f"\n🔌 {service.upper()}:")
-        click.echo(f"   URL: {cfg.base_url}")
+        click.echo(f"  URL: {cfg.base_url}")
 
         try:
             if service == 'openwebui':
@@ -278,17 +274,16 @@ def models(api_name):
 
             model_list = client.get_models()
             if model_list:
-                click.echo(f"   Модели ({len(model_list)}):")
+                click.echo(f"  Модели ({len(model_list)}):")
                 for m in model_list[:10]:
-                    click.echo(f"      - {m}")
+                    click.echo(f"    - {m}")
                 if len(model_list) > 10:
-                    click.echo(f"      ... и еще {len(model_list) - 10}")
+                    click.echo(f"    ... и еще {len(model_list) - 10}")
             else:
-                click.echo("   ⚠️  Нет доступных моделей")
+                click.echo("  ⚠️ Нет доступных моделей")
 
         except Exception as e:
-            click.echo(f"   ❌ Ошибка: {e}")
-
+            click.echo(f"  ❌ Ошибка: {e}")
 
 # =============================================================================
 # PARAMETRIC COMMANDS (New)
@@ -306,7 +301,7 @@ def _init_llm_clients(settings, all_services=False):
     else:
         # Только default_service из конфига
         services = [settings.mask_generation.default_service]
-        logger.info(f"LLM: using default_service='{services[0]}'")
+        logger.info("LLM: using default_service='%s'", services[0])
 
     for service_name in services:
         if service_name not in settings.api:
@@ -316,7 +311,7 @@ def _init_llm_clients(settings, all_services=False):
             # --- Проверка credentials перед созданием клиента ---
             if service_name == 'openwebui':
                 if not cfg.api_key and not (cfg.username and cfg.password):
-                    logger.debug(f"Skipping {service_name}: no credentials")
+                    logger.debug("Skipping %s: no credentials", service_name)
                     continue
                 from api_clients.openwebui import OpenWebUIClient
                 llm_clients[service_name] = OpenWebUIClient(
@@ -325,7 +320,7 @@ def _init_llm_clients(settings, all_services=False):
                 )
             elif service_name == 'mws':
                 if not cfg.api_key:
-                    logger.debug(f"Skipping {service_name}: no api_key")
+                    logger.debug("Skipping %s: no api_key", service_name)
                     continue
                 from api_clients.mws_gpt import MWSGPTClient
                 llm_clients[service_name] = MWSGPTClient(
@@ -333,7 +328,7 @@ def _init_llm_clients(settings, all_services=False):
                 )
             elif service_name == 'gigachat':
                 if not cfg.api_key:
-                    logger.debug(f"Skipping {service_name}: no api_key")
+                    logger.debug("Skipping %s: no api_key", service_name)
                     continue
                 from api_clients.gigachat import GigaChatClient
                 llm_clients[service_name] = GigaChatClient(
@@ -343,17 +338,16 @@ def _init_llm_clients(settings, all_services=False):
                 )
             elif service_name == 'mts_ai':
                 if not cfg.api_key:
-                    logger.debug(f"Skipping {service_name}: no api_key")
+                    logger.debug("Skipping %s: no api_key", service_name)
                     continue
                 from api_clients.mts_ai import MTSAIClient
                 llm_clients[service_name] = MTSAIClient(
                     base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
                 )
-            logger.info(f"LLM client initialized: {service_name}")
+            logger.info("LLM client initialized: %s", service_name)
         except Exception as e:
-            logger.warning(f"Failed to init {service_name}: {e}")
+            logger.warning("Failed to init %s: %s", service_name, e)
     return llm_clients
-
 
 @cli.command()
 @click.argument('text')
@@ -390,17 +384,71 @@ def process_parametric(text, db, ens_index, llm):
     click.echo(f"🔹 Уровень: {result.level.value}")
     click.echo(f"✅ Успех: {result.success}")
     click.echo(f"📊 Уверенность: {result.confidence:.2f}")
-    click.echo(f"⏱️  Время: {result.processing_time_ms:.2f} мс")
+    click.echo(f"⏱️ Время: {result.processing_time_ms:.2f} мс")
 
     if result.params:
         click.echo(f"📌 Параметры:")
         for key, value in result.params.items():
             if not key.startswith('_'):
-                click.echo(f"   {key}: {value}")
+                click.echo(f"  {key}: {value}")
 
     if result.ens_match:
         click.echo(f"🔗 ЕСН совпадение:")
-        click.echo(f"   Код: {result.ens_match.get('code')}")
+        click.echo(f"  Код: {result.ens_match.get('code')}")
+
+
+# === МУЛЬТИПРОЦЕССИНГ: worker-функции ===
+def _init_processor_worker(args: dict) -> 'AutomatedParametricProcessor':
+    """Инициализация processor внутри worker-процесса (lazy init)."""
+    from core.mask_database import MaskDatabase
+    from core.automated_processor import AutomatedParametricProcessor
+    from config.settings import get_settings
+
+    settings = get_settings()
+    mask_db = MaskDatabase(db_path=args['db'])
+
+    llm_clients = {}
+    if args.get('llm'):
+        # Инициализация LLM клиентов (если нужно)
+        llm_clients = _init_llm_clients(settings, all_services=True)
+
+    processor = AutomatedParametricProcessor(
+        mask_db=mask_db,
+        llm_clients=llm_clients if llm_clients else None,
+        ens_index_path=args.get('ens_index'),
+        use_llm_generation=args.get('llm', False),
+        settings=settings
+    )
+    return processor
+
+
+def _process_single(args: dict) -> dict:
+    """Обработка одной записи в worker-процессе."""
+    text = args['text']
+    processor = args.get('_processor')
+
+    if processor is None:
+        processor = _init_processor_worker(args)
+        args['_processor'] = processor
+
+    result = processor.process(text)
+
+    # Сериализация результата
+    return {
+        'text': result.text,
+        'level': result.level.value if hasattr(result.level, 'value') else str(result.level),
+        'success': result.success,
+        'params': result.params,
+        'ens_code': result.ens_match.get('code') if result.ens_match else None,
+        'ens_name': result.ens_match.get('name') if result.ens_match else None,
+        'ens_params': result.ens_params,
+        'ens_params_mask': result.ens_params_mask,
+        'confidence': result.confidence,
+        'processing_time_ms': result.processing_time_ms,
+        'item_type': result.item_type,
+        'standard': result.standard,
+        'details': result.details
+    }
 
 
 @cli.command()
@@ -413,8 +461,10 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--success-only', is_flag=True, help='Выгружать только успешно распознанные')
 @click.option('--include-details', is_flag=True, help='Включить debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
-def batch(input_file, db, ens_index, output, llm, validate, success_only, include_details, coating_map):
-    """Пакетная обработка с параметрическим поиском"""
+@click.option('--workers', '-w', default=None, type=int, help='Количество worker-процессов (по умолчанию: число CPU)')
+@click.option('--chunk-size', default=50, type=int, help='Размер чанка для передачи в pool')
+def batch(input_file, db, ens_index, output, llm, validate, success_only, include_details, coating_map, workers, chunk_size):
+    """Пакетная обработка с параметрическим поиском (multiprocessing)"""
     import pandas as pd
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
@@ -451,60 +501,89 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             return
         click.echo("🤖 LLM генерация включена")
 
-    mask_db = MaskDatabase(db_path=db)
-    processor = AutomatedParametricProcessor(
-        mask_db=mask_db,
-        llm_clients=llm_clients if llm else None,
-        ens_index_path=ens_index,
-        use_llm_generation=llm,
-        settings=settings
-    )
+    # === МУЛЬТИПРОЦЕССИНГ ===
+    n_workers = workers or multiprocessing.cpu_count()
+    click.echo(f"⚡ Workers: {n_workers} (CPU cores: {multiprocessing.cpu_count()})")
 
-    click.echo("🚀 Начало обработки...")
-    if success_only:
-        click.echo("📌 Режим: только успешные результаты")
-    results = []
+    worker_args = {
+        'db': db,
+        'ens_index': ens_index,
+        'llm': llm,
+    }
+
+    results: List[Optional[dict]] = [None] * len(texts)
     stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
-    for text in tqdm(texts, desc="Обработка"):
-        result = processor.process(text)
-        stats['total'] += 1
+    if n_workers > 1:
+        # Многопроцессная обработка
+        tasks = [
+            {**worker_args, 'text': text, 'idx': i}
+            for i, text in enumerate(texts)
+        ]
 
-        if result.success:
-            stats['success'] += 1
-        else:
-            stats['failed'] += 1
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {}
+            for task in tasks:
+                future = executor.submit(_process_single, task)
+                futures[future] = task['idx']
 
-        # Фильтрация: пропускаем неуспешные если --success-only
-        if success_only and not result.success:
-            stats['filtered'] += 1
-            continue
+            # Сбор результатов с прогресс-баром
+            with tqdm(total=len(texts), desc="Обработка") as pbar:
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        result = future.result()
+                        results[idx] = result
+                        stats['total'] += 1
+                        if result['success']:
+                            stats['success'] += 1
+                        else:
+                            stats['failed'] += 1
+                        if success_only and not result['success']:
+                            stats['filtered'] += 1
+                    except Exception as e:
+                        logger.error("Error processing item %d: %s", idx, e)
+                        results[idx] = {'text': texts[idx], 'success': False, 'error': str(e)}
+                        stats['failed'] += 1
+                    pbar.update(1)
+    else:
+        # Однопоточный fallback
+        mask_db = MaskDatabase(db_path=db)
+        processor = AutomatedParametricProcessor(
+            mask_db=mask_db,
+            llm_clients=llm_clients if llm else None,
+            ens_index_path=ens_index,
+            use_llm_generation=llm,
+            settings=settings
+        )
+        for i, text in enumerate(tqdm(texts, desc="Обработка")):
+            result = processor.process(text)
+            results[i] = {
+                'text': result.text,
+                'level': result.level.value if hasattr(result.level, 'value') else str(result.level),
+                'success': result.success,
+                'params': result.params,
+                'ens_code': result.ens_match.get('code') if result.ens_match else None,
+                'ens_name': result.ens_match.get('name') if result.ens_match else None,
+                'ens_params': result.ens_params,
+                'ens_params_mask': result.ens_params_mask,
+                'confidence': result.confidence,
+                'processing_time_ms': result.processing_time_ms,
+                'item_type': result.item_type,
+                'standard': result.standard,
+                'details': result.details if include_details else None
+            }
+            stats['total'] += 1
+            if results[i]['success']:
+                stats['success'] += 1
+            else:
+                stats['failed'] += 1
 
-        row = {
-            'text': result.text,
-            'level': result.level.value,
-            'success': result.success,
-            'params': result.params,
-            'ens_code': result.ens_match.get('code') if result.ens_match else None,
-            'ens_name': result.ens_match.get('name') if result.ens_match else None,
-            'ens_params': result.ens_params,
-            'ens_params_mask': result.ens_params_mask,
-            'confidence': result.confidence,
-            'processing_time_ms': result.processing_time_ms,
-            'item_type': result.item_type,
-            'standard': result.standard,
-            'mask_pattern': result.details.get('mask_pattern') if result.details else None,
-            'match_type': result.details.get('match_type') if result.details else None,
-            'match_type_ru': result.details.get('match_type_ru') if result.details else None,
-            'coating_substitution': result.details.get('coating_substitution') if result.details else None,
-            'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None,
-            'fuzzy_params_comparison': result.details.get('fuzzy_params_comparison') if result.details else None
-        }
-        if include_details and result.details:
-            row['details'] = result.details
+    # Фильтрация
+    if success_only:
+        results = [r for r in results if r and r.get('success')]
 
-        results.append(row)
-
+    # Сохранение
     with open(output, 'w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
@@ -514,7 +593,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
     click.echo(f"❌ Не распознано: {stats['failed']}")
     if success_only:
         click.echo(f"🚫 Отфильтровано: {stats['filtered']}")
-
 
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
@@ -572,7 +650,6 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         analyzer.save_json(stats, json_output)
         click.echo(f"\n💾 JSON отчет сохранен: {json_output}")
 
-
 @cli.command('diagnose')
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -621,8 +698,8 @@ def diagnose(text, db, ens_index, llm, coating_map):
     standard_info = extracted.get('standard_info')
     item_type = extracted.get('item_type')
     click.echo(f"\n📌 Извлечение (Level 0):")
-    click.echo(f"   standard_info: {standard_info.to_dict() if standard_info else None}")
-    click.echo(f"   item_type: {item_type}")
+    click.echo(f"  standard_info: {standard_info.to_dict() if standard_info else None}")
+    click.echo(f"  item_type: {item_type}")
 
     if not standard_info or not item_type:
         click.echo("\n❌ Не удалось извлечь стандарт или тип — переход на LLM Direct")
@@ -634,35 +711,35 @@ def diagnose(text, db, ens_index, llm, coating_map):
     # Step 1: Mask lookup
     click.echo(f"\n📌 Mask lookup (Level 1):")
     mask = mask_db.get_mask(standard, search_item_type)
-    click.echo(f"   Поиск: standard='{standard}', item_type='{search_item_type}'")
-    click.echo(f"   Найдена: {mask is not None}")
+    click.echo(f"  Поиск: standard='{standard}', item_type='{search_item_type}'")
+    click.echo(f"  Найдена: {mask is not None}")
 
     if mask is None:
         mask = mask_db.get_mask(standard, item_type)
         if mask:
-            click.echo(f"   Найдена (оригинальный регистр): item_type='{item_type}'")
+            click.echo(f"  Найдена (оригинальный регистр): item_type='{item_type}'")
 
     if mask is None:
-        click.echo(f"   ❌ Маска не найдена в БД")
+        click.echo(f"  ❌ Маска не найдена в БД")
         return
 
-    click.echo(f"   mask.id: {getattr(mask, 'id', 'N/A')}")
-    click.echo(f"   mask.standard: {getattr(mask, 'standard', 'N/A')}")
-    click.echo(f"   mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
-    click.echo(f"   mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
-    click.echo(f"   mask.pattern (первые 120 символов):")
-    click.echo(f"      {getattr(mask, 'pattern', 'N/A')[:120]}")
+    click.echo(f"  mask.id: {getattr(mask, 'id', 'N/A')}")
+    click.echo(f"  mask.standard: {getattr(mask, 'standard', 'N/A')}")
+    click.echo(f"  mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
+    click.echo(f"  mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
+    click.echo(f"  mask.pattern (первые 120 символов):")
+    click.echo(f"    {getattr(mask, 'pattern', 'N/A')[:120]}")
 
     # Step 2: Pattern relaxation
     effective_standard = getattr(mask, 'standard', None) or standard
     client = ParametricENSClient.__new__(ParametricENSClient)
     relaxed = client._relax_pattern(mask.pattern, standard=effective_standard)
     click.echo(f"\n📌 Relax pattern:")
-    click.echo(f"   standard передан: '{effective_standard}'")
-    click.echo(f"   relaxed (первые 200 символов):")
-    click.echo(f"      {relaxed[:200]}")
+    click.echo(f"  standard передан: '{effective_standard}'")
+    click.echo(f"  relaxed (первые 200 символов):")
+    click.echo(f"    {relaxed[:200]}")
     if len(relaxed) > 200:
-        click.echo(f"      ... ({len(relaxed)} символов всего)")
+        click.echo(f"    ... ({len(relaxed)} символов всего)")
 
     # Step 3: Regex match
     try:
@@ -670,43 +747,41 @@ def diagnose(text, db, ens_index, llm, coating_map):
         match = compiled.search(text)
         click.echo(f"\n📌 Regex match:")
         if match:
-            click.echo(f"   ✅ MATCH")
-            click.echo(f"   groups: {match.groupdict()}")
+            click.echo(f"  ✅ MATCH")
+            click.echo(f"  groups: {match.groupdict()}")
         else:
-            click.echo(f"   ❌ NO MATCH")
+            click.echo(f"  ❌ NO MATCH")
             # Find longest prefix
             for i in range(len(text), 0, -1):
                 if compiled.search(text[:i]):
-                    click.echo(f"   longest matching prefix: '{text[:i]}'")
+                    click.echo(f"  longest matching prefix: '{text[:i]}'")
                     break
             else:
-                click.echo(f"   no prefix matches at all")
+                click.echo(f"  no prefix matches at all")
     except re.error as e:
         click.echo(f"\n📌 Regex match:")
-        click.echo(f"   ❌ INVALID REGEX: {e}")
-        click.echo(f"   pattern: {relaxed[:100]}")
+        click.echo(f"  ❌ INVALID REGEX: {e}")
+        click.echo(f"  pattern: {relaxed[:100]}")
 
     # Step 4: Full processor result
     click.echo(f"\n📌 Full processor result:")
     result = processor.process(text)
-    click.echo(f"   level: {result.level.value}")
-    click.echo(f"   success: {result.success}")
-    click.echo(f"   params: {result.params}")
-    click.echo(f"   ens_code: {result.ens_match.get('code') if result.ens_match else None}")
-    click.echo(f"   ens_params: {result.ens_params}")
-    click.echo(f"   confidence: {result.confidence:.3f}")
-    click.echo(f"   processing_time_ms: {result.processing_time_ms:.1f}")
+    click.echo(f"  level: {result.level.value}")
+    click.echo(f"  success: {result.success}")
+    click.echo(f"  params: {result.params}")
+    click.echo(f"  ens_code: {result.ens_match.get('code') if result.ens_match else None}")
+    click.echo(f"  ens_params: {result.ens_params}")
+    click.echo(f"  confidence: {result.confidence:.3f}")
+    click.echo(f"  processing_time_ms: {result.processing_time_ms:.1f}")
     if result.details:
-        click.echo(f"   details: {result.details}")
+        click.echo(f"  details: {result.details}")
 
     click.echo(f"\n{'=' * 60}")
-
 
 @cli.group()
 def ens():
     """Команды для работы с ЕСН"""
     pass
-
 
 @ens.command('auto-mapping')
 @click.argument('excel_file', type=click.Path(exists=True))
@@ -726,7 +801,6 @@ def auto_mapping(excel_file, output, append):
     total = sum(len(v) for v in mapping.get('category_mapping', {}).values())
     click.echo(f"✅ Сохранено {total} маппингов: {output}")
 
-
 @ens.command()
 @click.argument('excel_file', type=click.Path(exists=True))
 @click.option('--output', '-o', required=True, help='Путь для сохранения (.pkl)')
@@ -745,7 +819,6 @@ def build_index(excel_file, output, category):
             meta = json.load(f)
         click.echo(f"📊 Записей: {meta.get('item_count', 0)}")
         click.echo(f"📊 Категория: {meta.get('category', 'unknown')}")
-
 
 @ens.command()
 @click.argument('query')
@@ -767,7 +840,6 @@ def search(query, index, top_k):
         name = item.get('полное_наименование') or item.get('наименование', 'N/A')
         click.echo(f"{i}. [{score:.2f}] {name[:60]}...")
 
-
 @ens.command()
 @click.argument('excel_file', type=click.Path(exists=True))
 @click.option('--index', '-i', required=True, help='Путь к индексу')
@@ -779,14 +851,13 @@ def analyze(excel_file, index, sample):
     stats = analyze_nomenclature(excel_file, index, sample_size=sample)
 
     click.echo(f"📊 Анализ (выборка {sample}):")
-    click.echo(f"   Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
-    click.echo(f"   Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
+    click.echo(f"  Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
+    click.echo(f"  Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
 
     if 'estimated_regex_parsed' in stats:
         total = stats.get('total', 0)
         click.echo(f"\n📊 Экстраполяция на {total} записей:")
-        click.echo(f"   Ожидается regex: ~{stats['estimated_regex_parsed']}")
-
+        click.echo(f"  Ожидается regex: ~{stats['estimated_regex_parsed']}")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -847,7 +918,7 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
         click.echo(f"🔧 Отладочный режим: обрабатываем {len(standards)} пар:")
         for (std, itype), ex_list in all_items[:limit]:
             real_type = ex_list[0].get('тип_изделия') or ex_list[0].get('тип', itype)
-            click.echo(f"   - {real_type} / {std} ({len(ex_list)} примеров)")
+            click.echo(f"  - {real_type} / {std} ({len(ex_list)} примеров)")
 
     mask_db = MaskDatabase(db_path=db)
 
@@ -890,10 +961,9 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
                         stats['activated'] += 1
 
     click.echo(f"\n📊 Результат:")
-    click.echo(f"   Уже активных: {stats['existing']}")
-    click.echo(f"   Сгенерировано: {stats['generated']}")
-    click.echo(f"   Активировано: {stats['activated']}")
-
+    click.echo(f"  Уже активных: {stats['existing']}")
+    click.echo(f"  Сгенерировано: {stats['generated']}")
+    click.echo(f"  Активировано: {stats['activated']}")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД')
@@ -904,8 +974,7 @@ def cleanup(db, threshold):
 
     mask_db = MaskDatabase(db_path=db)
     deleted = mask_db.cleanup_low_score_masks(threshold)
-    click.echo(f"🗑️  Удалено {deleted} масок с score < {threshold}")
-
+    click.echo(f"🗑️ Удалено {deleted} масок с score < {threshold}")
 
 if __name__ == '__main__':
     cli()

@@ -2,14 +2,14 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-07
+VERSION: 2026-05-14
 
 LAST_FIXES:
-  2026-05-08 13:10 UTC+3 — strict_union_keys: учитывается в _compare_param_sets (false=skip пустые ключи)
-  2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
-  2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
-  2026-05-07 12:10 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
-  2026-05-07 11:45 UTC+3 — ленивая загрузка MatchingConfig через _get_matching_config()
+ 2026-05-14 10:32 UTC+3 — индексация ENS по (стандарт, тип) + O(1) поиск по коду + кэш compiled regex (производительность)
+ 2026-05-08 13:10 UTC+3 — strict_union_keys: учитывается в _compare_param_sets (false=skip пустые ключи)
+ 2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
+ 2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
+ 2026-05-07 12:10 UTC+3 — debug_per_parameter: лог _compare_param_sets под контролем конфига
 """
 
 import re
@@ -44,7 +44,6 @@ def _get_matching_config():
 # Кэш для empty_equivalent_values
 _empty_equiv_cache: Optional[Dict[str, List[str]]] = None
 
-
 def _load_empty_equivalent_values() -> Dict[str, List[str]]:
     """Загрузка значений, эквивалентных пустым, из ens_column_mapping.yaml."""
     global _empty_equiv_cache
@@ -67,11 +66,10 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
                     return _empty_equiv_cache
                 break
     except Exception as e:
-        logger.warning(f"Failed to load empty_equivalent_values: {e}")
+        logger.warning("Failed to load empty_equivalent_values: %s", e)
 
     _empty_equiv_cache = default
     return _empty_equiv_cache
-
 
 def _text_similarity(a: str, b: str) -> float:
     """
@@ -79,10 +77,10 @@ def _text_similarity(a: str, b: str) -> float:
     Удаляет цифры перед сравнением (Кд9.хр → кд, хр).
 
     Examples:
-        'Хим.Пас' ~ 'Хим.Пас' = 1.0
-        'Кд' ~ 'Кд9.хр' = 0.5 (кд общий, хр нет)
-        'Кд.фос' ~ 'Кд.фос.окс' = 0.67
-        'Окс.Фос' ~ 'Фос.Окс' = 1.0
+    'Хим.Пас' ~ 'Хим.Пас' = 1.0
+    'Кд' ~ 'Кд9.хр' = 0.5 (кд общий, хр нет)
+    'Кд.фос' ~ 'Кд.фос.окс' = 0.67
+    'Окс.Фос' ~ 'Фос.Окс' = 1.0
     """
     import re
     if not a or not b:
@@ -116,7 +114,6 @@ def _text_similarity(a: str, b: str) -> float:
 
     return len(intersection) / len(union)
 
-
 def _is_empty_equivalent(field: str, value: Any) -> bool:
     """Проверяет, является ли значение эквивалентным пустому/None."""
     if value is None:
@@ -128,7 +125,6 @@ def _is_empty_equivalent(field: str, value: Any) -> bool:
     empty_vals = equiv_values.get(field, [])
     return val_str.lower() in [v.lower() for v in empty_vals]
 
-
 @dataclass
 class ParametricMatch:
     """Результат параметрического сопоставления."""
@@ -136,8 +132,8 @@ class ParametricMatch:
     ens_name: Optional[str]
     mdm_key: Optional[str]
     matched_params: Dict[str, Any]
-    ens_params: Dict[str, Any]        # параметры из индекса ENS
-    ens_params_mask: Dict[str, Any]   # параметры из ens_name по маске
+    ens_params: Dict[str, Any]  # параметры из индекса ENS
+    ens_params_mask: Dict[str, Any]  # параметры из ens_name по маске
     score: float
     match_type: str  # 'exact', 'partial', 'fuzzy'
     confidence: float
@@ -166,7 +162,6 @@ class ParametricMatch:
         self.match_type = match_type
         self.confidence = confidence
         self.details = details or {}
-
 
 class ParametricENSClient:
     """
@@ -201,8 +196,74 @@ class ParametricENSClient:
         # Кэш для _find_in_ens по хешу (params, standard, item_type)
         self._find_in_ens_cache: Dict[str, Any] = {}
 
+        # === ПРОИЗВОДИТЕЛЬНОСТЬ: индексы и кэши ===
+        self._ens_by_standard_type: Dict[Tuple[str, str], List[Dict]] = {}
+        self._ens_by_code: Dict[str, Dict] = {}
+        self._pattern_cache: Dict[str, Any] = {}
+
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
+            self._build_indexes()
+
+    def _build_indexes(self):
+        """Построить индексы для O(1) / O(small N) доступа к ENS."""
+        items = self._ens_index.get('items', []) if self._ens_index else []
+        logger.info("Building ENS indexes for %d items...", len(items))
+
+        for item in items:
+            std = self._normalize_standard(item.get('нтд') or item.get('standard', ''))
+            itype = str(item.get('тип_изделия') or item.get('наименование_типа', '')).upper().strip()
+
+            # Индекс по (стандарт, тип)
+            key = (std, itype)
+            self._ens_by_standard_type.setdefault(key, []).append(item)
+
+            # Индекс по коду
+            code = str(item.get('код', '')).strip()
+            mdm = str(item.get('mdm_key', '')).strip()
+            if code:
+                self._ens_by_code[code] = item
+            if mdm and mdm != code:
+                self._ens_by_code[mdm] = item
+
+        total_keys = len(self._ens_by_standard_type)
+        logger.info("ENS indexes built: %d (std,type) groups, %d codes", total_keys, len(self._ens_by_code))
+
+    def _get_candidates_by_index(self, std_norm: Optional[str], query_type: Optional[str]) -> List[Dict]:
+        """Получить кандидатов ENS через индекс (вместо полного скана)."""
+        candidates = []
+
+        if std_norm and query_type:
+            key = (std_norm, query_type)
+            candidates = self._ens_by_standard_type.get(key, [])
+
+        if not candidates and std_norm:
+            # Fallback: все записи с этим стандартом
+            for key, group in self._ens_by_standard_type.items():
+                if key[0] == std_norm:
+                    candidates.extend(group)
+
+        if not candidates and query_type:
+            # Fallback: все записи с этим типом
+            for key, group in self._ens_by_standard_type.items():
+                if key[1] == query_type:
+                    candidates.extend(group)
+
+        if not candidates:
+            # Ultimate fallback (редко): все записи
+            candidates = self._ens_index.get('items', []) if self._ens_index else []
+
+        return candidates
+
+    def _get_compiled_pattern(self, pattern: str) -> Any:
+        """Кэширование compiled regex."""
+        if pattern not in self._pattern_cache:
+            self._pattern_cache[pattern] = re.compile(pattern, re.IGNORECASE)
+        return self._pattern_cache[pattern]
+
+    def _get_ens_by_code(self, ens_code: str) -> Optional[Dict]:
+        """O(1) поиск по коду ЕНС."""
+        return self._ens_by_code.get(str(ens_code).strip())
 
     def _relax_pattern(self, pattern: str, standard: str = None) -> str:
         r"""
@@ -223,7 +284,6 @@ class ParametricENSClient:
         _ru_b = chr(0x0431)  # русская б
         _ru_g = chr(0x0433)  # русская г
 
-        _ru_g = chr(0x0433)  # русская г
         for latin, cyr in [('Винt', 'Вин' + _ru_t), ('Болt', 'Бол' + _ru_t),
                            ('Шайba', 'Шай' + _ru_b + _ru_a), ('Гайka', 'Гай' + _ru_g + _ru_a)]:
             if latin in relaxed:
@@ -239,12 +299,8 @@ class ParametricENSClient:
         # 2. )?(?P< → )?\s*(?P<
         relaxed = re.sub(r'\)\?\(\?P<', lambda m: r')?\s*(?P<', relaxed)
 
-        # 3. REMOVED: was broken - matched (?:(?P< and produced unbalanced parentheses.
-        #    If LLM generates (?:( instead of (?:(?: , the pattern is already wrong.
-        #    The correct fix is to regenerate the mask, not to hack the regex here.
-
         # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (через .replace)
-        relaxed = relaxed.replace(r'\\d+(?:\\.\\d+)?', r'\\d+(?:[.,]\\d+)?')
+        relaxed = relaxed.replace(r'\d+(?:\\.\d+)?', r'\d+(?:[.,]\d+)?')
         # Also try with single backslash (masks loaded from DB)
         relaxed = relaxed.replace(r'\d+(?:\.\d+)?', r'\d+(?:[.,]\d+)?')
 
@@ -253,28 +309,23 @@ class ParametricENSClient:
             relaxed = re.sub(r'ОСТ1', lambda m: r'ОСТ\s*1', relaxed)
 
         # 6. Винт: вынести номинальный_диаметр_резьбы из опциональной группы
-        #    )\s*\)\s*-(?P<номинальный_диаметр_резьбы>  →  )\s*\)\s*-)?(?P<номинальный_диаметр_резьбы>
         _opt_fix_old = r')\s*\)\s*-(?P<номинальный_диаметр_резьбы>'
         _opt_fix_new = r')\s*\)\s*-)?(?P<номинальный_диаметр_резьбы>'
         if _opt_fix_old in relaxed:
             relaxed = relaxed.replace(_opt_fix_old, _opt_fix_new, 1)
-            #    Затем: ))?\s*(?P<длина> → )\s*-(?P<длина>
             relaxed = relaxed.replace(r'))?\s*(?P<длина>', r')\s*-(?P<длина>', 1)
 
         # 7. Шайба: пропустить промежуточное число между наружным диаметром и покрытием
-        #    (Шайба 0,5-4-8-Кд → 0,5=диаметр, 4=наружный, 8 пропускается, Кд=покрытие)
         _shaiba_old = r'(?P<наружный_диаметр_диаметр_вписа>\d+)\-?(?P<покрытие>[\w.]+)?'
         _shaiba_new = r'(?P<наружный_диаметр_диаметр_вписа>\d+)(?:\-\d+)?\-(?P<покрытие>[\w.]+)'
         if _shaiba_old in relaxed:
             relaxed = relaxed.replace(_shaiba_old, _shaiba_new, 1)
-        # Альтернатива: после rule 4 (с [.,])
         _shaiba_old2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)\-(?P<покрытие>[\w.]+)?'
         _shaiba_new2 = r'(?P<наружный_диаметр_диаметр_вписа>\d+(?:[.,]\d+)?)(?:\-\d+)?\-(?P<покрытие>[\w.]+)'
         if _shaiba_old2 in relaxed:
             relaxed = relaxed.replace(_shaiba_old2, _shaiba_new2, 1)
 
         # 8. Винт: добавить \s* перед \( в группе исполнения
-        #    "Винт (4)-5-..." -> паттерн "(?:\((?P<исполнение>" без пробела
         relaxed = relaxed.replace(
             r'(?:\u005c(\u005cs*(?P<исполнение>',
             r'(?:\s*\(\s*(?P<исполнение>',
@@ -282,54 +333,26 @@ class ParametricENSClient:
         )
 
         # 9. Исполнение: сделать скобки опциональными, разрешить пробел/дефис после
-        #    LLM иногда генерирует "$$" или "$$?" вместо экранирования скобок.
-        #    Обрабатываем ДО одиночных $, иначе regex ломается.
-        #    $$?(?P< → \((?P<    (два $ + опциональный ?)
         relaxed = relaxed.replace('$$?', r'\(')
-        #    $$\s*) → \)\s*)   (два $ перед \s*)
         relaxed = relaxed.replace(r'$$\s*)', r'\)\s*)')
-        #    $$\s*(?P< → \)\s*(?P<
         relaxed = relaxed.replace(r'$$\s*(?P<', r'\)\s*(?P<')
-        #    $$ → \(             (оставшиеся два $ подряд)
         relaxed = relaxed.replace('$$', r'\(')
-
-        # 9a. "$" в маске заменяет "\(" или "\)" (баг LLM с экранированием)
-        #    Заменяем $(?P< на \((?P<  и $\s*) на \)\s*)
         relaxed = relaxed.replace('$(?P<', r'\((?P<')
         relaxed = relaxed.replace(r'$\s*)', r'\)\s*)')
-        # Дополнительно: $\s*(?P< → \)\s*(?P< (если после $ идет следующая группа)
         relaxed = relaxed.replace(r'$\s*(?P<', r'\)\s*(?P<')
-
-        # 9c. \$\$?\s*) → \)\s*) — LLM использует \$ вместо \) (закрывающая скобка)
         relaxed = relaxed.replace(r'\$\$?\s*)', r'\)\s*)')
-        # 9d. \$\$?(?P< → \((?P< — LLM использует \$ вместо \( (открывающая скобка)
         relaxed = relaxed.replace(r'\$\$?(?P<', r'\((?P<')
-        # 9e. Оставшийся \$(?P< → \((?P< (одиночный экранированный $)
         relaxed = relaxed.replace(r'\$(?P<', r'\((?P<')
-
-        # 9f. После всех замен $ → скобки, применяем [-\s]* к \)\s*
-        #     (должно идти ПОСЛЕ 9c/d/e, т.к. они создают новые \)\s*)
         relaxed = relaxed.replace(r'\)\s*', r'\)[-\s]*')
-
-        # 9b. Любой оставшийся $ в середине паттерна (не anchor) — заменить на \)
-        #     LLM иногда использует $ как замену \) в произвольных местах
         if '$' in relaxed.rstrip('$').rstrip():
-            # Заменяем $ которой не в конце строки
-            relaxed = re.sub(r'\$(?=\s|[-\s]*\(|[-\s]*\d|[-\s]*[A-Z])', r'\\)', relaxed)
-            # Если остался $ перед концом — тоже заменяем
-            relaxed = re.sub(r'\$(?=\s*$)', r'\\)', relaxed)
+            relaxed = re.sub(r'\$(?=\s|[-\s]*\(|[-\s]*\d|[-\s]*[A-Z])', r'\)', relaxed)
+            relaxed = re.sub(r'\$(?=\s*$)', r'\)', relaxed)
 
         # 14. Разделители между параметрами: \s+ → [-\s]+
-        #     LLM иногда генерирует пробелы между числами, но в тексте дефисы
-        #     "Болт 2 12 44" vs "Болт 2-12-44"
-        #     Используем .replace() вместо re.sub чтобы избежать regex escaping hell
-        #     Заменяем )\s+(?P< на )[-\s]+(?P<
         relaxed = relaxed.replace(r')\s+(?P<', r')[-\s]+(?P<')
-        #     Также \d+\s+\d+ → \d+[-\s]+\d+ (между двумя числовыми группами)
         relaxed = relaxed.replace(r'\d+\s+\d+', r'\d+[-\s]+\d+')
 
         # 10. Метрическая резьба: добавить опциональный шаг (x1,25)
-        #     "M12x1,25" -> M12 + x1,25
         relaxed = relaxed.replace(
             r'(?:M(?P<номинальный_диаметр_резьбы>\d+))',
             r'(?:M(?P<номинальный_диаметр_резьбы>\d+)(?:[xX\u00d7]\d+(?:[.,]\d+)?)?)',
@@ -337,14 +360,12 @@ class ParametricENSClient:
         )
 
         # 10a. Сделать M опциональным перед номинальный_диаметр_резьбы
-        #      ENS наименования часто не содержат M: "Болт (2)-12-44-..." vs "Болт (2)-M12-44-..."
         relaxed = relaxed.replace(
             r'(?P<номинальный_диаметр_резьбы>M',
             r'(?P<номинальный_диаметр_резьбы>(?:M)?'
         )
 
         # 11. Класс поля допуска: ограничить буквами (без цифр)
-        #     [\w]* съедает цифры -> [a-zA-Z\u0430-\u044f\u0410-\u042f]*
         relaxed = relaxed.replace(
             r'(?P<класс_поле_допуска>[\d+][\w]*)',
             r'(?P<класс_поле_допуска>[\d+][a-zA-Z\u0430-\u044f\u0410-\u042f]*)',
@@ -352,7 +373,6 @@ class ParametricENSClient:
         )
 
         # 12. Удалить конфликтующую группу tipo_rezby=M
-        #     (?:\s*(?P<tipo_rezby>M))?\s*[-\s]* крадёт M из M12
         relaxed = relaxed.replace(
             r'(?:\s*(?P<тип_резьбы>M))?\s*[-\s]*',
             r'\s*[-\s]*',
@@ -360,8 +380,6 @@ class ParametricENSClient:
         )
 
         # 13. Группа прочности: ограничить цифры перед точкой
-        #     \d+\.\d+ -> 100.58 интерпретирует как длина.100 + группа.58
-        #     \d{1,2}(?:\.\d+)? -> 5.8, 10.9, но не 100.58
         relaxed = relaxed.replace(
             r'(?P<группа_класс_прочности>\d+\.\d+)',
             r'(?P<группа_класс_прочности>\d{1,2}(?:\.\d+)?)',
@@ -369,11 +387,9 @@ class ParametricENSClient:
         )
 
         # 9a. Если маска не содержит суффикс стандарта -- добавить
-        #    Болт ...-Окс.Фос.ЭФП$ -> Болт ...-Окс.Фос.ЭФП-ОСТ\s*1\s*31133-80$
         has_std = any(s in relaxed for s in ['ОСТ', 'ГОСТ', 'ТУ', 'ISO'])
         if standard and not has_std:
             std_suffix = None
-            # Используем startswith чтобы не спутать ГОСТ с ОСТ
             if standard.startswith('ОСТ 1'):
                 parts = standard.split('1', 1)
                 if len(parts) > 1:
@@ -386,7 +402,6 @@ class ParametricENSClient:
                 std_suffix = r'\s*ISO\s*' + standard.replace('ISO', '').strip().replace(' ', r'\s*')
 
             if std_suffix:
-                # Убираем $ из конца, добавляем суффикс, возвращаем $
                 relaxed = relaxed.rstrip('$').rstrip() + std_suffix + r'\s*$'
 
         # Проверяем что результат - валидный regex
@@ -394,10 +409,11 @@ class ParametricENSClient:
             re.compile(relaxed)
         except re.error as e:
             logger.warning(
-                f"_relax_pattern produced invalid regex: {e}. "
-                f"Falling back to original pattern. "
-                f"Original (50 chars): {pattern[:50]!r}. "
-                f"Relaxed (50 chars): {relaxed[:50]!r}"
+                "_relax_pattern produced invalid regex: %s. "
+                "Falling back to original pattern. "
+                "Original (50 chars): %r. "
+                "Relaxed (50 chars): %r",
+                e, pattern[:50], relaxed[:50]
             )
             return pattern
 
@@ -409,10 +425,10 @@ class ParametricENSClient:
             import pickle
             with open(self.ens_index_path, 'rb') as f:
                 data = pickle.load(f)
-                self._ens_index = data
-            logger.info(f"Loaded ENS index from {self.ens_index_path}")
+            self._ens_index = data
+            logger.info("Loaded ENS index from %s", self.ens_index_path)
         except Exception as e:
-            logger.warning(f"Failed to load ENS index: {e}")
+            logger.warning("Failed to load ENS index: %s", e)
 
     def match(
         self,
@@ -495,7 +511,7 @@ class ParametricENSClient:
                         try:
                             ens_params_mask = self._apply_mask(relaxed_pattern, str(ens_name), standard=effective_standard)
                         except Exception as e:
-                            logger.debug(f"[match] Failed to parse ens_name='{ens_name}': {e}")
+                            logger.debug("[match] Failed to parse ens_name='%s': %s", ens_name, e)
 
                     # Новая логика сопоставления
                     final_score, match_type, details = self._calculate_match_score_v2(
@@ -533,7 +549,7 @@ class ParametricENSClient:
                     non_none = sum(1 for v in extracted_params.values() if v is not None)
                     regex_confidence = non_none / len(extracted_params) if extracted_params else 0.0
 
-                logger.debug(f"[REGEX_ONLY] extracted={extracted_params}, required={required}, confidence={regex_confidence:.2f}")
+                logger.debug("[REGEX_ONLY] extracted=%s, required=%s, confidence=%.2f", extracted_params, required, regex_confidence)
 
                 # Всегда возвращаем regex_only при непустых extracted (threshold 0.1)
                 if regex_confidence > 0.1:
@@ -576,10 +592,10 @@ class ParametricENSClient:
             if match:
                 return match.groupdict()
             else:
-                logger.debug(f"[_apply_mask] Regex did not match. Pattern: {pattern[:150]!r}, Text: {text[:80]!r}")
+                logger.debug("[_apply_mask] Regex did not match. Pattern: %r, Text: %r", pattern[:150], text[:80])
         except re.error as e:
             # Логируем маску для диагностики - показываем первые 200 символов
-            logger.error(f"Invalid mask pattern: {e}. Pattern (first 200 chars): {pattern[:200]!r}")
+            logger.error("Invalid mask pattern: %s. Pattern (first 200 chars): %r", e, pattern[:200])
 
         return None
 
@@ -606,7 +622,7 @@ class ParametricENSClient:
                 if correct in remapped and correct == 'номинальный_диаметр_резьбы':
                     remapped['длина'] = remapped[correct]
                 remapped[correct] = value
-                logger.debug(f"[REMAP] {wrong} → {correct}: {value}")
+                logger.debug("[REMAP] %s → %s: %s", wrong, correct, value)
         return remapped
 
     def _expand_coating_variants(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -625,7 +641,7 @@ class ParametricENSClient:
         # Кд variants
         if coating_str in ('кд', 'кд.'):
             for variant in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
-                           'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
+                              'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
                 expanded = dict(params)
                 expanded['покрытие'] = variant
                 variants.append(expanded)
@@ -644,18 +660,22 @@ class ParametricENSClient:
         """
         debug_candidates = []
         if not self._ens_index or 'items' not in self._ens_index:
-            logger.warning(f"[_find_in_ens] ENS index not loaded!")
+            logger.warning("[_find_in_ens] ENS index not loaded!")
             return None, debug_candidates
 
         # === КЭШИРОВАНИЕ ===
         # Кэшируем результат по хешу (params, required, standard, item_type)
-        cache_key = f"{hash(str(sorted(params.items())))}:{hash(str(required))}:{standard}:{item_type}"
+        cache_key = "{}:{}:{}:{}".format(
+            hash(str(sorted(params.items()))),
+            hash(str(required)),
+            standard,
+            item_type
+        )
         if cache_key in self._find_in_ens_cache:
             cached = self._find_in_ens_cache[cache_key]
-            logger.debug(f"[_find_in_ens] Cache hit for {standard}/{item_type}")
+            logger.debug("[_find_in_ens] Cache hit for %s/%s", standard, item_type)
             return cached['match'], cached['debug']
 
-        items = self._ens_index['items']
         best_match = None
         best_score = 0.0
 
@@ -663,11 +683,15 @@ class ParametricENSClient:
         query_std_norm = self._normalize_standard(standard) if standard else None
         query_type = item_type.upper().strip() if item_type else None
 
+        # === ИНДЕКСАЦИЯ: получаем кандидатов вместо полного скана ===
+        candidates = self._get_candidates_by_index(query_std_norm, query_type)
+        logger.debug("[_find_in_ens] Candidates via index: %d (std=%s, type=%s)", len(candidates), query_std_norm, query_type)
+
         # Try with coating variants
         param_variants = self._expand_coating_variants(params)
 
         for try_params in param_variants:
-            for item in items:
+            for item in candidates:
                 item_name = item.get('наименование', item.get('полное_наименование', 'N/A'))
                 item_code = item.get('код', item.get('mdm_key', 'N/A'))
 
@@ -704,11 +728,11 @@ class ParametricENSClient:
                     debug_candidates.append(debug_entry)
                     # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
                     if _get_matching_config().debug_per_parameter:
-                        source_str = ", ".join(f"{k}={v}" for k, v in debug_entry['source_params'].items())
-                        ens_str = ", ".join(f"{k}={v}" for k, v in debug_entry['ens_params'].items())
-                        logger.debug(f"[_find_in_ens] Candidate '{debug_entry['name'][:50]}' (code={debug_entry['ens_code']}): score={score:.3f}")
-                        logger.debug(f"[_find_in_ens]   Source params: {source_str}")
-                        logger.debug(f"[_find_in_ens]   ENS params: {ens_str}")
+                        source_str = ", ".join("{}={}".format(k, v) for k, v in debug_entry['source_params'].items())
+                        ens_str = ", ".join("{}={}".format(k, v) for k, v in debug_entry['ens_params'].items())
+                        logger.debug("[_find_in_ens] Candidate '%s' (code=%s): score=%.3f", debug_entry['name'][:50], debug_entry['ens_code'], score)
+                        logger.debug("[_find_in_ens] Source params: %s", source_str)
+                        logger.debug("[_find_in_ens] ENS params: %s", ens_str)
 
                 if score > best_score:
                     best_score = score
@@ -718,7 +742,7 @@ class ParametricENSClient:
         fallback_matched = False
         if best_score < 0.99 and text:
             text_norm = self._normalize_name(text)
-            for item in items:
+            for item in candidates:
                 if query_std_norm:
                     item_std = item.get('нтд') or item.get('standard')
                     item_std_norm = self._normalize_standard(item_std) if item_std else None
@@ -752,19 +776,19 @@ class ParametricENSClient:
         # Итоговый debug: top candidates (только при debug_per_parameter=true)
         if debug_candidates and _get_matching_config().debug_per_parameter:
             top_n = min(5, len(debug_candidates))
-            logger.debug(f"[_find_in_ens] Top {top_n} parametric candidates:")
+            logger.debug("[_find_in_ens] Top %d parametric candidates:", top_n)
             for i, cd in enumerate(debug_candidates[:top_n], 1):
-                ens_p_str = ", ".join(f"{k}={v}" for k, v in cd.get('ens_params', {}).items())
-                logger.debug(f"[_find_in_ens]   #{i}: '{cd.get('name','')[:50]}' score={cd.get('score',0)}, code={cd.get('ens_code','N/A')}")
-                logger.debug(f"[_find_in_ens]       ENS: {ens_p_str}")
+                ens_p_str = ", ".join("{}={}".format(k, v) for k, v in cd.get('ens_params', {}).items())
+                logger.debug("[_find_in_ens] #%d: '%s' score=%s, code=%s", i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
+                logger.debug("[_find_in_ens] ENS: %s", ens_p_str)
 
         if best_match:
             best_match = dict(best_match)
             best_match['_match_score'] = best_score
             best_match['_match_type'] = 'exact' if best_score > 0.9 else 'partial'
-            logger.info(f"[_find_in_ens] RETURNING match: score={best_score:.2f}, name={best_match.get('наименование','')[:50]}")
+            logger.info("[_find_in_ens] RETURNING match: score=%.2f, name=%s", best_score, best_match.get('наименование', '')[:50])
         else:
-            logger.info(f"[_find_in_ens] No match found (best_score={best_score:.2f} < 0.7 threshold)")
+            logger.info("[_find_in_ens] No match found (best_score=%.2f < 0.7 threshold)", best_score)
 
         # Сохраняем в кэш перед возвратом
         self._find_in_ens_cache[cache_key] = {
@@ -842,7 +866,7 @@ class ParametricENSClient:
             'item_type', 'standard'
         }
         ens_params = {k: v for k, v in ens_item.items()
-                      if k not in skip_fields and not k.startswith('_')}
+                     if k not in skip_fields and not k.startswith('_')}
 
         # Берём только required поля из params
         if not required:
@@ -876,20 +900,20 @@ class ParametricENSClient:
             text_norm = self._normalize_name(text)
             ens_norm = self._normalize_name(ens_name)
             if text_norm == ens_norm:
-                logger.debug(f"[_match_v2] LEVEL 1: name EXACT")
+                logger.debug("[_match_v2] LEVEL 1: name EXACT")
                 return 1.0, 'name_exact', {'level': 'name_exact'}
 
         # LEVEL 2: params vs ens_params
         score_ens = self._compare_param_sets(params, ens_params)
         if score_ens >= 0.99:
-            logger.debug(f"[_match_v2] LEVEL 2: params vs ens_params EXACT")
+            logger.debug("[_match_v2] LEVEL 2: params vs ens_params EXACT")
             return 1.0, 'params_ens_exact', {'level': 'params_ens', 'score': score_ens}
 
         # LEVEL 3: params vs ens_params_mask
         if ens_params_mask:
             score_mask = self._compare_param_sets(params, ens_params_mask)
             if score_mask >= 0.99:
-                logger.debug(f"[_match_v2] LEVEL 3: params vs ens_params_mask EXACT")
+                logger.debug("[_match_v2] LEVEL 3: params vs ens_params_mask EXACT")
                 return 1.0, 'params_mask_exact', {'level': 'params_mask', 'score': score_mask}
 
         best_score = max(score_ens, score_mask if ens_params_mask else 0.0)
@@ -901,8 +925,8 @@ class ParametricENSClient:
         Score=1.0 если все НЕ-ПУСТЫЕ параметры из ОБОИХ наборов совпадают.
         Ключи, пустые в ОБОИХ наборах — игнорируются.
         Ключ, пустой только в одном наборе:
-          - strict_union_keys=true  → mismatch (return 0.0)
-          - strict_union_keys=false → skip (continue)
+        - strict_union_keys=true → mismatch (return 0.0)
+        - strict_union_keys=false → skip (continue)
         """
         if not params_a or not params_b:
             return 0.0
@@ -937,12 +961,12 @@ class ParametricENSClient:
                 if strict_mode:
                     # Строгий режим: пустой ключ = mismatch
                     if debug_detail:
-                        logger.debug(f"[_compare] KEY MISSING (strict): {param} = '{val_a}' vs '{val_b}'")
+                        logger.debug("[_compare] KEY MISSING (strict): %s = '%s' vs '%s'", param, val_a, val_b)
                     return 0.0
                 else:
                     # Нестрогий режим: пустой ключ = skip (не влияет на score)
                     if debug_detail:
-                        logger.debug(f"[_compare] KEY SKIP (non-strict): {param} = '{val_a}' vs '{val_b}'")
+                        logger.debug("[_compare] KEY SKIP (non-strict): %s = '%s' vs '%s'", param, val_a, val_b)
                     continue
 
             checked += 1
@@ -954,7 +978,7 @@ class ParametricENSClient:
                 sim = _text_similarity(norm_a, norm_b)
                 if sim < 0.8:
                     if debug_detail:
-                        logger.debug(f"[_compare] COATING MISMATCH: '{norm_a}' vs '{norm_b}' (sim={sim:.2f})")
+                        logger.debug("[_compare] COATING MISMATCH: '%s' vs '%s' (sim=%.2f)", norm_a, norm_b, sim)
                     return 0.0
                 matched += 1
             else:
@@ -963,13 +987,13 @@ class ParametricENSClient:
                     num_b = float(str_b.replace(',', '.'))
                     if num_a != num_b:
                         if debug_detail:
-                            logger.debug(f"[_compare] NUM MISMATCH: {val_a} vs {val_b}")
+                            logger.debug("[_compare] NUM MISMATCH: %s vs %s", val_a, val_b)
                         return 0.0
                     matched += 1
                 except ValueError:
                     if str_a != str_b:
                         if debug_detail:
-                            logger.debug(f"[_compare] STR MISMATCH: '{val_a}' vs '{val_b}'")
+                            logger.debug("[_compare] STR MISMATCH: '%s' vs '%s'", val_a, val_b)
                         return 0.0
                     matched += 1
 
