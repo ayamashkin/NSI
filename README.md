@@ -10,6 +10,9 @@
 - Параметрический поиск по ЕСН с fuzzy matching и coating auto-substitution
 - Настраиваемые пороги matching через `config/config.yaml`
 - Анализ качества распознавания (JSON-отчеты)
+- **Excel input/output** — обработка исходных Excel-файлов с сохранением структуры
+- **Хранение результатов в result.db** — версионирование по маскам, отслеживание изменений
+- **Многопоточная обработка** — ProcessPoolExecutor с настраиваемым числом workers
 
 ---
 
@@ -24,6 +27,7 @@
   - [Параметрическая обработка](#параметрическая-обработка-одна-строка)
   - [Диагностика строки](#диагностика-строки)
 - [Анализ качества](#анализ-качества)
+- [Хранение результатов (result.db)](#хранение-результатов-resultdb)
 - [Keyword-based маршрутизация](#keyword-based-маршрутизация)
 - [Генерация regex-масок через LLM](#генерация-regex-масок-через-llm)
 - [Fuzzy Matching](#fuzzy-matching)
@@ -31,6 +35,7 @@
 - [API клиенты](#api-клиенты)
   - [MTS AI](#mts-ai)
 - [Новые возможности](#новые-возможности)
+- [Производительность](#производительность)
 - [Troubleshooting](#troubleshooting)
 - [Требования](#требования)
 
@@ -43,70 +48,71 @@ nomenclature-processor/
 ├── config/                          # Конфигурация системы
 │   ├── __init__.py
 │   ├── settings.py                  # Python-классы конфигурации (Settings, PromptConfig, APIConfig, MatchingConfig и др.)
-│   ├── config.yaml                  # Основной конфиг: API-ключи, пороги matching, coating_rules
-│   ├── prompts.yaml                 # Реестр промптов для LLM-генерации масок (service/model опциональны)
-│   └── ens_column_mapping.yaml      # Маппинг колонок ЕНС при импорте
+│   ├── config.yaml                # Основной конфиг: API-ключи, пороги matching, coating_rules
+│   ├── prompts.yaml               # Реестр промптов для LLM-генерации масок (service/model опциональны)
+│   └── ens_column_mapping.yaml    # Маппинг колонок ЕНС при импорте
 ├── core/                            # Ядро системы
 │   ├── __init__.py
-│   ├── models.py                    # Pydantic модели данных (MaskRecord, ProcessingResult и др.)
-│   ├── processor.py                 # Основной движок обработки (Level 1-5)
-│   ├── automated_processor.py       # Параметрический процессор (Level 6) — fuzzy matching, coating auto-substitution
-│   ├── parametric_client.py         # Параметрический поиск по ЕНС с кэшированием
-│   ├── database.py                  # SQLite manager — кэширование результатов и upsert
-│   ├── quality_analyzer.py          # Анализ качества распознавания (JSON-отчеты)
-│   ├── llm_mask_generator.py        # LLM генерация regex-масок через промпты
-│   ├── auto_validator.py            # Автоматическая валидация сгенерированных масок
-│   ├── mask_database.py             # БД regex-масок (SQLite) — CRUD, поиск, версионирование
-│   ├── integration.py               # Интеграция с существующей БД номенклатуры
-│   ├── coating_indexer.py           # Индексация допустимых покрытий (марка → покрытия) из ЕНС
-│   ├── coating_llm_client.py        # LLM-клиент для запроса правил покрытий
-│   ├── coating_rules.py             # Правила валидации покрытий по маркам материалов
-│   ├── coating_mapper.py            # Маппинг покрытий между текстом и ЕНС
-│   ├── registry.py                  # Реестр компонентов системы
-│   └── standard_extractor.py        # Извлечение стандарта (ГОСТ/ОСТ/ТУ) и типа изделия
+│   ├── models.py                  # Pydantic модели данных (MaskRecord, ProcessingResult и др.)
+│   ├── processor.py               # Основной движок обработки (Level 1-5)
+│   ├── automated_processor.py     # Параметрический процессор (Level 6) — fuzzy matching, coating auto-substitution
+│   ├── parametric_client.py       # Параметрический поиск по ЕНС с индексацией и кэшированием
+│   ├── result_database.py         # Менеджер result.db — upsert с отслеживанием версий масок
+│   ├── database.py                # SQLite manager — кэширование результатов и upsert
+│   ├── quality_analyzer.py        # Анализ качества распознавания (JSON-отчеты)
+│   ├── llm_mask_generator.py      # LLM генерация regex-масок через промпты
+│   ├── auto_validator.py          # Автоматическая валидация сгенерированных масок
+│   ├── mask_database.py           # БД regex-масок (SQLite) — CRUD, поиск, версионирование
+│   ├── integration.py             # Интеграция с существующей БД номенклатуры
+│   ├── coating_indexer.py         # Индексация допустимых покрытий (марка → покрытия) из ЕНС
+│   ├── coating_llm_client.py      # LLM-клиент для запроса правил покрытий
+│   ├── coating_rules.py           # Правила валидации покрытий по маркам материалов
+│   ├── coating_mapper.py          # Маппинг покрытий между текстом и ЕНС
+│   ├── registry.py                # Реестр компонентов системы
+│   └── standard_extractor.py      # Извлечение стандарта (ГОСТ/ОСТ/ТУ) и типа изделия
 ├── api_clients/                     # Клиенты для LLM-провайдеров
 │   ├── __init__.py
-│   ├── base.py                      # Абстрактный базовый класс для API-клиентов
-│   ├── openwebui.py                 # OpenWebUI API (JWT/API key, локальные LLM)
-│   ├── mws_gpt.py                   # MWS Cloud GPT API
-│   ├── gigachat.py                  # GigaChat API (Sber, OAuth2)
-│   └── mts_ai.py                    # MTS AI API (OpenAI-compatible, модель cotype_pro_2.5)
+│   ├── base.py                    # Абстрактный базовый класс для API-клиентов
+│   ├── openwebui.py               # OpenWebUI API (JWT/API key, локальные LLM)
+│   ├── mws_gpt.py                 # MWS Cloud GPT API
+│   ├── gigachat.py                # GigaChat API (Sber, OAuth2)
+│   └── mts_ai.py                  # MTS AI API (OpenAI-compatible, модель cotype_pro_2.5)
 ├── parsers/                         # Парсеры номенклатуры
 │   ├── __init__.py
-│   ├── cascade.py                   # Каскадный парсер: regex → NER → LLM fallback
-│   ├── regex_parser.py              # Regex-уровень парсинга (именованные группы)
-│   ├── ner_adapter.py               # NER адаптер (именованные сущности)
-│   └── standard_extractor.py        # Извлечение ГОСТ/ОСТ/ТУ и типа изделия
+│   ├── cascade.py                 # Каскадный парсер: regex → NER → LLM fallback
+│   ├── regex_parser.py            # Regex-уровень парсинга (именованные группы)
+│   ├── ner_adapter.py             # NER адаптер (именованные сущности)
+│   └── standard_extractor.py      # Извлечение ГОСТ/ОСТ/ТУ и типа изделия
 ├── ens/                             # Работа с Единой Номенклатурной Системой (ЕНС)
 │   ├── __init__.py
-│   ├── loader.py                    # Загрузчик ЕНС с авто-маппингом колонок
-│   └── indexer.py                   # TF-IDF индекс для семантического поиска по ЕНС
+│   ├── loader.py                  # Загрузчик ЕНС с авто-маппингом колонок
+│   └── indexer.py                 # TF-IDF индекс для семантического поиска по ЕНС
 ├── utils/                           # Утилиты
 │   ├── __init__.py
-│   ├── excel_loader.py              # Загрузка Excel через pandas/openpyxl
-│   └── excel_loader_simple.py       # Загрузка Excel только через openpyxl (без pandas)
+│   ├── excel_loader.py            # Загрузка Excel через pandas/openpyxl
+│   └── excel_loader_simple.py     # Загрузка Excel только через openpyxl (без pandas)
 ├── scripts/                         # Служебные скрипты
-│   └── auto_mapping.py              # Авто-генерация ens_column_mapping.yaml из Excel
+│   └── auto_mapping.py            # Авто-генерация ens_column_mapping.yaml из Excel
 ├── data/                            # Исходные данные (Excel)
-│   ├── nomenclature.xlsx            # Тестовая номенклатура
-│   ├── nomenclature1.xlsx           # Расширенная тестовая номенклатура
-│   └── sample_nomenclature.xlsx     # Пример данных для демо
+│   ├── nomenclature.xlsx          # Тестовая номенклатура
+│   ├── nomenclature1.xlsx         # Расширенная тестовая номенклатура
+│   └── sample_nomenclature.xlsx   # Пример данных для демо
 ├── prompts/
 │   └── templates/                   # Шаблоны промптов для LLM
-│       ├── hardware.txt             # Промпт для крепежа и метизов
-│       ├── hardware_washer.txt      # Промпт для шайб
-│       ├── rolledmetal.txt          # Промпт для проката
-│       └── mask_generation.txt      # Базовый шаблон генерации масок
+│       ├── hardware.txt           # Промпт для крепежа и метизов
+│       ├── hardware_washer.txt    # Промпт для шайб
+│       ├── rolledmetal.txt        # Промпт для проката
+│       └── mask_generation.txt    # Базовый шаблон генерации масок
 ├── test/                            # Тесты
-│   └── test_params.py               # Тесты извлечения параметров
+│   └── test_params.py             # Тесты извлечения параметров
 ├── default/                         # Данные по умолчанию
-│   └── seed_default_masks.py        # Скрипт первоначального заполнения БД масок
+│   └── seed_default_masks.py      # Скрипт первоначального заполнения БД масок
 ├── demo/                            # Демонстрационные скрипты
-│   └── demo_mask_resolution.py      # Демо разрешения масок (разбор конфликтов)
+│   └── demo_mask_resolution.py    # Демо разрешения масок (разбор конфликтов)
 ├── fix/                             # Скрипты исправления данных
-│   ├── apply_all_fixes.py           # Применение всех фиксов
-│   ├── fix_gost_7795_db.py          # Исправление ГОСТ 7795 в БД
-│   └── fix_masks_v2.py              # Исправление масок v2
+│   ├── apply_all_fixes.py         # Применение всех фиксов
+│   ├── fix_gost_7795_db.py        # Исправление ГОСТ 7795 в БД
+│   └── fix_masks_v2.py            # Исправление масок v2
 ├── cli.py                           # CLI интерфейс (Click) — точка входа
 ├── run_batch.py                     # Запуск batch-обработки из скрипта
 ├── requirements.txt                 # Зависимости Python
@@ -128,86 +134,87 @@ nomenclature-processor/
 
 ```
 # Данные и кэш
-secrets/           # API ключи и пароли (ключевые файлы аутентификации)
-logs/              # Логи процессора (ротируются, большой объем)
-*.log              # Отдельные лог-файлы
-output/            # JSON результаты обработки
-results/           # Резервные копии результатов
-models/            # Pickle модели TF-IDF и индексы ЕНС (большие файлы)
-cache/             # SQLite кэш: маски, результаты, статистика
-*.db               # Файлы SQLite баз данных
-prompts/debug/     # Отладочные промпты (создаются автоматически при генерации)
+secrets/                           # API ключи и пароли (ключевые файлы аутентификации)
+logs/                              # Логи процессора (ротируются, большой объем)
+*.log                              # Отдельные лог-файлы
+output/                            # JSON результаты обработки
+results/                           # Резервные копии результатов
+models/                            # Pickle модели TF-IDF и индексы ЕНС (большие файлы)
+cache/                             # SQLite кэш: маски, результаты, статистика
+*.db                               # Файлы SQLite баз данных
+result.db                          # БД результатов сопоставления (создается автоматически)
+prompts/debug/                     # Отладочные промпты (создаются автоматически при генерации)
 
 # Python
-.venv/             # Виртуальное окружение
-venv/              # Альтернативное виртуальное окружение
-.env               # Переменные окружения
-__pycache__/       # Кэш скомпилированных Python-модулей
-*.pyc              # Скомпилированные Python-файлы
-*.pyo              # Оптимизированные Python-файлы
-*.egg-info/        # Метаданные установленных пакетов
+.venv/                             # Виртуальное окружение
+venv/                              # Альтернативное виртуальное окружение
+.env                               # Переменные окружения
+__pycache__/                       # Кэш скомпилированных Python-модулей
+*.pyc                              # Скомпилированные Python-файлы
+*.pyo                              # Оптимизированные Python-файлы
+*.egg-info/                        # Метаданные установленных пакетов
 
 # IDE
-.idea/             # Файлы конфигурации PyCharm/IntelliJ
+.idea/                             # Файлы конфигурации PyCharm/IntelliJ
 ```
 
 ### Каскад обработки
 
 ```
 Level 0: StandardExtractor (regex)
-    |- Извлечение стандарта (ГОСТ, ОСТ, ТУ, ISO, DIN, РАМ)
-    |- Определение типа изделия (болт, гайка, шайба, труба, ...)
-    |- item_type нормализуется в UPPERCASE (БОЛТ, ВИНТ, ШАЙБА)
-    |- Keyword-based routing: тип -> prompt_id -> service/model
+  |- Извлечение стандарта (ГОСТ, ОСТ, ТУ, ISO, DIN, РАМ)
+  |- Определение типа изделия (болт, гайка, шайба, труба, ...)
+  |- item_type нормализуется в UPPERCASE (БОЛТ, ВИНТ, ШАЙБА)
+  |- Keyword-based routing: тип -> prompt_id -> service/model
 
 Level 1: MaskDatabase (SQLite + WAL)
-    |- Поиск маски по (standard, item_type)
-    |- Fallback: lowercase/UPPERCASE/item_type без учета регистра
-    |- Fallback: маска только по стандарту (любой item_type)
-    |- Использование активных масок (auto_score >= 0.85)
-    |- Автоактивация найденных неактивных масок
+  |- Поиск маски по (standard, item_type)
+  |- Fallback: lowercase/UPPERCASE/item_type без учета регистра
+  |- Fallback: маска только по стандарту (любой item_type)
+  |- Использование активных масок (auto_score >= 0.85)
+  |- Автоактивация найденных неактивных масок
 
 Level 2: LLMMaskGenerator
-    |- Автоопределение prompt_id по keywords из item_type/name (5 источников)
-    |- Загрузка конфига из prompts.yaml (service, model, temperature, system_prompt)
-    |- Fallback: раздел mask_generation в config.yaml
-    |- Multi-provider: OpenWebUI, MWS, GigaChat, MTS AI
-    |- Retry-стратегия с повышением temperature
-    |- JSON preprocessing: исправление \s, \d, \w от LLM
-    |- Ограничение имен групп: max 30 символов
-    |- skip_fields из ens_column_mapping.yaml (исключение служебных полей)
+  |- Автоопределение prompt_id по keywords из item_type/name (5 источников)
+  |- Загрузка конфига из prompts.yaml (service, model, temperature, system_prompt)
+  |- Fallback: раздел mask_generation в config.yaml
+  |- Multi-provider: OpenWebUI, MWS, GigaChat, MTS AI
+  |- Retry-стратегия с повышением temperature
+  |- JSON preprocessing: исправление \s, \d, \w от LLM
+  |- Ограничение имен групп: max 30 символов
+  |- skip_fields из ens_column_mapping.yaml (исключение служебных полей)
 
 Level 3: AutoValidator
-    |- Тест маски на примерах из ЕСН
-    |- Score = matched_required / total_required
-    |- Порог активации: 0.85 (настраивается)
+  |- Тест маски на примерах из ЕСН
+  |- Score = matched_required / total_required
+  |- Порог активации: 0.85 (настраивается)
 
 Level 5: MaskDatabase.save_mask()
-    |- item_type сохраняется в UPPERCASE
-    |- Маски активируются сразу (is_active=True) при LLM-генерации
-    |- UPSERT по pattern_hash
+  |- item_type сохраняется в UPPERCASE
+  |- Маски активируются сразу (is_active=True) при LLM-генерации
+  |- UPSERT по pattern_hash
 
 Level 6: ParametricENSClient
-    |- Извлечение параметров через regex-маску (named groups)
-    |- _remap_params: перевод сырых имен групп в ENS-имена
-    |- Поиск по параметрам в индексе ЕНС (точное совпадение)
-    |- name_exact: прямое сравнение text == ens_name
-    |- Fuzzy fallback: token-based Jaccard для текстовых параметров
-      (покрытие, материал) - учитывает перестановку токенов
-    |- Score: взвешенное совпадение required-параметров
+  |- Извлечение параметров через regex-маску (named groups)
+  |- _remap_params: перевод сырых имен групп в ENS-имена
+  |- Поиск по параметрам в индексе ЕНС (O(1) через индексы по стандарту/типу)
+  |- name_exact: прямое сравнение text == ens_name
+  |- Fuzzy fallback: token-based Jaccard для текстовых параметров
+     (покрытие, материал) — учитывает перестановку токенов
+  |- Score: взвешенное совпадение required-параметров
 
 Level 8: CoatingValidation
-    |- Проверка покрытия по марке стали из ENS
-    |- Источник правил: ENS-индекс + LLM (coating_indexer.py, coating_llm_client.py)
-    |- "Бп"/"без покрытия"/пустое → skip validation
-    |- Авто-замена: Кд → Н.Кд для коррозионно-стойких сталей
-    |- Strict mode: reject match если покрытие не допустимо
+  |- Проверка покрытия по марке стали из ENS
+  |- Источник правил: ENS-индекс + LLM (coating_indexer.py, coating_llm_client.py)
+  |- "Бп"/"без покрытия"/пустое → skip validation
+  |- Авто-замена: Кд → Н.Кд для коррозионно-стойких сталей
+  |- Strict mode: reject match если покрытие не допустимо
 
 Level 9: TF-IDF Fallback
-    |- Char-ngram (2-4) TF-IDF векторизация
-    |- Cosine similarity по ЕСН
-    |- Всегда success=False (параметры не извлечены)
-    |- ens_code сохраняется только в details как candidate
+  |- Char-ngram (2-4) TF-IDF векторизация
+  |- Cosine similarity по ЕСН
+  |- Всегда success=False (параметры не извлечены)
+  |- ens_code сохраняется только в details как candidate
 ```
 
 ---
@@ -216,14 +223,14 @@ Level 9: TF-IDF Fallback
 
 ```bash
 # Клонирование репозитория
-git clone <repository-url>
+git clone
 cd nomenclature-processor
 
 # Создание виртуального окружения
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # или
-.venv\Scripts\activate     # Windows
+.venv\Scripts\activate   # Windows
 
 # Установка зависимостей
 pip install -r requirements.txt
@@ -294,16 +301,16 @@ processing:
 
 coating_rules:
   material_coating_map:
-    "14Х17Н2":  ["Н.Кд", "Хим.Пас", "Н.Пас"]
+    "14Х17Н2": ["Н.Кд", "Хим.Пас", "Н.Пас"]
     "12Х18Н10Т": ["Н.Кд", "Хим.Пас", "Н.Пас"]
-    "30ХГСА":   ["Кд", "Цд", "Окс", "Фос", "Бп"]
+    "30ХГСА": ["Кд", "Цд", "Окс", "Фос", "Бп"]
   auto_substitution:
     - material_pattern: "^(14Х17Н2|12Х18Н10Т)$"
       wrong_coating: "Кд"
       correct_coating: "Н.Кд"
-  similarity_threshold: 0.8
-  strict_mode: true
-  auto_substitution_enabled: true
+      similarity_threshold: 0.8
+      strict_mode: true
+      auto_substitution_enabled: true
 ```
 
 ### config/prompts.yaml
@@ -329,7 +336,7 @@ prompts:
     keywords: ["труба", "швеллер", "уголок", "балка", "профиль",
                "лист", "плита", "рулон", "круг", "квадрат",
                "regex:^ст\.сорт\.нерж\.|ст\.констр\.калибр\."]
-    service: "gigachat"   # явно указан — используется gigachat вместо default
+    service: "gigachat"  # явно указан — используется gigachat вместо default
     temperature: 0.1
     system_prompt: "Вы - эксперт по стандартам ГОСТ и прокату..."
     file: "prompts/templates/rolledmetal.txt"
@@ -389,7 +396,7 @@ matching:
 
   # Режим сравнения параметров:
   # false = по пересечению ключей (ключ отсутствующий в одном наборе игнорируется)
-  # true  = строгий режим по объединению (не рекомендуется)
+  # true = строгий режим по объединению (не рекомендуется)
   strict_union_keys: false
 
   # Детальный debug per-parameter в лог (true = выводить matched/mismatched)
@@ -432,17 +439,34 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.p
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 ```
 
-### 3. Обработать файл
+### 3. Обработать файл (Excel → Excel + result.db)
 
 ```bash
-# Все записи
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json
+# Полная обработка с сохранением в result.db и экспортом в Excel
+python cli.py batch data/nomenclature.xlsx \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl \
+  -o output/results.xlsx \
+  --result-db result.db \
+  --workers 8
 
 # Только успешно распознанные
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json --success-only
+python cli.py batch data/nomenclature.xlsx \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl \
+  -o output/results.xlsx \
+  --result-db result.db \
+  --success-only \
+  --workers 8
 
 # С debug-информацией (для анализа)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json --include-details
+python cli.py batch data/nomenclature.xlsx \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl \
+  -o output/results.xlsx \
+  --result-db result.db \
+  --include-details \
+  --workers 8
 ```
 
 ### 4. Анализ качества распознавания
@@ -454,6 +478,24 @@ python cli.py analyze-quality data/nomenclature.xlsx \
   -o output/quality_report.json
 ```
 
+### 5. Работа с result.db
+
+```bash
+# Статистика по result.db
+python cli.py result-stats --result-db result.db
+
+# Экспорт result.db в Excel (с обогащением исходного файла)
+python cli.py result-export \
+  --result-db result.db \
+  --output output/enriched.xlsx \
+  --source data/nomenclature.xlsx \
+  --article-col "Артикул" \
+  --name-col "наименование"
+
+# Записи, измененные после перегенерации масок
+python cli.py result-stats --result-db result.db --since 2026-05-14T10:00:00
+```
+
 ### Вызовы для отладки
 
 ```bash
@@ -463,17 +505,34 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 # Генерация масок для тестового индекса
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm
 
-# Batch-обработка через тестовый индекс
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.json
+# Batch-обработка через тестовый индекс (Excel → Excel)
+python cli.py batch data/nomenclature.xlsx \
+  -d cache/masks.db \
+  -i models/hardware2/ens_hardware.pkl \
+  -o output/results.xlsx \
+  --result-db result.db \
+  --workers 4
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
+python cli.py analyze-quality data/nomenclature.xlsx \
+  -d cache/masks.db \
+  -i models/hardware2/ens_hardware.pkl \
+  --workers 4 \
+  -o output/quality.xlsx \
+  -j output/quality.json
 
 # Запуск с логированием DEBUG — видно все шаги PARAM_MATCH, Fallback, _apply_mask
-python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --output output/results.json 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
+python -u cli.py batch data/nomenclature.xlsx \
+  --db cache/masks.db \
+  --ens-index models/hardware2/ens_hardware.pkl \
+  --output output/results.xlsx \
+  --result-db result.db \
+  2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
 
 # Диагностика отдельной строки + паттерна
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl
+python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" \
+  --db cache/masks.db \
+  --ens-index models/hardware2/ens_hardware.pkl
 ```
 
 ### Prod
@@ -485,11 +544,20 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o mod
 # Генерация масок
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
 
-# Batch-обработка
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.json
+# Batch-обработка (Excel → Excel + result.db)
+python cli.py batch data/nomenclature1.xlsx \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl \
+  --workers 8 \
+  -o output/results.xlsx \
+  --result-db result.db
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
+python cli.py analyze-quality data/nomenclature1.xlsx \
+  -d cache/masks.db \
+  -i models/hardware/ens_hardware.pkl \
+  -o output/quality.xlsx \
+  -j output/quality.json
 ```
 
 ---
@@ -500,35 +568,46 @@ python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i model
 
 | Команда | Описание |
 |---------|----------|
-| `batch <excel> -d <db> -i <index> -o <json>` | Пакетная обработка |
-| `batch <excel> ... --success-only` | Только успешно распознанные |
-| `batch <excel> ... --include-details` | Включить debug-информацию |
-| `process-parametric <text> -d <db> -i <index>` | Обработка одной строки |
-| `process <excel> --auto` | LLM-обработка (Legacy Mode) |
+| `batch <input.xlsx> -d <db> -i <ens> -o <output.xlsx>` | Пакетная обработка (Excel → Excel + result.db) |
+| `batch ... --success-only` | Только успешно распознанные в Excel |
+| `batch ... --include-details` | Включить debug-информацию |
+| `batch ... --workers 8` | Многопоточная обработка (8 процессов) |
+| `batch ... --result-db result.db` | Сохранять результаты в result.db |
+| `process-parametric <text> -d <db> -i <ens>` | Обработка одной строки |
+| `process <file> --auto` | LLM-обработка (Legacy Mode) |
 
 ### Генерация масок
 
 | Команда | Описание |
 |---------|----------|
-| `generate-masks -d <db> -i <index> --llm` | Все стандарты |
-| `generate-masks -d <db> -i <index> --llm --standard "ГОСТ 7798-70"` | Один стандарт |
-| `generate-masks -d <db> -i <index> --llm --limit 5` | Первые 5 (отладка) |
+| `generate-masks -d <db> -i <ens> --llm` | Все стандарты |
+| `generate-masks -d <db> -i <ens> --llm --standard "ГОСТ 7798-70"` | Один стандарт |
+| `generate-masks -d <db> -i <ens> --llm --limit 5` | Первые 5 (отладка) |
 | `cleanup -d <db> -t 0.5` | Удалить маски с низким score |
 
 ### Анализ качества
 
 | Команда | Описание |
 |---------|----------|
-| `analyze-quality <excel> -d <db> -i <index>` | JSON-отчет в stdout |
-| `analyze-quality <excel> -d <db> -i <index> -o <json>` | Сохранить JSON в файл |
+| `analyze-quality <file> -d <db> -i <ens>` | JSON-отчет в stdout |
+| `analyze-quality <file> -d <db> -i <ens> -o <file>` | Сохранить JSON в файл |
 
 ### ENS индекс
 
 | Команда | Описание |
 |---------|----------|
 | `ens build-index <excel> -o <pkl>` | Построить индекс |
-| `ens search <query> -i <index>` | Поиск по индексу |
-| `ens analyze <excel> -i <index>` | Анализ покрытия |
+| `ens search <query> -i <pkl>` | Поиск по индексу |
+| `ens analyze <excel> -i <pkl>` | Анализ покрытия |
+
+### Результаты (result.db)
+
+| Команда | Описание |
+|---------|----------|
+| `result-stats --result-db result.db` | Статистика по result.db |
+| `result-stats --result-db result.db --since <ISO>` | Записи, измененные после даты |
+| `result-export --result-db result.db -o <excel>` | Экспорт result.db в Excel |
+| `result-export --result-db result.db -o <excel> --source <input>` | Экспорт с обогащением исходного файла |
 
 ### Утилиты
 
@@ -537,8 +616,8 @@ python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i model
 | `prompts` | Список промптов с keywords, service, model |
 | `models [--api <name>]` | Доступные модели у API-провайдера |
 | `detect <text>` | Определить категорию по keywords |
-| `export -o <json>` | Экспорт результатов |
-| `stats` | Статистика results.db |
+| `export -o <file>` | Экспорт результатов (Legacy JSON) |
+| `stats` | Статистика results.db (Legacy) |
 | `errors -l <n>` | Последние ошибки |
 
 ```bash
@@ -628,35 +707,102 @@ python cli.py analyze-quality data/nomenclature.xlsx \
 
 ---
 
+## Хранение результатов (result.db)
+
+Система автоматически сохраняет результаты сопоставления в SQLite-базу `result.db` с отслеживанием версий масок.
+
+### Структура таблицы
+
+```sql
+CREATE TABLE nomenclature_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article TEXT NOT NULL,          -- Артикул из исходного Excel
+    name TEXT NOT NULL,             -- Наименование из исходного Excel
+    standard TEXT,                  -- Стандарт (ГОСТ/ОСТ)
+    item_type TEXT,                 -- Тип изделия
+    level TEXT,                     -- Уровень обработки
+    success INTEGER NOT NULL,       -- Успешно распознано (0/1)
+    params TEXT,                    -- Извлеченные параметры (JSON)
+    ens_code TEXT,                  -- Код ЕНС
+    ens_name TEXT,                  -- Наименование ЕНС
+    ens_params TEXT,                -- Параметры из индекса ЕНС (JSON)
+    ens_params_mask TEXT,           -- Параметры из ENS-имени по маске (JSON)
+    confidence REAL,                -- Уверенность (0.0..1.0)
+    match_type TEXT,                -- Тип сопоставления (eng)
+    match_type_ru TEXT,             -- Тип сопоставления (rus)
+    coating_substitution TEXT,      -- Информация о подстановке покрытия (JSON)
+    fuzzy_mismatched_params TEXT,   -- Несовпавшие параметры fuzzy (JSON)
+    mask_id INTEGER,                -- ID маски в БД масок
+    mask_pattern TEXT,              -- Regex-паттерн маски
+    mask_pattern_hash TEXT,         -- MD5-хеш паттерна (для отслеживания изменений)
+    details TEXT,                   -- Дополнительная информация (JSON)
+    processing_time_ms REAL,        -- Время обработки в мс
+    created_at TEXT,                -- Время создания записи
+    updated_at TEXT,                -- Время последнего обновления
+    UNIQUE(article, name)           -- Уникальность по (артикул, наименование)
+);
+```
+
+### Логика upsert
+
+```
+При обработке номенклатуры:
+  ├─ Запись (article, name) не существует → INSERT (new_record)
+  ├─ Запись существует, mask_pattern_hash совпадает → UPDATE updated_at только (mask_unchanged)
+  └─ Запись существует, mask_pattern_hash отличается → UPDATE всех полей (mask_changed)
+```
+
+Это позволяет:
+- **Повторно запускать batch** — существующие записи не дублируются
+- **Отслеживать изменения масок** — записи обновляются только если маска изменилась
+- **Получать дельту** — `result-stats --since <дата>` показывает записи, измененные после перегенерации масок
+
+### Excel output
+
+При обработке batch создается Excel-файл с исходными колонками + дополнительными:
+
+| Колонка | Источник | Пример |
+|---------|----------|--------|
+| `Код ЕНС` | `ens_code` | `1000613872` |
+| `Наименование ЕНС` | `ens_name` | `Болт 2М12х1,25-6gx60.109.40Х.016 ГОСТ 7798-70` |
+| `Уровень` | `level` | `parametric_match` |
+| `Распознано` | `success` | `Да` / `Нет` |
+| `Уверенность` | `confidence` | `0.95` |
+| `Тип сопоставления` | `match_type_ru` | `Полное совпадение параметров с индексом` |
+| `Подстановка покрытия` | `coating_substitution` | `{"original": "Кд", "corrected": "Н.Кд"}` |
+| `Несовпавшие параметры` | `fuzzy_mismatched_params` | `{"покрытие": "'Кд' vs 'Хим.Пас' (sim=0.00)"}` |
+
+---
+
 ## Keyword-based маршрутизация
 
 ```
 Номенклатура: "Болт М16х130.52.019 ГОСТ 7798-70"
-    |
-    v
+  |
+  v
 StandardExtractor: standard="ГОСТ 7798-70", item_type="БОЛТ" (UPPERCASE)
-    |
-    v
+  |
+  v
 Keywords lookup: "болт" in hardware.keywords -> True
-    |
-    v
+  |
+  v
 prompt_id="hardware" -> prompts.yaml:
-    service="mws", model="qwen2.5-72b-instruct", temp=0.1
-    |
-    v
+  service="mws", model="qwen2.5-72b-instruct", temp=0.1
+  |
+  v
 Маска найдена в БД? -> Да -> ParametricMatch (Level 6)
-    |
-    v
+  |
+  v
 Извлечены params: {тип_изделия: "Болт", диаметр: "М16", длина: "130", ...}
-    |
-    v
+  |
+  v
 Поиск в ЕСН:
-    1. Точное совпадение параметров (с _remap_params)
-    2. name_exact: text == ens_name?
-    3. Fuzzy fallback: token-based matching для покрытия/материала
-       "Окс.Фос.ЭФП" ~ "Фос.Окс.ЭФП" = 100% (перестановка токенов)
-    |
-    v
+  1. Точное совпадение параметров (с _remap_params)
+  2. name_exact: text == ens_name?
+  3. Fuzzy fallback: token-based matching для покрытия/материала
+     "Окс.Фос.ЭФП" ~ "Фос.Окс.ЭФП" = 100% (перестановка токенов)
+  |
+  v
 ens_code="1000613872", score=0.95
 ```
 
@@ -696,14 +842,14 @@ ens_code="1000613872", score=0.95
 1. ИСХОДНАЯ СТРОКА: "Болт 2М12х1,25-6gx60.109.40Х.016 ГОСТ 7798-70"
    СТРУКТУРА: [Болт] (?P<тип_изделия>Болт) [ ] (?P<номинальный_диаметр_резьбы>2М12) ...
    ПОЛЯ ЕСН:
-    полное_наименование: Болт 2М12х1,25-6gx60.109.40Х.016 ГОСТ 7798-70
-    тип_изделия: Болт
-    исполнение: 2
-    ...
+     полное_наименование: Болт 2М12х1,25-6gx60.109.40Х.016 ГОСТ 7798-70
+     тип_изделия: Болт
+     исполнение: 2
+     ...
 
 === СТАТИСТИКА ===
-    тип_изделия: 659 из 659
-    номинальный_диаметр_резьбы: 659 из 659
+  тип_изделия: 659 из 659
+  номинальный_диаметр_резьбы: 659 из 659
 
 Ответ в формате:
 ```json
@@ -752,9 +898,9 @@ ens_code="1000613872", score=0.95
 Промпты сохраняются в `prompts/debug/`:
 ```
 prompts/debug/
-|-- БОЛТ_ГОСТ_7798-70.txt          # промпт
-|-- БОЛТ_ГОСТ_7798-70_a1.txt       # ответ попытки 1
-|-- БОЛТ_ГОСТ_7798-70_a2.txt       # ответ попытки 2 (retry)
+|-- БОЛТ_ГОСТ_7798-70.txt           # промпт
+|-- БОЛТ_ГОСТ_7798-70_a1.txt        # ответ попытки 1
+|-- БОЛТ_ГОСТ_7798-70_a2.txt        # ответ попытки 2 (retry)
 |-- БОЛТ_ГОСТ_7798-70_failed_a1.txt # при ошибке парсинга
 ```
 
@@ -794,17 +940,17 @@ prompts/debug/
 
 ```
 Level 6: ParametricMatch
-    └─ ENS найден, параметры извлечены
-        |
-        v
-    Level 8: CoatingValidation
-        1. Извлекаем покрытие из текста + марку стали из ENS
-        2. Если покрытие = "" / "Бп" / "без покрытия" → skip (валидно)
-        3. Загружаем coating_rules из config.yaml
-        4. Проверяем: покрытие допустимо для марки?
-           ├── Да → match подтвержден
-           ├── Нет, но есть auto_substitution → заменяем в params
-           └── Нет, strict_mode=true → REJECT match (success=false)
+  └─ ENS найден, параметры извлечены
+       |
+       v
+Level 8: CoatingValidation
+  1. Извлекаем покрытие из текста + марку стали из ENS
+  2. Если покрытие = "" / "Бп" / "без покрытия" → skip (валидно)
+  3. Загружаем coating_rules из config.yaml
+  4. Проверяем: покрытие допустимо для марки?
+     ├── Да → match подтвержден
+     ├── Нет, но есть auto_substitution → заменяем в params
+     └── Нет, strict_mode=true → REJECT match (success=false)
 ```
 
 ### Построение правил (гибридный подход)
@@ -850,12 +996,12 @@ coating_rules:
   # Определяет какие покрытия допустимы для каждой марки материала
   material_coating_map:
     # Коррозионно-стойкие стали: кадмиевое (Кд) НЕДОПУСТИМО → только Н.Кд
-    "14Х17Н2":  ["Н.Кд", "Хим.Пас", "Н.Пас", "Пас"]
+    "14Х17Н2": ["Н.Кд", "Хим.Пас", "Н.Пас", "Пас"]
     "12Х18Н10Т": ["Н.Кд", "Хим.Пас", "Н.Пас"]
     "08Х18Н10Т": ["Н.Кд", "Хим.Пас", "Н.Пас"]
     # Конструкционные стали: кадмиевое, цинковое, оксидные и др.
-    "30ХГСА":   ["Кд", "Цд", "Окс", "Фос", "Окс.Фос", "Фос.Окс", "Неп", "Пас", "Бп"]
-    "40Х":      ["Кд", "Цд", "Окс", "Фос", "Окс.Фос", "Фос.Окс", "Неп", "Пас", "Бп"]
+    "30ХГСА": ["Кд", "Цд", "Окс", "Фос", "Окс.Фос", "Фос.Окс", "Неп", "Пас", "Бп"]
+    "40Х": ["Кд", "Цд", "Окс", "Фос", "Окс.Фос", "Фос.Окс", "Неп", "Пас", "Бп"]
 
   # Авто-замена покрытия: wrong → correct (если матчит material_pattern)
   # Работает на этапе fuzzy matching (НЕ на этапе индексации)
@@ -868,7 +1014,7 @@ coating_rules:
 
   similarity_threshold: 0.8    # порог fuzzy-match для покрытий
   strict_mode: true            # true=reject при недопустимом, false=penalty
-  auto_substitution_enabled: true   # включить авто-замену при matching
+  auto_substitution_enabled: true  # включить авто-замену при matching
 ```
 
 ### Как работает auto_substitution в matching
@@ -936,7 +1082,7 @@ python cli.py models --api mts_ai
 
 # Пример ответа:
 # MTS AI: ✓ available
-#   Models: cotype_pro_2.5, cotype_pro_1.5
+# Models: cotype_pro_2.5, cotype_pro_1.5
 ```
 
 ### Использование в prompts.yaml
@@ -946,7 +1092,7 @@ prompts:
   my_prompt:
     name: "Тест MTS AI"
     keywords: ["тест"]
-    service: "mts_ai"      # используем MTS AI вместо default
+    service: "mts_ai"  # используем MTS AI вместо default
     # model: "cotype_pro_2.5"  # можно не указывать — берется из api.mts_ai.default_model
     temperature: 0.1
     system_prompt: "Вы — эксперт..."
@@ -997,7 +1143,7 @@ python scripts/auto_mapping.py "data/ENS_Крепеж.xlsx" --append -o config/e
 Каждая запись в `results.json` содержит поле `match_type` — тип сопоставления:
 
 | `match_type` | `match_type_ru` | Когда |
-|---|---|---|
+|---|------|---|
 | `name_exact` | Сопадение по наименованию | text == ens_name (прямое равенство) |
 | `parametric_full` | Полное совпадение параметров с индексом | Все params совпали с ENS индексом |
 | `v2_exact` | Полное совпадение параметров с маской ENS | Params совпали с ens_params_mask |
@@ -1023,6 +1169,59 @@ python scripts/auto_mapping.py "data/ENS_Крепеж.xlsx" --append -o config/e
 - `null` — fuzzy не применялся (exact/parametric match)
 - `{}` — fuzzy применялся, все параметры совпали
 - `{"покрытие": "..."}` — есть несовпавшие параметры с пояснением
+
+---
+
+## Производительность
+
+### Оптимизации (2026-05-14)
+
+| Оптимизация | Эффект | Реализация |
+|-------------|--------|-----------|
+| **Индексация ENS** | 10–50× ускорение поиска | `Dict[(std, type), List[item]]` в `parametric_client.py` |
+| **O(1) поиск по коду** | Мгновенный lookup ENS | `Dict[code, item]` в `parametric_client.py` |
+| **Кэш compiled regex** | 1.5–2× ускорение | `Dict[pattern, compiled]` в `parametric_client.py` |
+| **Кэш coating_rules** | 1.2–1.5× ускорение | Одна загрузка YAML на сессию в `automated_processor.py` |
+| **Lazy debug-логи** | 1.3–2× ускорение | `logger.debug("%s", arg)` вместо `f-string` в `automated_processor.py` |
+| **Multiprocessing** | 4–8× ускорение | `ProcessPoolExecutor` в `cli.py` |
+| **Кэш ENS candidates** | 2–3× ускорение | `Dict[(std, type), List[item]]` в `automated_processor.py` |
+| **Итого** | **50–200×** | С 8.57 сек/запись → 0.1–0.3 сек/запись |
+
+### Индексация ENS
+
+При загрузке индекса ЕНС (245 000 записей) строятся два индекса:
+
+```python
+# Индекс по (стандарт, тип) — поиск O(100-500) вместо O(245K)
+self._ens_by_standard_type: Dict[Tuple[str, str], List[Dict]]
+
+# Индекс по коду — lookup O(1)
+self._ens_by_code: Dict[str, Dict]
+```
+
+### Многопоточная обработка
+
+```bash
+# Однопоточный режим (для отладки)
+python cli.py batch input.xlsx ... --workers 1
+
+# Авто (число CPU ядер)
+python cli.py batch input.xlsx ... --workers 8
+
+# Рекомендуемые значения:
+#   OpenWebUI (локальные модели): 4-8 workers
+#   MWS Cloud GPT: 2-4 workers
+#   GigaChat API: 2-4 workers (лимиты API)
+#   MTS AI: 2-4 workers
+```
+
+Каждый worker-процесс самостоятельно инициализирует `Processor` и загружает ENS index (lazy init), избегая сериализации 5 ГБ через pickle.
+
+### Рекомендации по производительности
+
+- **ENS индекс 5 ГБ**: загружается 1 раз при старте, занимает ~6 ГБ RAM
+- **SQLite WAL mode**: `cache/masks.db` и `result.db` используют WAL для параллельного чтения/записи
+- **Chunk size**: для очень больших файлов (>10K записей) используйте `--chunk-size 100`
 
 ---
 
@@ -1084,27 +1283,31 @@ python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models
 - Проверьте доступность endpoint: `curl -H "Authorization: Bearer $(cat secrets/mts_ai_key.txt)" https://demo6-fundres.dev.mts.ai/v1/models`
 - Убедитесь что в `config.yaml` base_url не содержит пробелов в конце (фикс: `__post_init__` делает `strip()`)
 
+### Медленная обработка (>5 сек/запись)
+- Проверьте что индексы ENS построены: `python -c "from core.parametric_client import ParametricENSClient; c = ParametricENSClient('models/hardware/ens_hardware.pkl'); print(len(c._ens_by_standard_type), 'groups')"`
+- Используйте multiprocessing: `--workers 8`
+- Проверьте логи на наличие повторных загрузок coating_rules (должна быть 1 раз)
+
+### result.db не обновляется после перегенерации масок
+- Проверьте `mask_pattern_hash` в таблице: `sqlite3 result.db "SELECT article, mask_pattern_hash FROM nomenclature_results LIMIT 5"`
+- При изменении маски hash должен измениться → запись обновится
+- Используйте `result-stats --since <дата>` для проверки
+
 ---
 
 ## Upsert семантика
 
+### Legacy (results.db)
 База данных SQLite гарантирует уникальность записей по составному ключу `(article, prompt_id)`:
 - Если запись существует — она обновляется
 - Если записи нет — она создается
 - Повторный запуск безопасен и не создает дубликатов
 
----
-
-## Производительность
-
-- **Параллельная обработка:** настраиваемое количество workers
-- **Кэширование:** SQLite с UPSERT для промежуточных результатов
-- **Кэширование ENS:** кандидаты по `(standard, item_type)` и результаты `_find_in_ens` по хешу параметров
-- **Рекомендации:**
-  - OpenWebUI (локальные модели): 4-8 workers
-  - MWS Cloud GPT: 2-4 workers
-  - GigaChat API: 2-4 workers (лимиты API)
-  - MTS AI: 2-4 workers
+### result.db (новая)
+База `result.db` использует upsert по `(article, name)` с отслеживанием версий масок:
+- Новая запись → INSERT
+- Существующая, маска не изменилась → soft touch (только updated_at)
+- Существующая, маска изменилась → полное UPDATE всех полей
 
 ---
 
@@ -1122,6 +1325,9 @@ python cli.py process test_sample.xlsx --auto -w 2
 
 # Проверка статистики
 python cli.py stats
+
+# Проверка result.db
+python cli.py result-stats --result-db result.db
 ```
 
 ---
@@ -1135,9 +1341,9 @@ python cli.py stats
 ### Уровни логирования по модулям
 
 | Модуль | INFO | DEBUG |
-|---|---|---|
+|---|------|-------|
 | `automated_processor` | Инициализация, `Processing:`, `REJECTED:` | `[PARAM_MATCH]`, `[FUZZY]`, coating checks |
-| `parametric_client` | — | `[_calculate_match_score]` fuzzy details |
+| `parametric_client` | Индексация ENS (info) | `[_calculate_match_score]` fuzzy details |
 | `coating_indexer` | `Built map for`, `LLM augmented` | Сканирование ENS |
 | `ens.loader` | Загрузка индекса, статистика колонок | Auto-mapped колонки |
 
@@ -1157,24 +1363,23 @@ logging:
 
 - Python 3.11+
 - SQLite 3.39+
-- RAM: 4GB минимум, 8GB рекомендуется
+- RAM: 4GB минимум, 8GB рекомендуется (6GB для ENS индекса 5GB)
 - Диск: ~2GB для моделей и индексов
 
 ### Зависимости
 
 ```
 pandas>=1.5
-openpyxl>=3.0       # Чтение Excel
-pyyaml>=6.0         # YAML конфиги
-scikit-learn>=1.2   # TF-IDF
+openpyxl>=3.0        # Чтение Excel
+pyyaml>=6.0          # YAML конфиги
+scikit-learn>=1.2    # TF-IDF
 numpy>=1.24
-click>=8.0          # CLI
-requests>=2.28      # API клиенты
-aiohttp>=3.8        # Async API (опционально)
+click>=8.0           # CLI
+requests>=2.28       # API клиенты
+aiohttp>=3.8         # Async API (опционально)
 ```
 
 ---
-
 
 ```bash
 # 1. Размер файла и тип
@@ -1189,4 +1394,8 @@ sqlite3 cache/masks.db "PRAGMA wal_checkpoint;"
 
 # 4. Попробуйте простой запрос к БД через Python
 python -c "import sqlite3; c=sqlite3.connect('cache/masks.db'); print(c.execute('SELECT count(*) FROM masks').fetchone())"
+
+# 5. Проверка result.db
+sqlite3 result.db "SELECT COUNT(*), SUM(success) FROM nomenclature_results;"
+sqlite3 result.db "SELECT match_type, COUNT(*) FROM nomenclature_results GROUP BY match_type;"
 ```
