@@ -2,7 +2,9 @@
 """
 Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
+
 LAST_FIX:
+ 2026-05-14 11:54 UTC+3 — batch: Excel input/output + result.db upsert с mask_pattern_hash (обновление при изменении маски)
  2026-05-14 10:32 UTC+3 — multiprocessing batch через ProcessPoolExecutor + опции --workers/--chunk-size (производительность)
  2026-05-08 12:00 UTC+3 — fuzzy_mismatched_params добавлен в выходной JSON row
  2026-05-08 11:50 UTC+3 — match_type, match_type_ru, coating_substitution, mask_pattern в JSON row
@@ -296,10 +298,8 @@ def _init_llm_clients(settings, all_services=False):
     llm_clients = {}
 
     if all_services:
-        # Все настроенные сервисы (с проверкой credentials)
         services = ['mws', 'mts_ai', 'gigachat', 'openwebui']
     else:
-        # Только default_service из конфига
         services = [settings.mask_generation.default_service]
         logger.info("LLM: using default_service='%s'", services[0])
 
@@ -308,7 +308,6 @@ def _init_llm_clients(settings, all_services=False):
             continue
         try:
             cfg = settings.api[service_name]
-            # --- Проверка credentials перед созданием клиента ---
             if service_name == 'openwebui':
                 if not cfg.api_key and not (cfg.username and cfg.password):
                     logger.debug("Skipping %s: no credentials", service_name)
@@ -409,7 +408,6 @@ def _init_processor_worker(args: dict) -> 'AutomatedParametricProcessor':
 
     llm_clients = {}
     if args.get('llm'):
-        # Инициализация LLM клиентов (если нужно)
         llm_clients = _init_llm_clients(settings, all_services=True)
 
     processor = AutomatedParametricProcessor(
@@ -447,6 +445,12 @@ def _process_single(args: dict) -> dict:
         'processing_time_ms': result.processing_time_ms,
         'item_type': result.item_type,
         'standard': result.standard,
+        'match_type': result.details.get('match_type') if result.details else None,
+        'match_type_ru': result.details.get('match_type_ru') if result.details else None,
+        'coating_substitution': result.details.get('coating_substitution') if result.details else None,
+        'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None,
+        'mask_id': result.details.get('mask_id') if result.details else None,
+        'mask_pattern': result.details.get('mask_pattern') if result.details else None,
         'details': result.details
     }
 
@@ -455,7 +459,8 @@ def _process_single(args: dict) -> dict:
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
-@click.option('--output', '-o', default='results.json', help='Выходной файл')
+@click.option('--output', '-o', default='results.xlsx', help='Выходной Excel-файл')
+@click.option('--result-db', '-r', default='result.db', help='Путь к result.db для upsert')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию')
 @click.option('--validate/--no-validate', default=True, help='Проверять валидность')
 @click.option('--success-only', is_flag=True, help='Выгружать только успешно распознанные')
@@ -463,28 +468,45 @@ def _process_single(args: dict) -> dict:
 @click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
 @click.option('--workers', '-w', default=None, type=int, help='Количество worker-процессов (по умолчанию: число CPU)')
 @click.option('--chunk-size', default=50, type=int, help='Размер чанка для передачи в pool')
-def batch(input_file, db, ens_index, output, llm, validate, success_only, include_details, coating_map, workers, chunk_size):
-    """Пакетная обработка с параметрическим поиском (multiprocessing)"""
+@click.option('--article-col', default='Артикул', help='Имя колонки с артикулом во входном Excel')
+@click.option('--name-col', default='наименование', help='Имя колонки с наименованием во входном Excel')
+def batch(input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col):
+    """Пакетная обработка с параметрическим поиском (multiprocessing + Excel + result.db)"""
     import pandas as pd
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
+    from core.result_database import ResultDatabaseManager
     from config.settings import get_settings
 
     click.echo(f"📊 Загрузка {input_file}...")
     df = pd.read_excel(input_file)
 
-    name_col = 'Краткое наименование'
-    if name_col not in df.columns:
-        name_cols = [c for c in df.columns if 'наименование' in str(c).lower()]
-        if name_cols:
-            name_col = name_cols[0]
+    # Определяем колонки
+    if article_col not in df.columns:
+        # Пробуем найти колонку с артикулом (case-insensitive)
+        article_candidates = [c for c in df.columns if 'артикул' in str(c).lower() or 'article' in str(c).lower() or 'код' in str(c).lower()]
+        if article_candidates:
+            article_col = article_candidates[0]
+            click.echo(f"🔍 Колонка артикула определена как: {article_col}")
         else:
-            click.echo("❌ Колонка с наименованием не найдена", err=True)
+            click.echo(f"⚠️ Колонка '{article_col}' не найдена, создаем пустую")
+            df[article_col] = ""
+
+    if name_col not in df.columns:
+        name_candidates = [c for c in df.columns if 'наименование' in str(c).lower() or 'name' in str(c).lower() or 'название' in str(c).lower()]
+        if name_candidates:
+            name_col = name_candidates[0]
+            click.echo(f"🔍 Колонка наименования определена как: {name_col}")
+        else:
+            click.echo(f"❌ Колонка с наименованием не найдена", err=True)
             return
 
-    texts = df[name_col].astype(str).tolist()
-    click.echo(f"✅ Загружено {len(texts)} записей")
+    articles = df[article_col].astype(str).tolist()
+    names = df[name_col].astype(str).tolist()
+    texts = names  # наименование = текст для обработки
+
+    click.echo(f"✅ Загружено {len(texts)} записей (артикул из '{article_col}', наименование из '{name_col}')")
 
     # Инициализация CoatingMapper
     if coating_map:
@@ -515,7 +537,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
     stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
     if n_workers > 1:
-        # Многопроцессная обработка
         tasks = [
             {**worker_args, 'text': text, 'idx': i}
             for i, text in enumerate(texts)
@@ -527,7 +548,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
                 future = executor.submit(_process_single, task)
                 futures[future] = task['idx']
 
-            # Сбор результатов с прогресс-баром
             with tqdm(total=len(texts), desc="Обработка") as pbar:
                 for future in as_completed(futures):
                     idx = futures[future]
@@ -543,11 +563,13 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
                             stats['filtered'] += 1
                     except Exception as e:
                         logger.error("Error processing item %d: %s", idx, e)
-                        results[idx] = {'text': texts[idx], 'success': False, 'error': str(e)}
+                        results[idx] = {
+                            'text': texts[idx], 'success': False, 'error': str(e),
+                            'match_type_ru': 'Ошибка обработки', 'level': 'error'
+                        }
                         stats['failed'] += 1
                     pbar.update(1)
     else:
-        # Однопоточный fallback
         mask_db = MaskDatabase(db_path=db)
         processor = AutomatedParametricProcessor(
             mask_db=mask_db,
@@ -571,7 +593,13 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
                 'processing_time_ms': result.processing_time_ms,
                 'item_type': result.item_type,
                 'standard': result.standard,
-                'details': result.details if include_details else None
+                'match_type': result.details.get('match_type') if result.details else None,
+                'match_type_ru': result.details.get('match_type_ru') if result.details else None,
+                'coating_substitution': result.details.get('coating_substitution') if result.details else None,
+                'fuzzy_mismatched_params': result.details.get('fuzzy_mismatched_params') if result.details else None,
+                'mask_id': result.details.get('mask_id') if result.details else None,
+                'mask_pattern': result.details.get('mask_pattern') if result.details else None,
+                'details': result.details
             }
             stats['total'] += 1
             if results[i]['success']:
@@ -579,20 +607,117 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
             else:
                 stats['failed'] += 1
 
-    # Фильтрация
-    if success_only:
-        results = [r for r in results if r and r.get('success')]
+    # === СОХРАНЕНИЕ В result.db ===
+    click.echo(f"💾 Сохранение в {result_db}...")
+    result_manager = ResultDatabaseManager(db_path=result_db)
+    db_stats = {'inserted': 0, 'updated': 0, 'unchanged': 0}
 
-    # Сохранение
-    with open(output, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    for i, result in enumerate(results):
+        if result is None:
+            continue
+        article = str(articles[i]).strip()
+        name = str(names[i]).strip()
 
-    click.echo(f"\n💾 Результаты: {output} ({len(results)} записей)")
-    click.echo(f"📊 Всего обработано: {stats['total']}")
-    click.echo(f"✅ Успешно: {stats['success']}")
-    click.echo(f"❌ Не распознано: {stats['failed']}")
+        changed, reason = result_manager.upsert_result(
+            article=article,
+            name=name,
+            level=result.get('level', ''),
+            success=bool(result.get('success', False)),
+            params=result.get('params'),
+            ens_code=result.get('ens_code'),
+            ens_name=result.get('ens_name'),
+            ens_params=result.get('ens_params'),
+            ens_params_mask=result.get('ens_params_mask'),
+            confidence=result.get('confidence', 0.0),
+            match_type=result.get('match_type'),
+            match_type_ru=result.get('match_type_ru'),
+            coating_substitution=result.get('coating_substitution'),
+            fuzzy_mismatched_params=result.get('fuzzy_mismatched_params'),
+            mask_id=result.get('mask_id'),
+            mask_pattern=result.get('mask_pattern'),
+            standard=result.get('standard'),
+            item_type=result.get('item_type'),
+            details=result.get('details') if include_details else None,
+            processing_time_ms=result.get('processing_time_ms', 0.0),
+        )
+
+        if reason == "new_record":
+            db_stats['inserted'] += 1
+        elif reason == "mask_changed":
+            db_stats['updated'] += 1
+        else:
+            db_stats['unchanged'] += 1
+
+    click.echo(f"📊 БД: +{db_stats['inserted']} новых, {db_stats['updated']} обновлено (маска изменилась), {db_stats['unchanged']} без изменений")
+
+    # === ЭКСПОРТ В EXCEL ===
+    click.echo(f"📤 Экспорт в {output}...")
+
+    # Фильтрация для Excel
     if success_only:
-        click.echo(f"🚫 Отфильтровано: {stats['filtered']}")
+        export_results = [r for r in results if r and r.get('success')]
+        export_df = df[[df.index[i] for i, r in enumerate(results) if r and r.get('success')]]
+    else:
+        export_results = results
+        export_df = df.copy()
+
+    # Добавляем колонки к исходному DataFrame
+    extra_cols = {
+        'ens_code': 'Код ЕНС',
+        'ens_name': 'Наименование ЕНС',
+        'level': 'Уровень',
+        'success': 'Распознано',
+        'confidence': 'Уверенность',
+        'match_type_ru': 'Тип сопоставления',
+        'coating_substitution': 'Подстановка покрытия',
+        'fuzzy_mismatched_params': 'Несовпавшие параметры',
+    }
+
+    for key, col_name in extra_cols.items():
+        export_df[col_name] = None
+
+    for i, result in enumerate(results):
+        if result is None:
+            continue
+        # Находим индекс в export_df (если success_only — индексы могут не совпадать)
+        if success_only and not result.get('success'):
+            continue
+        row_idx = export_df.index[i] if not success_only else None
+        if success_only:
+            # Находим соответствующую строку
+            mask = (df[article_col].astype(str).str.strip() == str(articles[i]).strip()) & \
+                   (df[name_col].astype(str).str.strip() == str(names[i]).strip())
+            matching = df[mask]
+            if len(matching) == 0:
+                continue
+            row_idx = matching.index[0]
+            # Добавляем в export_df если еще нет
+            if row_idx not in export_df.index:
+                export_df = pd.concat([export_df, matching.iloc[[0]]], ignore_index=True)
+                row_idx = export_df.index[-1]
+
+        for key, col_name in extra_cols.items():
+            val = result.get(key)
+            if key == 'success':
+                val = "Да" if val else "Нет"
+            elif key == 'confidence' and val is not None:
+                val = round(float(val), 3)
+            elif key in ('coating_substitution', 'fuzzy_mismatched_params') and val is not None:
+                val = json.dumps(val, ensure_ascii=False, default=str) if isinstance(val, dict) else str(val)
+            export_df.at[row_idx, col_name] = val
+
+    export_df.to_excel(output, index=False)
+    click.echo(f"✅ Excel сохранен: {output} ({len(export_df)} строк)")
+
+    # Итоговая статистика
+    click.echo(f"\n📊 Итоги обработки:")
+    click.echo(f"  Всего: {stats['total']}")
+    click.echo(f"  ✅ Успешно: {stats['success']}")
+    click.echo(f"  ❌ Не распознано: {stats['failed']}")
+    if success_only:
+        click.echo(f"  🚫 Отфильтровано: {stats['filtered']}")
+    click.echo(f"  💾 БД result.db: +{db_stats['inserted']} новых, {db_stats['updated']} обновлено")
+
 
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
@@ -650,6 +775,52 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         analyzer.save_json(stats, json_output)
         click.echo(f"\n💾 JSON отчет сохранен: {json_output}")
 
+
+@cli.command('result-stats')
+@click.option('--result-db', '-r', default='result.db', help='Путь к result.db')
+@click.option('--since', help='Фильтр по дате изменения (ISO format)')
+def result_stats(result_db, since):
+    """Статистика по result.db"""
+    from core.result_database import ResultDatabaseManager
+
+    manager = ResultDatabaseManager(db_path=result_db)
+    stats = manager.get_statistics()
+
+    click.echo(f"📊 Статистика result.db ({result_db}):")
+    click.echo(f"  Всего записей: {stats['total']}")
+    click.echo(f"  ✅ Успешно: {stats['success']}")
+    click.echo(f"  ❌ Не распознано: {stats['failed']}")
+    click.echo(f"  🔄 Обновлено после вставки: {stats['changed_after_insert']}")
+    click.echo(f"  📈 Success rate: {stats['success_rate']:.1%}")
+    click.echo(f"  По типам сопоставления:")
+    for mt, cnt in stats['by_match_type'].items():
+        click.echo(f"    {mt}: {cnt}")
+
+    if since:
+        changed = manager.get_changed_records(since=since)
+        click.echo(f"\n🔄 Измененные после {since}: {len(changed)} записей")
+
+
+@cli.command('result-export')
+@click.option('--result-db', '-r', default='result.db', help='Путь к result.db')
+@click.option('--output', '-o', required=True, help='Выходной Excel-файл')
+@click.option('--source', '-s', help='Исходный Excel для обогащения')
+@click.option('--article-col', default='Артикул', help='Колонка артикула в исходном файле')
+@click.option('--name-col', default='наименование', help='Колонка наименования в исходном файле')
+def result_export(result_db, output, source, article_col, name_col):
+    """Экспорт result.db в Excel (с опциональным обогащением исходного файла)"""
+    from core.result_database import ResultDatabaseManager
+
+    manager = ResultDatabaseManager(db_path=result_db)
+    manager.export_to_excel(
+        output_path=output,
+        source_path=source,
+        article_col=article_col,
+        name_col=name_col
+    )
+    click.echo(f"✅ Экспортировано в {output}")
+
+
 @cli.command('diagnose')
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -667,7 +838,6 @@ def diagnose(text, db, ens_index, llm, coating_map):
     settings = get_settings()
     llm_clients = {}
     if llm:
-        # Lazy import to avoid startup overhead
         llm_clients = _init_llm_clients(settings, all_services=True)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
@@ -751,7 +921,6 @@ def diagnose(text, db, ens_index, llm, coating_map):
             click.echo(f"  groups: {match.groupdict()}")
         else:
             click.echo(f"  ❌ NO MATCH")
-            # Find longest prefix
             for i in range(len(text), 0, -1):
                 if compiled.search(text[:i]):
                     click.echo(f"  longest matching prefix: '{text[:i]}'")
