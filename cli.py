@@ -25,7 +25,6 @@ from config.settings import setup_logging
 
 logger = logging.getLogger(__name__)
 
-
 def _get_result_db_path(ctx_obj: dict, cli_option: Optional[str]) -> str:
     """Получить путь к result.db: CLI > config > default."""
     if cli_option:
@@ -36,7 +35,6 @@ def _get_result_db_path(ctx_obj: dict, cli_option: Optional[str]) -> str:
     if result_db_cfg and result_db_cfg.get('path'):
         return result_db_cfg['path']
     return 'result.db'
-
 
 @click.group()
 @click.option('--config', '-c', default='config/config.yaml', help='Путь к конфигу')
@@ -71,12 +69,11 @@ def prompts():
     click.echo("📋 Доступные промпты:")
     for pid, cfg in settings.prompts.items():
         click.echo(f"\n🔹 {pid}")
-        click.echo(f"  Название: {cfg.name}")
-        click.echo(f"  Категория: {cfg.category}")
-        click.echo(f"  Сервис: {cfg.resolve_service(settings)}")
-        click.echo(f"  Модель: {cfg.resolve_model(settings)}")
-        click.echo(f"  Ключевые слова: {', '.join(cfg.keywords[:5])}...")
-
+        click.echo(f"   Название: {cfg.name}")
+        click.echo(f"   Категория: {cfg.category}")
+        click.echo(f"   Сервис: {cfg.resolve_service(settings)}")
+        click.echo(f"   Модель: {cfg.resolve_model(settings)}")
+        click.echo(f"   Ключевые слова: {', '.join(cfg.keywords[:5])}...")
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -116,7 +113,6 @@ def process(ctx, input_file, prompt, auto, workers, force):
 
     click.echo(f"\n✅ Обработка завершена: {len(results)} результатов")
 
-
 @cli.command()
 @click.option('--output', '-o', default='results.json', help='Файл для экспорта')
 @click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
@@ -149,7 +145,6 @@ def export(ctx, output, structure, prompt, status, include_raw, include_full_req
 
     click.echo(f"✅ Экспортировано: {len(results)} записей → {output}")
 
-
 @cli.command()
 @click.pass_context
 def stats(ctx):
@@ -162,15 +157,14 @@ def stats(ctx):
     stats = db.get_statistics()
 
     click.echo("📊 Статистика result.db:")
-    click.echo(f"  Всего записей: {stats['total']}")
-    click.echo(f"  ✅ Успешно: {stats['success']}")
-    click.echo(f"  ❌ Не распознано: {stats['failed']}")
-    click.echo(f"  🔄 Обновлено после вставки: {stats['changed_after_insert']}")
-    click.echo(f"  📈 Success rate: {stats['success_rate']:.1%}")
-    click.echo(f"  По типам сопоставления:")
+    click.echo(f"   Всего записей: {stats['total']}")
+    click.echo(f"   ✅ Успешно: {stats['success']}")
+    click.echo(f"   ❌ Не распознано: {stats['failed']}")
+    click.echo(f"   🔄 Обновлено после вставки: {stats['changed_after_insert']}")
+    click.echo(f"   📈 Success rate: {stats['success_rate']:.1%}")
+    click.echo(f"   По типам сопоставления:")
     for mt, cnt in stats['by_match_type'].items():
-        click.echo(f"    {mt}: {cnt}")
-
+        click.echo(f"     {mt}: {cnt}")
 
 @cli.command()
 @click.option('--limit', '-l', default=10, help='Количество ошибок')
@@ -195,7 +189,6 @@ def errors(ctx, limit):
         click.echo(f"   Уверенность: {result.get('confidence', 0):.2f}")
         click.echo(f"   Уровень: {result.get('level', 'N/A')}")
         click.echo()
-
 
 @cli.command()
 @click.argument('text')
@@ -228,7 +221,6 @@ def detect(text):
 
     click.echo("❌ Категория не определена")
 
-
 @cli.command()
 @click.option('--api', 'api_name', help='Проверить конкретный API (openwebui, mws, gigachat)')
 def models(api_name):
@@ -246,7 +238,7 @@ def models(api_name):
             continue
 
         click.echo(f"\n🔌 {service.upper()}:")
-        click.echo(f"  URL: {cfg.base_url}")
+        click.echo(f"   URL: {cfg.base_url}")
 
         try:
             if service == 'openwebui':
@@ -280,16 +272,16 @@ def models(api_name):
 
             model_list = client.get_models()
             if model_list:
-                click.echo(f"  Модели ({len(model_list)}):")
+                click.echo(f"   Модели ({len(model_list)}):")
                 for m in model_list[:10]:
-                    click.echo(f"    - {m}")
+                    click.echo(f"     - {m}")
                 if len(model_list) > 10:
-                    click.echo(f"    ... и еще {len(model_list) - 10}")
+                    click.echo(f"     ... и еще {len(model_list) - 10}")
             else:
-                click.echo("  ⚠️ Нет доступных моделей")
+                click.echo("   ⚠️ Нет доступных моделей")
 
         except Exception as e:
-            click.echo(f"  ❌ Ошибка: {e}")
+            click.echo(f"   ❌ Ошибка: {e}")
 
 # =============================================================================
 # PARAMETRIC COMMANDS (New)
@@ -349,7 +341,6 @@ def _init_llm_clients(settings, all_services=False):
         except Exception as e:
             logger.warning("Failed to init %s: %s", service_name, e)
     return llm_clients
-
 
 @cli.command()
 @click.argument('text')
@@ -422,12 +413,11 @@ def process_parametric(ctx, text, db, ens_index, llm, result_db):
         click.echo(f"📌 Параметры:")
         for key, value in result.params.items():
             if not key.startswith('_'):
-                click.echo(f"  {key}: {value}")
+                click.echo(f"   {key}: {value}")
 
     if result.ens_match:
         click.echo(f"🔗 ЕСН совпадение:")
-        click.echo(f"  Код: {result.ens_match.get('code')}")
-
+        click.echo(f"   Код: {result.ens_match.get('code')}")
 
 def _calc_max_workers(default_workers: Optional[int], ens_index_path: str) -> int:
     """Рассчитать безопасное число workers с учетом RAM."""
@@ -445,7 +435,27 @@ def _calc_max_workers(default_workers: Optional[int], ens_index_path: str) -> in
     logger.info("[WORKERS] CPU=%d, available_RAM=%.1fGB, safe_workers=%d, requested=%s, final=%d",
                 cpu_count, available_gb if 'available_gb' in locals() else 0, safe_by_ram if 'safe_by_ram' in locals() else 0, default_workers, n_workers)
     return n_workers
-
+def _sanitize_for_json(obj):
+    """Рекурсивно преобразует объекты в JSON-serializable формат."""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, list):
+        return [_sanitize_for_json(item) for item in obj]
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in obj.items()}
+    # Enum -> value
+    if hasattr(obj, 'value'):
+        return obj.value
+    # Объекты с to_dict()
+    if hasattr(obj, 'to_dict') and callable(obj.to_dict):
+        return _sanitize_for_json(obj.to_dict())
+    # Объекты с __dict__
+    if hasattr(obj, '__dict__'):
+        return _sanitize_for_json(obj.__dict__)
+    # Fallback: строковое представление
+    return str(obj)
 
 def _process_single_with_processor(processor, text: str) -> dict:
     """Обработка одной записи с существующим processor (thread-safe)."""
@@ -473,12 +483,11 @@ def _process_single_with_processor(processor, text: str) -> dict:
         'details': result.details
     }
 
-
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
-@click.option('--output', '-o', default='results.xlsx', help='Выходной Excel-файл')
+@click.option('--output', '-o', default='results.xlsx', help='Выходной файл (Excel .xlsx или JSON .json)')
 @click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml или result.db)')
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию')
 @click.option('--validate/--no-validate', default=True, help='Проверять валидность')
@@ -488,10 +497,10 @@ def _process_single_with_processor(processor, text: str) -> dict:
 @click.option('--workers', '-w', default=None, type=int, help='Количество worker-потоков (по умолчанию: авто по RAM/CPU)')
 @click.option('--chunk-size', default=50, type=int, help='Размер чанка для передачи в pool')
 @click.option('--article-col', default='Артикул', help='Имя колонки с артикулом во входном Excel')
-@click.option('--name-col', default='наименование', help='Имя колонки с наименованием во входном Excel')
+@click.option('--name-col', default='наименование', help='Имя колонки с наменованием во входном Excel')
 @click.pass_context
 def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col):
-    """Пакетная обработка с параметрическим поиском (ThreadPool + shared ENS index + Excel + result.db)"""
+    """Пакетная обработка с параметрическим поиском (ThreadPool + shared ENS index + Excel/JSON + result.db)"""
     import pandas as pd
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
@@ -646,69 +655,80 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
 
     click.echo(f"📊 БД: +{db_stats['inserted']} новых, {db_stats['updated']} обновлено (маска изменилась), {db_stats['unchanged']} без изменений")
 
-    # === ЭКСПОРТ В EXCEL ===
+    # === ЭКСПОРТ В ФАЙЛ (Excel или JSON в зависимости от расширения) ===
     click.echo(f"📤 Экспорт в {output}...")
+    output_str = str(output).lower()
 
-    if success_only:
-        export_results = [r for r in results if r and r.get('success')]
-        export_df = df[[df.index[i] for i, r in enumerate(results) if r and r.get('success')]]
-    else:
-        export_results = results
-        export_df = df.copy()
-
-    extra_cols = {
-        'ens_code': 'Код ЕНС',
-        'ens_name': 'Наименование ЕНС',
-        'level': 'Уровень',
-        'success': 'Распознано',
-        'confidence': 'Уверенность',
-        'match_type_ru': 'Тип сопоставления',
-        'coating_substitution': 'Подстановка покрытия',
-        'fuzzy_mismatched_params': 'Несовпавшие параметры',
-    }
-
-    for key, col_name in extra_cols.items():
-        export_df[col_name] = None
-
-    for i, result in enumerate(results):
-        if result is None:
-            continue
-        if success_only and not result.get('success'):
-            continue
-        row_idx = export_df.index[i] if not success_only else None
+    if output_str.endswith('.json'):
+        # JSON экспорт: массив результатов
         if success_only:
-            mask = (df[article_col].astype(str).str.strip() == str(articles[i]).strip()) & \
-                   (df[name_col].astype(str).str.strip() == str(names[i]).strip())
-            matching = df[mask]
-            if len(matching) == 0:
-                continue
-            row_idx = matching.index[0]
-            if row_idx not in export_df.index:
-                export_df = pd.concat([export_df, matching.iloc[[0]]], ignore_index=True)
-                row_idx = export_df.index[-1]
+            export_results = [r for r in results if r and r.get('success')]
+        else:
+            export_results = results
+        with open(output, 'w', encoding='utf-8') as f:
+            json.dump(_sanitize_for_json(export_results), f, ensure_ascii=False, indent=2)
+        click.echo(f"✅ JSON сохранен: {output} ({len(export_results)} записей)")
+    else:
+        # Excel экспорт (по умолчанию)
+        if success_only:
+            export_results = [r for r in results if r and r.get('success')]
+            export_df = df[[df.index[i] for i, r in enumerate(results) if r and r.get('success')]]
+        else:
+            export_results = results
+            export_df = df.copy()
+
+        extra_cols = {
+            'ens_code': 'Код ЕНС',
+            'ens_name': 'Наименование ЕНС',
+            'level': 'Уровень',
+            'success': 'Распознано',
+            'confidence': 'Уверенность',
+            'match_type_ru': 'Тип сопоставления',
+            'coating_substitution': 'Подстановка покрытия',
+            'fuzzy_mismatched_params': 'Несовпавшие параметры',
+        }
 
         for key, col_name in extra_cols.items():
-            val = result.get(key)
-            if key == 'success':
-                val = "Да" if val else "Нет"
-            elif key == 'confidence' and val is not None:
-                val = round(float(val), 3)
-            elif key in ('coating_substitution', 'fuzzy_mismatched_params') and val is not None:
-                val = json.dumps(val, ensure_ascii=False, default=str) if isinstance(val, dict) else str(val)
-            export_df.at[row_idx, col_name] = val
+            export_df[col_name] = None
 
-    export_df.to_excel(output, index=False)
-    click.echo(f"✅ Excel сохранен: {output} ({len(export_df)} строк)")
+        for i, result in enumerate(results):
+            if result is None:
+                continue
+            if success_only and not result.get('success'):
+                continue
+            row_idx = export_df.index[i] if not success_only else None
+            if success_only:
+                mask = (df[article_col].astype(str).str.strip() == str(articles[i]).strip()) & \
+                       (df[name_col].astype(str).str.strip() == str(names[i]).strip())
+                matching = df[mask]
+                if len(matching) == 0:
+                    continue
+                row_idx = matching.index[0]
+                if row_idx not in export_df.index:
+                    export_df = pd.concat([export_df, matching.iloc[[0]]], ignore_index=True)
+                    row_idx = export_df.index[-1]
+
+            for key, col_name in extra_cols.items():
+                val = result.get(key)
+                if key == 'success':
+                    val = "Да" if val else "Нет"
+                elif key == 'confidence' and val is not None:
+                    val = round(float(val), 3)
+                elif key in ('coating_substitution', 'fuzzy_mismatched_params') and val is not None:
+                    val = json.dumps(val, ensure_ascii=False, default=str) if isinstance(val, dict) else str(val)
+                export_df.at[row_idx, col_name] = val
+
+        export_df.to_excel(output, index=False)
+        click.echo(f"✅ Excel сохранен: {output} ({len(export_df)} строк)")
 
     # Итоговая статистика
     click.echo(f"\n📊 Итоги обработки:")
-    click.echo(f"  Всего: {stats['total']}")
-    click.echo(f"  ✅ Успешно: {stats['success']}")
-    click.echo(f"  ❌ Не распознано: {stats['failed']}")
+    click.echo(f"   Всего: {stats['total']}")
+    click.echo(f"   ✅ Успешно: {stats['success']}")
+    click.echo(f"   ❌ Не распознано: {stats['failed']}")
     if success_only:
-        click.echo(f"  🚫 Отфильтровано: {stats['filtered']}")
-    click.echo(f"  💾 БД result.db: +{db_stats['inserted']} новых, {db_stats['updated']} обновлено")
-
+        click.echo(f"   🚫 Отфильтровано: {stats['filtered']}")
+    click.echo(f"   💾 БД result.db: +{db_stats['inserted']} новых, {db_stats['updated']} обновлено")
 
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
@@ -766,7 +786,6 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         analyzer.save_json(stats, json_output)
         click.echo(f"\n💾 JSON отчет сохранен: {json_output}")
 
-
 @cli.command('result-stats')
 @click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml)')
 @click.option('--since', help='Фильтр по дате изменения (ISO format)')
@@ -780,19 +799,18 @@ def result_stats(ctx, result_db, since):
     stats = manager.get_statistics()
 
     click.echo(f"📊 Статистика result.db ({result_db_path}):")
-    click.echo(f"  Всего записей: {stats['total']}")
-    click.echo(f"  ✅ Успешно: {stats['success']}")
-    click.echo(f"  ❌ Не распознано: {stats['failed']}")
-    click.echo(f"  🔄 Обновлено после вставки: {stats['changed_after_insert']}")
-    click.echo(f"  📈 Success rate: {stats['success_rate']:.1%}")
-    click.echo(f"  По типам сопоставления:")
+    click.echo(f"   Всего записей: {stats['total']}")
+    click.echo(f"   ✅ Успешно: {stats['success']}")
+    click.echo(f"   ❌ Не распознано: {stats['failed']}")
+    click.echo(f"   🔄 Обновлено после вставки: {stats['changed_after_insert']}")
+    click.echo(f"   📈 Success rate: {stats['success_rate']:.1%}")
+    click.echo(f"   По типам сопоставления:")
     for mt, cnt in stats['by_match_type'].items():
-        click.echo(f"    {mt}: {cnt}")
+        click.echo(f"     {mt}: {cnt}")
 
     if since:
         changed = manager.get_changed_records(since=since)
         click.echo(f"\n🔄 Измененные после {since}: {len(changed)} записей")
-
 
 @cli.command('result-export')
 @click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml)')
@@ -814,7 +832,6 @@ def result_export(ctx, result_db, output, source, article_col, name_col):
         name_col=name_col
     )
     click.echo(f"✅ Экспортировано в {output}")
-
 
 @cli.command('diagnose')
 @click.argument('text')
@@ -867,8 +884,8 @@ def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db):
     standard_info = extracted.get('standard_info')
     item_type = extracted.get('item_type')
     click.echo(f"\n📌 Извлечение (Level 0):")
-    click.echo(f"  standard_info: {standard_info.to_dict() if standard_info else None}")
-    click.echo(f"  item_type: {item_type}")
+    click.echo(f"   standard_info: {standard_info.to_dict() if standard_info else None}")
+    click.echo(f"   item_type: {item_type}")
 
     if not standard_info or not item_type:
         click.echo("\n❌ Не удалось извлечь стандарт или тип — переход на LLM Direct")
@@ -880,35 +897,35 @@ def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db):
     # Step 1: Mask lookup
     click.echo(f"\n📌 Mask lookup (Level 1):")
     mask = mask_db.get_mask(standard, search_item_type)
-    click.echo(f"  Поиск: standard='{standard}', item_type='{search_item_type}'")
-    click.echo(f"  Найдена: {mask is not None}")
+    click.echo(f"   Поиск: standard='{standard}', item_type='{search_item_type}'")
+    click.echo(f"   Найдена: {mask is not None}")
 
     if mask is None:
         mask = mask_db.get_mask(standard, item_type)
         if mask:
-            click.echo(f"  Найдена (оригинальный регистр): item_type='{item_type}'")
+            click.echo(f"   Найдена (оригинальный регистр): item_type='{item_type}'")
 
     if mask is None:
-        click.echo(f"  ❌ Маска не найдена в БД")
+        click.echo(f"   ❌ Маска не найдена в БД")
         return
 
-    click.echo(f"  mask.id: {getattr(mask, 'id', 'N/A')}")
-    click.echo(f"  mask.standard: {getattr(mask, 'standard', 'N/A')}")
-    click.echo(f"  mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
-    click.echo(f"  mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
-    click.echo(f"  mask.pattern (первые 120 символов):")
-    click.echo(f"    {getattr(mask, 'pattern', 'N/A')[:120]}")
+    click.echo(f"   mask.id: {getattr(mask, 'id', 'N/A')}")
+    click.echo(f"   mask.standard: {getattr(mask, 'standard', 'N/A')}")
+    click.echo(f"   mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
+    click.echo(f"   mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
+    click.echo(f"   mask.pattern (первые 120 символов):")
+    click.echo(f"     {getattr(mask, 'pattern', 'N/A')[:120]}")
 
     # Step 2: Pattern relaxation
     effective_standard = getattr(mask, 'standard', None) or standard
     client = ParametricENSClient.__new__(ParametricENSClient)
     relaxed = client._relax_pattern(mask.pattern, standard=effective_standard)
     click.echo(f"\n📌 Relax pattern:")
-    click.echo(f"  standard передан: '{effective_standard}'")
-    click.echo(f"  relaxed (первые 200 символов):")
-    click.echo(f"    {relaxed[:200]}")
+    click.echo(f"   standard передан: '{effective_standard}'")
+    click.echo(f"   relaxed (первые 200 символов):")
+    click.echo(f"     {relaxed[:200]}")
     if len(relaxed) > 200:
-        click.echo(f"    ... ({len(relaxed)} символов всего)")
+        click.echo(f"     ... ({len(relaxed)} символов всего)")
 
     # Step 3: Regex match
     try:
@@ -916,33 +933,33 @@ def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db):
         match = compiled.search(text)
         click.echo(f"\n📌 Regex match:")
         if match:
-            click.echo(f"  ✅ MATCH")
-            click.echo(f"  groups: {match.groupdict()}")
+            click.echo(f"   ✅ MATCH")
+            click.echo(f"   groups: {match.groupdict()}")
         else:
-            click.echo(f"  ❌ NO MATCH")
+            click.echo(f"   ❌ NO MATCH")
             for i in range(len(text), 0, -1):
                 if compiled.search(text[:i]):
-                    click.echo(f"  longest matching prefix: '{text[:i]}'")
+                    click.echo(f"   longest matching prefix: '{text[:i]}'")
                     break
             else:
-                click.echo(f"  no prefix matches at all")
+                click.echo(f"   no prefix matches at all")
     except re.error as e:
         click.echo(f"\n📌 Regex match:")
-        click.echo(f"  ❌ INVALID REGEX: {e}")
-        click.echo(f"  pattern: {relaxed[:100]}")
+        click.echo(f"   ❌ INVALID REGEX: {e}")
+        click.echo(f"   pattern: {relaxed[:100]}")
 
     # Step 4: Full processor result
     click.echo(f"\n📌 Full processor result:")
     result = processor.process(text)
-    click.echo(f"  level: {result.level.value}")
-    click.echo(f"  success: {result.success}")
-    click.echo(f"  params: {result.params}")
-    click.echo(f"  ens_code: {result.ens_match.get('code') if result.ens_match else None}")
-    click.echo(f"  ens_params: {result.ens_params}")
-    click.echo(f"  confidence: {result.confidence:.3f}")
-    click.echo(f"  processing_time_ms: {result.processing_time_ms:.1f}")
+    click.echo(f"   level: {result.level.value}")
+    click.echo(f"   success: {result.success}")
+    click.echo(f"   params: {result.params}")
+    click.echo(f"   ens_code: {result.ens_match.get('code') if result.ens_match else None}")
+    click.echo(f"   ens_params: {result.ens_params}")
+    click.echo(f"   confidence: {result.confidence:.3f}")
+    click.echo(f"   processing_time_ms: {result.processing_time_ms:.1f}")
     if result.details:
-        click.echo(f"  details: {result.details}")
+        click.echo(f"   details: {result.details}")
 
     # === СОХРАНЕНИЕ В result.db (ВСЕГДА) ===
     result_manager = ResultDatabaseManager(db_path=result_db_path)
@@ -1045,13 +1062,13 @@ def analyze(excel_file, index, sample):
     stats = analyze_nomenclature(excel_file, index, sample_size=sample)
 
     click.echo(f"📊 Анализ (выборка {sample}):")
-    click.echo(f"  Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
-    click.echo(f"  Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
+    click.echo(f"   Regex разбор: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
+    click.echo(f"   Требует LLM: {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
 
     if 'estimated_regex_parsed' in stats:
         total = stats.get('total', 0)
         click.echo(f"\n📊 Экстраполяция на {total} записей:")
-        click.echo(f"  Ожидается regex: ~{stats['estimated_regex_parsed']}")
+        click.echo(f"   Ожидается regex: ~{stats['estimated_regex_parsed']}")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -1112,7 +1129,7 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
         click.echo(f"🔧 Отладочный режим: обрабатываем {len(standards)} пар:")
         for (std, itype), ex_list in all_items[:limit]:
             real_type = ex_list[0].get('тип_изделия') or ex_list[0].get('тип', itype)
-            click.echo(f"  - {real_type} / {std} ({len(ex_list)} примеров)")
+            click.echo(f"   - {real_type} / {std} ({len(ex_list)} примеров)")
 
     mask_db = MaskDatabase(db_path=db)
 
@@ -1155,9 +1172,9 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
                         stats['activated'] += 1
 
     click.echo(f"\n📊 Результат:")
-    click.echo(f"  Уже активных: {stats['existing']}")
-    click.echo(f"  Сгенерировано: {stats['generated']}")
-    click.echo(f"  Активировано: {stats['activated']}")
+    click.echo(f"   Уже активных: {stats['existing']}")
+    click.echo(f"   Сгенерировано: {stats['generated']}")
+    click.echo(f"   Активировано: {stats['activated']}")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД')
