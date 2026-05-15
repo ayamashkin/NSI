@@ -6,11 +6,12 @@ ENS Reference Loader Module
 и авто-генерацию snake_case ключей для немапленных колонок.
 
 LAST_FIXES:
-  - 2026-05-08 14:00 UTC+3 — восстановлены ENSCategory, ENSSchema, PromptsBasedTypeDetector из git
-  - 2026-05-08 13:50 UTC+3 — добавлен _auto_snake_case fallback в _row_to_normalized_dict
-  - 2026-05-08 13:40 UTC+3 — добавлены _transliterate и _auto_snake_case
-  - 2026-05-08 10:30 UTC+3 — авто-транслитерация немапленных колонок в snake_case
-  - 2026-05-08 10:15 UTC+3 — fallback _auto_snake_case для всех неизвестных колонок
+  2026-05-15 09:59 UTC+3 — _auto_snake_case: убрана транслитерация, ключи теперь на русском языке
+  2026-05-08 14:00 UTC+3 — восстановлены ENSCategory, ENSSchema, PromptsBasedTypeDetector из git
+  2026-05-08 13:50 UTC+3 — добавлен _auto_snake_case fallback в _row_to_normalized_dict
+  2026-05-08 13:40 UTC+3 — добавлены _transliterate и _auto_snake_case
+  2026-05-08 10:30 UTC+3 — авто-транслитерация немапленных колонок в snake_case
+  2026-05-08 10:15 UTC+3 — fallback _auto_snake_case для всех неизвестных колонок
 """
 
 import re
@@ -24,54 +25,32 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------------
-# Транслитерация
+# Нормализация названий колонок (русские названия, без транслитерации)
 # ---------------------------------------------------------------------------
-
-_TRANSLIT_MAP = {
-    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo',
-    'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'j', 'к': 'k', 'л': 'l', 'м': 'm',
-    'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
-    'ф': 'f', 'х': 'kh', 'ц': 'c', 'ч': 'ch', 'ш': 'sh', 'щ': 'shch',
-    'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
-    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo',
-    'Ж': 'Zh', 'З': 'Z', 'И': 'I', 'Й': 'J', 'К': 'K', 'Л': 'L', 'М': 'M',
-    'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
-    'Ф': 'F', 'Х': 'Kh', 'Ц': 'C', 'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch',
-    'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
-}
-
-
-def _transliterate(text: str) -> str:
-    """Простая транслитерация русских букв в латиницу."""
-    return ''.join(_TRANSLIT_MAP.get(c, c) for c in text)
-
 
 def _auto_snake_case(col_name: str) -> str:
     """
     Авто-генерация snake_case ключа из названия колонки.
-    Транслитерирует кириллицу, нормализует спецсимволы.
+    Сохраняет русские буквы, нормализует спецсимволы.
     """
     if not col_name:
         return 'unknown'
     # Заменяем скобки, запятые, слэши на пробелы
-    name = re.sub(r'[(),/]', ' ', col_name)
+    name = re.sub(r'[\[\](),/]', ' ', col_name)
     # Точки → подчеркивание
     name = name.replace('.', '_')
     # Убираем лишние пробелы
     name = ' '.join(name.split())
-    # Транслитерация
-    name = _transliterate(name)
     # Пробелы → подчеркивания
     name = re.sub(r'\s+', '_', name.strip())
     name = name.lower()
     # Убираем множественные подчеркивания
     name = re.sub(r'_+', '_', name)
-    # Убираем не-алфавитно-цифровые символы (кроме подчеркивания)
-    name = re.sub(r'[^a-z0-9_]', '', name)
+    # Убираем не-буквенно-цифровые символы, кроме подчеркивания и русских букв
+    # Разрешаем: a-z, 0-9, _, а-я, ё
+    name = re.sub(r'[^a-z0-9_а-яё]', '', name)
     return name.strip('_') or 'unknown'
-
 
 # ---------------------------------------------------------------------------
 # Классы из оригинального loader.py (git)
@@ -86,7 +65,6 @@ class ENSCategory(Enum):
     EKB = "ekb"
     MATERIALS = "materials"
     UNKNOWN = "unknown"
-
 
 @dataclass
 class ENSColumnMapping:
@@ -170,7 +148,6 @@ class ENSColumnMapping:
                 return mapped_name
         return None
 
-
 class PromptsBasedTypeDetector:
     """Определение типа номенклатуры на основе prompts.yaml (с кэшированием)."""
 
@@ -215,7 +192,7 @@ class PromptsBasedTypeDetector:
         try:
             with open(self.prompts_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
-                self.prompts = data.get('prompts', {})
+            self.prompts = data.get('prompts', {})
 
             for pid, cfg in self.prompts.items():
                 cat = cfg.get('category', '')
@@ -271,8 +248,8 @@ class PromptsBasedTypeDetector:
                 else:
                     if keyword.lower() in text_lower:
                         score += 1
-                        if text_lower.startswith(keyword.lower()):
-                            score += 1
+                    if text_lower.startswith(keyword.lower()):
+                        score += 1
 
             if score > best_score:
                 best_score = score
@@ -282,7 +259,6 @@ class PromptsBasedTypeDetector:
         confidence = min(best_score / 5, 1.0) if best_score > 0 else 0.0
         return best_match, best_category, confidence
 
-
 @dataclass
 class ENSSchema:
     """Гибкая схема колонок для категории ЕСН."""
@@ -290,7 +266,6 @@ class ENSSchema:
     column_mapping: Dict[str, str] = field(default_factory=dict)
     content_indicators: List[str] = field(default_factory=list)
     name_columns: List[str] = field(default_factory=list)
-
 
 class ENSSchemaRegistry:
     """Реестр схем с адаптивным определением."""
@@ -300,7 +275,7 @@ class ENSSchemaRegistry:
 
     @classmethod
     def detect_schema(cls, df: pd.DataFrame, sample_rows: int = 10,
-                      prompts_path: Optional[str] = None) -> Tuple[ENSCategory, Optional[str], float]:
+                        prompts_path: Optional[str] = None) -> Tuple[ENSCategory, Optional[str], float]:
         """Автоопределение схемы по колонкам, содержимому и prompts.yaml."""
         columns = set((c or '').lower() for c in df.columns if c)
 
@@ -329,7 +304,6 @@ class ENSSchemaRegistry:
                 return detected_cat, prompt_id, prompt_confidence
 
         return ENSCategory.UNKNOWN, None, 0.0
-
 
 # ---------------------------------------------------------------------------
 # ENSLoader с авто-маппингом
@@ -410,7 +384,7 @@ class ENSLoader:
                 self._reverse_mapping[auto_mapped] = col
                 auto_pattern_mapped += 1
                 continue
-            # АВТО-SNAKE_CASE: транслитерация для оставшихся колонок
+            # АВТО-SNAKE_CASE: нормализация для оставшихся колонок (русские названия)
             snake_key = _auto_snake_case(col)
             if snake_key and snake_key != 'unknown':
                 mapping[col] = snake_key
@@ -478,13 +452,14 @@ class ENSLoader:
                     except:
                         pass
 
-            # Используем маппинг из конфига (включая авто-snake_case)
+            # Используем маппинг из конфига (включая авто-snake_case на русском)
             key = self.schema.column_mapping.get(col)
             if key is None:
-                # Крайний fallback — авто-snake_case
+                # Крайний fallback — авто-snake_case на русском
                 key = _auto_snake_case(col)
             result[key] = value
 
+            # Также сохраняем оригинальное название колонки с префиксом _original_
             col_safe = (col or "").lower().replace(" ", "_")
             original_key = f"_original_{col_safe}"
             result[original_key] = value
@@ -541,16 +516,16 @@ class ENSLoader:
             item['_detected_category'] = category
             item['_detection_confidence'] = confidence
 
-            if category:
-                type_map = {
-                    'hardware': 'крепеж',
-                    'hardware_washer': 'шайба',
-                    'rolledmetal': 'прокат',
-                    'eri': 'эри',
-                    'ekb': 'экб',
-                }
-                item['тип'] = type_map.get(category, category)
-                item['_implicit_тип'] = True
+        if category:
+            type_map = {
+                'hardware': 'крепеж',
+                'hardware_washer': 'шайба',
+                'rolledmetal': 'прокат',
+                'eri': 'эри',
+                'ekb': 'экб',
+            }
+            item['тип'] = type_map.get(category, category)
+            item['_implicit_тип'] = True
 
     def get_column_info(self) -> Dict[str, Any]:
         """Получение информации о колонках файла."""
@@ -584,7 +559,7 @@ class ENSLoader:
                 continue
 
             params = {k: v for k, v in item.items()
-                     if not k.startswith('_') and v is not None and v != ''}
+                      if not k.startswith('_') and v is not None and v != ''}
 
             if len(params) >= min_params:
                 examples.append({
@@ -652,7 +627,7 @@ class ENSLoader:
         return self
 
     def find_similar(self, query: str, k: int = 5) -> List[Dict]:
-        """Поиск похожих записей в ЕСН."""
+        """Поиск похожих записей в ЕНС."""
         if not hasattr(self, 'vectorizer'):
             self.build_fuzzy_index()
 
