@@ -1,7 +1,7 @@
 """
 AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
-LAST_FIX: 2026-05-07 08:28 UTC+3 — strict extracted vs expected check; coating token-similarity; mismatches report
+LAST_FIX: 2026-05-15 12:52 UTC+3 — _get_ens_examples: поддержка 'наименование_типа' (ENS mapping) помимо 'тип_изделия'
 """
 
 import re
@@ -85,6 +85,7 @@ class AutoValidator:
         b_str = str(b).lower().strip()
         if a_str == b_str:
             return 1.0
+
         def _extract_tokens(text):
             raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
             cleaned = []
@@ -93,6 +94,7 @@ class AutoValidator:
                 if letters:
                     cleaned.append(letters)
             return set(cleaned)
+
         tokens_a = _extract_tokens(a_str)
         tokens_b = _extract_tokens(b_str)
         if not tokens_a or not tokens_b:
@@ -107,7 +109,7 @@ class AutoValidator:
             import pickle
             with open(self.ens_index_path, 'rb') as f:
                 data = pickle.load(f)
-                self._ens_items = data.get('items', [])
+            self._ens_items = data.get('items', [])
             logger.info(f"Loaded {len(self._ens_items)} ENS items for validation")
         except Exception as e:
             logger.warning(f"Failed to load ENS index: {e}")
@@ -204,7 +206,7 @@ class AutoValidator:
     def _get_ens_examples(self, standard: str, item_type: str) -> List[Dict]:
         """
         Получение примеров из ЕСН по стандарту и типу.
-        Тип изделия берется из 'тип_изделия' (поле 'Наименование типа' из ЕСН).
+        Тип изделия берется из 'тип_изделия' или 'наименование_типа' (поле 'Наименование типа' из ЕСН).
         """
         if not self._ens_items:
             return []
@@ -222,8 +224,8 @@ class AutoValidator:
                 standard_normalized in item_ntd
             )
 
-            # Проверяем тип — СНАЧАЛА по 'тип_изделия' (Наименование типа из ЕСН)
-            item_type_val = str(item.get('тип_изделия', '')).lower()
+            # Проверяем тип — СНАЧАЛА по 'тип_изделия', затем 'наименование_типа' (ENS mapping)
+            item_type_val = str(item.get('тип_изделия') or item.get('наименование_типа', '')).lower()
             if not item_type_val:
                 # Fallback на 'тип' ( legacy )
                 item_type_val = str(item.get('тип', '')).lower()

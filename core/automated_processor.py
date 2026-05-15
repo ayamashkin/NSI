@@ -3,9 +3,10 @@ Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2026-05-14
+VERSION: 2026-05-15
 
 LAST_FIXES:
+ 2026-05-15 12:52 UTC+3 — _generate_mask: item_type из 'наименование_типа' ENS; _parametric_match: skip_fields из settings.output.ens_params_skip_fields
  2026-05-14 13:43 UTC+3 — ThreadPoolExecutor support: threading.Lock для _coating_rules_cache, _ens_candidates_cache (thread-safety)
  2026-05-14 10:32 UTC+3 — кэш coating_rules (одна загрузка на сессию) + lazy debug-логи + делегация ENS поиска в индексы (производительность)
  2026-05-08 13:15 UTC+3 — match_type: поддержка params_mask_exact + params_ens_exact
@@ -43,16 +44,18 @@ def _get_matching_config():
 
 logger = logging.getLogger(__name__)
 
+
 class ProcessingLevel(Enum):
     """Уровни обработки."""
-    LEVEL_0_EXTRACT = "standard_extraction"  # Извлечение стандарта
-    LEVEL_1_MASK_LOOKUP = "mask_lookup"  # Проверка MaskDatabase
-    LEVEL_2_LLM_GENERATE = "llm_generation"  # Генерация маски
-    LEVEL_3_VALIDATE = "auto_validation"  # Авто-валидация
-    LEVEL_5_SAVE = "save_mask"  # Сохранение маски
-    LEVEL_6_PARAMETRIC_MATCH = "parametric_match"  # Параметрическое сопоставление
-    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"  # TF-IDF fallback
-    LEVEL_8_LLM_DIRECT = "llm_direct"  # Прямой LLM вызов
+    LEVEL_0_EXTRACT = "standard_extraction"       # Извлечение стандарта
+    LEVEL_1_MASK_LOOKUP = "mask_lookup"           # Проверка MaskDatabase
+    LEVEL_2_LLM_GENERATE = "llm_generation"     # Генерация маски
+    LEVEL_3_VALIDATE = "auto_validation"        # Авто-валидация
+    LEVEL_5_SAVE = "save_mask"                    # Сохранение маски
+    LEVEL_6_PARAMETRIC_MATCH = "parametric_match" # Параметрическое сопоставление
+    LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"   # TF-IDF fallback
+    LEVEL_8_LLM_DIRECT = "llm_direct"           # Прямой LLM вызов
+
 
 class ProcessingResult:
     """Результат обработки."""
@@ -91,6 +94,7 @@ class ProcessingResult:
             and 'params' in self.ens_match and self.ens_match['params']):
             return self.ens_match['params']
         return None
+
 
 class AutomatedParametricProcessor:
     """
@@ -304,13 +308,14 @@ class AutomatedParametricProcessor:
             logger.warning("Not enough examples for %s/%s", standard, item_type)
             return None
 
-        # Берем точный тип из ЕСН (тип_изделия = 'Наименование типа')
+        # Берем точный тип из ЕСН (тип_изделия или наименование_типа = 'Наименование типа')
         ens_item_type = item_type
         if examples:
             first_example = examples[0]
-            type_from_ens = first_example.get('тип_изделия')
-            if type_from_ens and type_from_ens.strip():
-                ens_item_type = type_from_ens.strip().lower()
+            # Проверяем ОБА возможных имени поля (тип_изделия и наименование_типа)
+            type_from_ens = first_example.get('тип_изделия') or first_example.get('наименование_типа')
+            if type_from_ens and str(type_from_ens).strip():
+                ens_item_type = str(type_from_ens).strip().lower()
                 logger.info(
                     "[AutoProcessor] Тип из ЕСН: '%s' (был: '%s')",
                     ens_item_type, item_type
@@ -519,8 +524,8 @@ class AutomatedParametricProcessor:
 
         Логика:
         1. Делаем пробный fuzzy pass для определения марки материала
-        2. Если марка требует substitution (например, 14Х17Н2 → Н.Кд вместо Кд)
-           → заменяем покрытие в params
+        2. Если марка требует substitution (например, 14Х17Н2 -> Н.Кд вместо Кд)
+           -> заменяем покрытие в params
         3. Возвращаем (возможно изменённые) params + информацию о substitution
 
         Returns:
@@ -600,7 +605,7 @@ class AutomatedParametricProcessor:
                 }
             }
             logger.info(
-                "[COATING_SUBST] Applied: '%s' → '%s' (material='%s', rule=%s)",
+                "[COATING_SUBST] Applied: '%s' -> '%s' (material='%s', rule=%s)",
                 coating, correct_coating, material, rule.get('note', '')
             )
             return new_params, substitution_info
@@ -762,7 +767,7 @@ class AutomatedParametricProcessor:
 
         remapped = dict(params)
         aliases = {
-            # Кривые имена групп → правильные ENS-имена
+            # Кривые имена групп -> правильные ENS-имена
             'наружный_диаметр_диаметр_вписа': 'номинальный_диаметр_резьбы',
             'наружный_диаметр': 'номинальный_диаметр_резьбы',
             'диаметр_вписанной_окружности': 'номинальный_диаметр_резьбы',
@@ -779,7 +784,7 @@ class AutomatedParametricProcessor:
                 if correct in remapped and correct == 'номинальный_диаметр_резьбы':
                     remapped['длина'] = remapped[correct]
                 remapped[correct] = value
-                logger.debug("[REMAP] %s → %s: %s", wrong, correct, value)
+                logger.debug("[REMAP] %s -> %s: %s", wrong, correct, value)
 
         return remapped
 
@@ -1123,7 +1128,7 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.debug("[PARAM_MATCH] Generic parse on text error: %s", e)
 
-        # НОВАЯ ЛОГИКА: generic pattern → parse ens_name → _calculate_match_score_v2
+        # НОВАЯ ЛОГИКА: generic pattern -> parse ens_name -> _calculate_match_score_v2
         v2_score = 0.0
         v2_match_type = None
         v2_computed = False  # был ли V2 score вычислен
@@ -1191,12 +1196,19 @@ class AutomatedParametricProcessor:
                 if ens_item:
                     import math
                     # Жёсткая фильтрация: только технические параметры изделия
-                    skip_fields = {
+                    # Используем ens_params_skip_fields из настроек + обязательные служебные
+                    base_skip = {
                         'нтд', 'код', 'наименование', 'name', 'mdm_key',
                         'полное_наименование', 'наименование_типа', 'наименование_типа.1',
                         'единицы_измерения', 'тип', '_implicit_тип',
                         '_match_score', '_match_type', 'item_type', 'standard'
                     }
+                    # Добавляем поля из конфигурации output.ens_params_skip_fields
+                    config_skip = set()
+                    if self.settings and hasattr(self.settings, 'output') and hasattr(self.settings.output, 'ens_params_skip_fields'):
+                        config_skip = set(self.settings.output.ens_params_skip_fields)
+                    skip_fields = base_skip | config_skip
+
                     ens_params_from_index = {}
                     for k, v in ens_item.items():
                         # Пропускаем служебные поля: всё что начинается с _
@@ -1219,7 +1231,7 @@ class AutomatedParametricProcessor:
             except Exception as e:
                 logger.warning("[PARAM_MATCH] Failed to get ENS params: %s", e)
 
-        # Нормализация типов: float 12.0 → int 12, str "2.0" → int 2
+        # Нормализация типов: float 12.0 -> int 12, str "2.0" -> int 2
         if final_matched_params:
             final_matched_params = self._normalize_params(final_matched_params)
             logger.debug("[PARAM_MATCH] Normalized params: %s", final_matched_params)
@@ -1307,7 +1319,7 @@ class AutomatedParametricProcessor:
                 'mdm_key': final_mdm_key or final_ens_code,
                 'score': final_score,
                 'type': match_type_out,
-                'params': ens_params_from_index  # ← из ENS индекса, нормализованные типы
+                'params': ens_params_from_index  # <- из ENS индекса, нормализованные типы
             } if final_ens_code else None,
             confidence=final_score,
             ens_params=ens_params_from_index,
@@ -1316,8 +1328,8 @@ class AutomatedParametricProcessor:
             details={
                 'mask_id': mask.id,
                 'mask_pattern': mask.pattern,
-                'match_type': match_type_out,  # ← тип сопоставления (eng)
-                'match_type_ru': match_type_ru,  # ← тип сопоставления (rus)
+                'match_type': match_type_out,  # <- тип сопоставления (eng)
+                'match_type_ru': match_type_ru,  # <- тип сопоставления (rus)
                 'extracted_standard': extracted.get('standard_info'),
                 'extracted_type': extracted.get('item_type'),
                 'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,
@@ -1337,9 +1349,9 @@ class AutomatedParametricProcessor:
     def _normalize_value_types(self, value: Any) -> Any:
         """
         Нормализация типов значений параметров.
-        - float 12.0 → int 12
-        - str "2.0" → int 2
-        - str "abc" → str "abc" (не меняем)
+        - float 12.0 -> int 12
+        - str "2.0" -> int 2
+        - str "abc" -> str "abc" (не меняем)
         """
         if isinstance(value, float):
             if value == int(value):
