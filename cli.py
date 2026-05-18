@@ -393,10 +393,12 @@ def process_parametric(ctx, text, db, ens_index, llm, result_db):
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
         use_llm_generation=llm,
-        settings=settings
+        settings=settings,
+        result_db_path=result_db_path,
+        cache_ttl_days=7
     )
 
-    result = processor.process(text)
+    result = processor.process(text, article="", force=force)
 
     # === СОХРАНЕНИЕ В result.db (ВСЕГДА) ===
     result_manager = ResultDatabaseManager(db_path=result_db_path)
@@ -478,9 +480,9 @@ def _sanitize_for_json(obj):
     # Fallback: строковое представление
     return str(obj)
 
-def _process_single_with_processor(processor, text: str) -> dict:
+def _process_single_with_processor(processor, text: str, article: str = "", force: bool = False) -> dict:
     """Обработка одной записи с существующим processor (thread-safe)."""
-    result = processor.process(text)
+    result = processor.process(text, article=article, force=force)
 
     return {
         'text': result.text,
@@ -519,8 +521,9 @@ def _process_single_with_processor(processor, text: str) -> dict:
 @click.option('--chunk-size', default=50, type=int, help='Размер чанка для передачи в pool')
 @click.option('--article-col', default='Артикул', help='Имя колонки с артикулом во входном Excel')
 @click.option('--name-col', default='наименование', help='Имя колонки с наменованием во входном Excel')
+@click.option('--force', '-f', is_flag=True, help='Принудительный пересчёт (игнорировать кэш result.db)')
 @click.pass_context
-def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col):
+def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, success_only, include_details, coating_map, workers, chunk_size, article_col, name_col, force):
     """Пакетная обработка с параметрическим поиском (ThreadPool + shared ENS index + Excel/JSON + result.db)"""
     import pandas as pd
     from tqdm import tqdm
@@ -584,7 +587,9 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
         use_llm_generation=llm,
-        settings=settings
+        settings=settings,
+        result_db_path=result_db_path,
+        cache_ttl_days=7
     )
     click.echo("✅ Processor инициализирован")
 
@@ -599,7 +604,7 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = {}
             for i, text in enumerate(texts):
-                future = executor.submit(_process_single_with_processor, processor, text)
+                future = executor.submit(_process_single_with_processor, processor, text, articles[i], force)
                 futures[future] = i
 
             with tqdm(total=len(texts), desc="Обработка") as pbar:
@@ -625,7 +630,7 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
                     pbar.update(1)
     else:
         for i, text in enumerate(tqdm(texts, desc="Обработка")):
-            result = _process_single_with_processor(processor, text)
+            result = _process_single_with_processor(processor, text, articles[i], force)
             results[i] = result
             stats['total'] += 1
             if result['success']:
@@ -758,6 +763,8 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
     click.echo(f"   Всего: {stats['total']}")
     click.echo(f"   ✅ Успешно: {stats['success']}")
     click.echo(f"   ❌ Не распознано: {stats['failed']}")
+    if processor._cache_stats['hits'] > 0:
+        click.echo(f"   💾 Из кэша result.db: {processor._cache_stats['hits']} (пропущено повторных распознаваний)")
     if success_only:
         click.echo(f"   🚫 Отфильтровано: {stats['filtered']}")
     click.echo(f"   💾 БД result.db: +{db_stats['inserted']} новых, {db_stats['updated']} обновлено")
@@ -792,7 +799,9 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
         use_llm_generation=llm,
-        settings=settings
+        settings=settings,
+        result_db_path=result_db_path,
+        cache_ttl_days=7
     )
 
     # Инициализация CoatingMapper
@@ -872,8 +881,9 @@ def result_export(ctx, result_db, output, source, article_col, name_col):
 @click.option('--llm', '-l', is_flag=True, help='Разрешить LLM генерацию масок')
 @click.option('--coating-map', '-c', help='Путь к Excel-справочнику покрытий')
 @click.option('--result-db', '-r', default=None, help='Путь к result.db (default: из config.yaml)')
+@click.option('--force', '-f', is_flag=True, help='Принудительный пересчёт (игнорировать кэш)')
 @click.pass_context
-def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db):
+def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db, force):
     """Диагностика обработки одной строки номенклатуры + сохранение в result.db."""
     import re
     from core.mask_database import MaskDatabase
@@ -904,7 +914,9 @@ def diagnose(ctx, text, db, ens_index, llm, coating_map, result_db):
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
         use_llm_generation=llm,
-        settings=settings
+        settings=settings,
+        result_db_path=result_db_path,
+        cache_ttl_days=7
     )
 
     click.echo(f"\n{'=' * 60}")

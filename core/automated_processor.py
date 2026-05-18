@@ -16,8 +16,11 @@ LAST_FIXES:
  2026-05-07 14:50 UTC+3 — match_type + match_type_ru в results.json (тип сопоставления на русском)
 """
 
+import json
 import logging
+import sqlite3
 import threading
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -107,7 +110,9 @@ class AutomatedParametricProcessor:
         min_mask_score: float = 0.85,
         max_llm_retries: int = 3,
         use_llm_generation: bool = True,
-        settings: Optional[Any] = None
+        settings: Optional[Any] = None,
+        result_db_path: Optional[str] = None,
+        cache_ttl_days: int = 7
     ):
         self.mask_db = mask_db
         self.llm_clients = llm_clients or {}
@@ -116,6 +121,9 @@ class AutomatedParametricProcessor:
         self.max_llm_retries = max_llm_retries
         self.use_llm_generation = use_llm_generation
         self.settings = settings
+        self.result_db_path = result_db_path
+        self.cache_ttl_days = cache_ttl_days
+        self._cache_stats = {'hits': 0, 'misses': 0}
 
         # === ПРОИЗВОДИТЕЛЬНОСТЬ: кэши ===
         self._coating_rules_cache: Optional[Dict] = None
@@ -165,10 +173,30 @@ class AutomatedParametricProcessor:
 
         logger.info("AutomatedParametricProcessor initialized")
 
-    def process(self, text: str) -> ProcessingResult:
-        """Обработка одной строки номенклатуры."""
+    def process(self, text: str, article: str = "", force: bool = False) -> ProcessingResult:
+        """
+        Обработка одной строки номенклатуры.
+        Поддерживает кэширование через result.db.
+
+        Args:
+            text: Строка номенклатуры
+            article: Артикул (для ключа кэша)
+            force: Принудительный пересчёт (игнорировать кэш)
+
+        Returns:
+            ProcessingResult
+        """
         import time
         start_time = time.time()
+
+        # === CACHE CHECK ===
+        if not force and self.result_db_path:
+            cached = self._check_cache(article, text)
+            if cached:
+                logger.info("[CACHE] Returning cached result for '%s' (code=%s, mask=%s)",
+                            text[:50], cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
+                return self._result_from_cache(cached)
+            self._cache_stats['misses'] += 1
 
         clean_text = text.strip().rstrip(',.;: ')
         if clean_text != text.strip():
@@ -1063,16 +1091,29 @@ class AutomatedParametricProcessor:
         elif is_name_exact and final_ens_code:
             match_type_out = 'name_exact'
             match_type_ru = 'Совпадение по наименованию'
-        elif match_result.ens_code and match_result.match_type in ('exact', 'params_ens_exact'):
-            match_type_out = 'parametric_full'
-            match_type_ru = 'Полное совпадение параметров с индексом'
-        elif match_result.ens_code and match_result.match_type == 'params_mask_exact':
-            match_type_out = 'parametric_full'
-            match_type_ru = 'Полное совпадение параметров с маской ENS'
-        elif match_result.ens_code and match_result.match_type == 'v2_exact':
-            match_type_out = 'v2_exact'
-            match_type_ru = 'Полное совпадение V2'
-        elif fuzzy_ens_code and not match_result.ens_code:
+        elif match_result.ens_code:
+            # Map all parametric_client match_types explicitly
+            pc_type = match_result.match_type
+            if pc_type == 'name_exact' or is_name_exact:
+                match_type_out = 'name_exact'
+                match_type_ru = 'Совпадение по наименованию'
+            elif pc_type in ('params_ens_exact', 'params_mask_exact', 'exact'):
+                match_type_out = 'parametric_full'
+                match_type_ru = 'Полное совпадение параметров'
+            elif pc_type == 'v2_exact':
+                match_type_out = 'v2_exact'
+                match_type_ru = 'Полное совпадение V2'
+            elif pc_type == 'partial':
+                match_type_out = 'parametric_partial'
+                match_type_ru = 'Частичное совпадение параметров'
+            elif pc_type == 'fuzzy_fallback':
+                match_type_out = 'fuzzy_fallback'
+                match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
+            else:
+                match_type_out = pc_type or 'unknown'
+                match_type_ru = 'Сопоставление по параметрам'
+        elif fuzzy_ens_code:
+            # Если fuzzy нашел, но V2 подтвердил exact — это parametric_full
             if v2_computed and v2_score >= 0.99:
                 match_type_out = 'parametric_full'
                 match_type_ru = 'Полное совпадение параметров (V2 + fuzzy)'
