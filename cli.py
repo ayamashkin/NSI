@@ -4,6 +4,8 @@ Nomenclature Processor CLI
 Полный интерфейс для обработки номенклатуры (LLM + Parametric modes)
 
 LAST_FIX:
+ 2026-05-18 12:25 UTC+3 — generate_masks: передаем только наименования (строки), не полные словари ЕНС; лимит 30 примеров
+ 2026-05-18 12:25 UTC+3 — generate_masks: MWSClient → MWSGPTClient, диагностика LLM клиентов
  2026-05-14 15:30 UTC+3 — result.db: ВСЕГДА сохраняем результаты, путь из config.yaml (result_database.path), legacy results.db удален
  2026-05-14 13:43 UTC+3 — ThreadPoolExecutor вместо ProcessPoolExecutor: один ENS индекс в памяти, shared между threads
  2026-05-14 11:54 UTC+3 — batch: Excel input/output + result.db upsert с mask_pattern_hash
@@ -852,7 +854,7 @@ def result_export(ctx, result_db, output, source, article_col, name_col):
     )
     click.echo(f"✅ Экспортировано в {output}")
 
-@cli.command('diagnose')
+@cli.command()
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕСН')
@@ -1175,7 +1177,14 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
                 continue
 
             if generator:
-                mask, _ = generator.generate_mask(std, item_type, examples)
+                # === ИЗВЛЕКАЕМ ТОЛЬКО НАИМЕНОВАНИЯ (строки), не полные словари ЕНС ===
+                example_names = [
+                    ex.get('наименование') or ex.get('полное_наименование') or ex.get('name', '')
+                    for ex in examples[:30]  # ограничиваем 30 примерами для скорости
+                ]
+                example_names = [n for n in example_names if n]
+
+                mask, _ = generator.generate_mask(std, item_type, example_names)
                 if mask:
                     # Нормализуем item_type в uppercase (стандарты: БОЛТ, ВИНТ, ШАЙБА)
                     item_type_normalized = item_type.upper()

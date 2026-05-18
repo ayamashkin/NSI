@@ -3,14 +3,16 @@ LLM Mask Generator
 Генерация regex-масок для стандартов через LLM с fallback по провайдерам.
 
 LAST_FIXES:
+  2026-05-18 11:50 UTC+3 — Восстановлены _save_debug_prompt/_save_debug_response
   2026-05-18 11:16 UTC+3 — _parse_response: поддержка ```python + balanced braces JSON extraction
   2026-05-18 10:35 UTC+3 — _call_llm: работа с Dict-ответами (success/content/raw/error/model)
-  2026-05-18 10:35 UTC+3 — _build_provider_priority: диагностика default_service
 """
 
 import json
 import logging
 import re
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from api_clients.base import BaseLLMClient
@@ -73,12 +75,14 @@ class LLMMaskGenerator:
     ) -> tuple[Optional[Dict[str, Any]], None]:
         """Генерация маски через LLM с fallback по провайдерам."""
         prompt = self._build_prompt(standard, item_type, examples)
+        self._save_debug_prompt(standard, item_type, prompt)
 
         for attempt in range(1, self.max_retries + 1):
             for provider in self.provider_priority:
                 logger.info("Attempt %d/%d via %s", attempt, self.max_retries, provider)
                 response = self._call_llm(provider, prompt, attempt)
                 if response:
+                    self._save_debug_response(standard, item_type, attempt, response)
                     mask = self._parse_response(response, standard, item_type)
                     if mask:
                         logger.info("Generated mask via %s (attempt %d)", provider, attempt)
@@ -275,3 +279,60 @@ class LLMMaskGenerator:
             'params': params,
             'required': required
         }
+
+    # ------------------------------------------------------------------
+    # DEBUG SAVE METHODS (восстановлены из версии до 15.05)
+    # ------------------------------------------------------------------
+
+    def _sanitize_filename(self, text: str) -> str:
+        """Санитизация строки для использования в имени файла."""
+        sanitized = re.sub(r'[\\/:*?"<>|]', '_', str(text))
+        sanitized = re.sub(r'_+', '_', sanitized)
+        return sanitized.strip('_')[:80]
+
+    def _save_debug_prompt(self, standard: str, item_type: str, prompt: str):
+        self._save_debug_file(standard, item_type, "prompt", prompt)
+
+    def _save_debug_response(self, standard: str, item_type: str, attempt: int, response: str):
+        self._save_debug_file(standard, item_type, f"response_a{attempt}", response)
+
+    def _save_debug_file(self, standard: str, item_type: str, suffix: str, content: str):
+        """Сохранение debug-файла (prompt/response)."""
+        save_enabled = False
+        debug_dir = "prompts/debug"
+
+        if self.settings and hasattr(self.settings, 'mask_generation'):
+            mg = self.settings.mask_generation
+            save_enabled = getattr(mg, 'save_debug_prompts', False)
+            debug_dir = getattr(mg, 'debug_prompts_dir', 'prompts/debug')
+
+        if not save_enabled:
+            return
+
+        try:
+            Path(debug_dir).mkdir(parents=True, exist_ok=True)
+
+            safe_type = self._sanitize_filename(item_type or "unknown")
+            safe_std = self._sanitize_filename(standard or "unknown")
+            if suffix == "prompt":
+                filename = f"{safe_type}_{safe_std}.txt"
+            else:
+                attempt_suffix = suffix.replace("response", "")
+                filename = f"{safe_type}_{safe_std}{attempt_suffix}.txt"
+
+            filepath = Path(debug_dir) / filename
+
+            header = (
+                f"# Тип: {item_type}\n"
+                f"# Стандарт: {standard}\n"
+                f"# Дата: {datetime.now().isoformat()}\n"
+                f"# {'=' * 50}\n\n"
+            )
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(header)
+                f.write(content)
+
+            logger.info("[LLMMaskGenerator] Сохранён debug: %s", filepath)
+        except Exception as e:
+            logger.warning("[LLMMaskGenerator] Ошибка сохранения debug: %s", e)
