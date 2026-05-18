@@ -707,6 +707,7 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
             'match_type_ru': 'Тип сопоставления',
             'coating_substitution': 'Подстановка покрытия',
             'fuzzy_mismatched_params': 'Несовпавшие параметры',
+            'mask_pattern': 'Маска',
         }
 
         for key, col_name in extra_cols.items():
