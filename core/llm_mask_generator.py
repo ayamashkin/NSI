@@ -3,13 +3,13 @@ LLM Mask Generator
 Генерация regex-масок для стандартов через LLM с fallback по провайдерам.
 
 LAST_FIXES:
-  2026-05-18 14:12 UTC+3 — _save_debug_file: заголовок с сервисом, моделью, температурой
-  2026-05-18 13:10 UTC+3 — ВОССТАНОВЛЕН _build_prompt: field_stats, visible/invisible fields,
-                           пропущенные поля, разнообразные примеры (как до 15.05)
-  2026-05-18 12:45 UTC+3 — _build_prompt: наименования + значимые заполненные поля
-  2026-05-18 11:50 UTC+3 — Восстановлены _save_debug_prompt/_save_debug_response
-  2026-05-18 11:16 UTC+3 — _parse_response: поддержка ```python + balanced braces JSON extraction
-  2026-05-18 10:35 UTC+3 — _call_llm: работа с Dict-ответами (success/content/raw/error/model)
+ 2026-05-18 14:12 UTC+3 — _save_debug_file: заголовок с сервисом, моделью, температурой
+ 2026-05-18 13:10 UTC+3 — ВОССТАНОВЛЕН _build_prompt: field_stats, visible/invisible fields,
+ пропущенные поля, разнообразные примеры (как до 15.05)
+ 2026-05-18 12:45 UTC+3 — _build_prompt: наименования + значимые заполненные поля
+ 2026-05-18 11:50 UTC+3 — Восстановлены _save_debug_prompt/_save_debug_response
+ 2026-05-18 11:16 UTC+3 — _parse_response: поддержка ```python + balanced braces JSON extraction
+ 2026-05-18 10:35 UTC+3 — _call_llm: работа с Dict-ответами (success/content/raw/error/model)
 """
 
 import json
@@ -24,7 +24,6 @@ from api_clients.base import BaseLLMClient
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
-
 
 def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -64,12 +63,12 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
                     brace_count += 1
                 elif ch == '}':
                     brace_count -= 1
-                    if brace_count == 0:
-                        candidate = text[pos:i + 1]
-                        try:
-                            return json.loads(candidate)
-                        except json.JSONDecodeError:
-                            break
+                if brace_count == 0:
+                    candidate = text[pos:i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
 
     # Стратегия 3: Простой fallback
     simple = re.search(r'\{.*?\}', text, re.DOTALL)
@@ -80,7 +79,6 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
             pass
 
     return None
-
 
 class LLMMaskGenerator:
     """Генератор масок через LLM с fallback по провайдерам."""
@@ -108,9 +106,9 @@ class LLMMaskGenerator:
             default_service = getattr(self.settings, 'default_service', None)
             if not default_service and hasattr(self.settings, 'mask_generation'):
                 default_service = getattr(self.settings.mask_generation, 'default_service', None)
-                logger.info("[LLM] default_service from mask_generation: '%s'", default_service)
-            elif default_service:
-                logger.info("[LLM] default_service from settings: '%s'", default_service)
+            logger.info("[LLM] default_service from mask_generation: '%s'", default_service)
+        elif default_service:
+            logger.info("[LLM] default_service from settings: '%s'", default_service)
         else:
             logger.warning("[LLM] self.settings is None — default_service ignored!")
 
@@ -300,13 +298,13 @@ class LLMMaskGenerator:
                         brace_count += 1
                     elif ch == '}':
                         brace_count -= 1
-                        if brace_count == 0:
-                            candidate = response[pos:i + 1]
-                            try:
-                                data = json.loads(candidate)
-                                return self._validate_mask_dict(data, standard, item_type)
-                            except json.JSONDecodeError:
-                                break
+                    if brace_count == 0:
+                        candidate = response[pos:i + 1]
+                        try:
+                            data = json.loads(candidate)
+                            return self._validate_mask_dict(data, standard, item_type)
+                        except json.JSONDecodeError:
+                            break
 
         # Стратегия 3: Простой fallback
         json_match = re.search(r'\{.*\}', response, re.DOTALL)
@@ -382,7 +380,7 @@ class LLMMaskGenerator:
         return (
             "Ты — эксперт по техническим стандартам ГОСТ и регулярным выражениям Python.\n\n"
             "ЗАДАЧА: Создай regex-паттерн с named groups (?P...) "
-            "для извлечения параметров из номенклатуры типа "{item_type}" по стандарту {standard}.\n\n"
+            "для извлечения параметров из номенклатуры типа \"{item_type}\" по стандарту {standard}.\n\n"
             "### КРИТИЧЕСКОЕ ПРАВИЛО\n"
             "Создавай named groups ТОЛЬКО для параметров, которые реально видны в исходной строке.\n"
             "НЕ добавляй группы для метаданных ЕСН (тип_резьбы, марка_материала и т.д.), "
@@ -393,9 +391,9 @@ class LLMMaskGenerator:
             "### Формат ответа\n"
             "```json\n"
             "{{\n"
-            "  \"pattern\": \"...\",\n"
-            "  \"params\": {params_list},\n"
-            "  \"required\": {required_list}\n"
+            " \"pattern\": \"...\",\n"
+            " \"params\": {params_list},\n"
+            " \"required\": {required_list}\n"
             "}}\n"
             "```\n\n"
             "### Строгое соответствие вывода\n"
@@ -454,8 +452,8 @@ class LLMMaskGenerator:
                         selected.append(ex)
                         seen_patterns.add(pattern_key)
                         break
-                if len(selected) >= n // 2:
-                    break
+            if len(selected) >= n // 2:
+                break
 
         random.seed(42)
         remaining = [ex for ex in examples if ex not in selected]
@@ -565,8 +563,8 @@ class LLMMaskGenerator:
         # Тип изделия всегда первый
         if 'тип_изделия' not in visible_field_names and 'тип_изделия' in field_name_map:
             visible_field_names.insert(0, 'тип_изделия')
-            if field_name_map['тип_изделия'] not in regex_fields:
-                regex_fields.insert(0, field_name_map['тип_изделия'])
+        if field_name_map['тип_изделия'] not in regex_fields:
+            regex_fields.insert(0, field_name_map['тип_изделия'])
 
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
@@ -579,15 +577,15 @@ class LLMMaskGenerator:
             if not name:
                 continue
 
-            filled_fields = [f"  полное_наименование: {name}"]
+            filled_fields = [f" полное_наименование: {name}"]
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
-                    filled_fields.append(f"  {field}: {val}")
+                    filled_fields.append(f" {field}: {val}")
 
             missing_fields = [f for f in display_fields if not ex.get(f) or not str(ex.get(f)).strip()]
             if missing_fields:
-                filled_fields.append(f"  [ПРОПУЩЕНЫ: {', '.join(missing_fields)}]")
+                filled_fields.append(f" [ПРОПУЩЕНЫ: {', '.join(missing_fields)}]")
 
             visible_parts = []
             for field in visible_field_names:
@@ -604,14 +602,14 @@ class LLMMaskGenerator:
 
             structure_lines = []
             if visible_parts:
-                structure_lines.append("  ВИДИМЫЕ В СТРОКЕ: " + ' '.join(visible_parts))
+                structure_lines.append(" ВИДИМЫЕ В СТРОКЕ: " + ' '.join(visible_parts))
             if invisible_parts:
-                structure_lines.append("  МЕТАДАННЫЕ БД: " + ', '.join(invisible_parts))
+                structure_lines.append(" МЕТАДАННЫЕ БД: " + ', '.join(invisible_parts))
 
             examples_lines.append(
                 f"{i}. ИСХОДНАЯ СТРОКА: \"{name}\"\n" +
                 "\n".join(structure_lines) + "\n" +
-                "  ПОЛЯ ЕСН:\n" +
+                " ПОЛЯ ЕСН:\n" +
                 "\n".join(filled_fields)
             )
 
@@ -621,13 +619,13 @@ class LLMMaskGenerator:
         stats_lines = []
         for k in visible_field_names:
             if k in field_name_map:
-                stats_lines.append(f"  {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
+                stats_lines.append(f" {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
         if invisible_field_names:
-            stats_lines.append("  --- МЕТАДАННЫЕ (не для regex): ---")
+            stats_lines.append(" --- МЕТАДАННЫЕ (не для regex): ---")
             for k in invisible_field_names:
                 if k in field_name_map:
                     stats_lines.append(
-                        f"  {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в БД, не в строке]"
+                        f" {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в БД, не в строке]"
                     )
         stats_text = "\n".join(stats_lines) if stats_lines else "Нет статистики"
 
@@ -669,7 +667,7 @@ class LLMMaskGenerator:
     # ------------------------------------------------------------------
 
     def _sanitize_filename(self, text: str) -> str:
-        sanitized = re.sub(r'[\\/:*?"<>|]', '_', str(text))
+        sanitized = re.sub(r'[\/:*?"<>|]', '_', str(text))
         sanitized = re.sub(r'_+', '_', sanitized)
         return sanitized.strip('_')[:80]
 
