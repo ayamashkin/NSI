@@ -707,6 +707,7 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
             'match_type_ru': 'Тип сопоставления',
             'coating_substitution': 'Подстановка покрытия',
             'fuzzy_mismatched_params': 'Несовпавшие параметры',
+            'mask_pattern': 'Маска',
         }
 
         for key, col_name in extra_cols.items():
@@ -739,23 +740,17 @@ def batch(ctx, input_file, db, ens_index, output, result_db, llm, validate, succ
                     val = json.dumps(val, ensure_ascii=False, default=str) if isinstance(val, dict) else str(val)
                 export_df.at[row_idx, col_name] = val
 
-        # Write Excel with openpyxl engine to allow cell formatting
-        try:
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                export_df.to_excel(writer, index=False)
-                ws = writer.sheets[writer.sheet_name]
-                # Format 'Уверенность' column to show 3 decimal places
-                for col_idx, cell in enumerate(ws[1], 1):
-                    if cell.value == 'Уверенность':
-                        for row in range(2, ws.max_row + 1):
-                            cell = ws.cell(row=row, column=col_idx)
-                            if isinstance(cell.value, (int, float)):
-                                cell.number_format = '0.000'
-                        break
-        except Exception as e:
-            logger.debug("openpyxl formatting failed (%s), falling back to default engine", e)
-            export_df.to_excel(output, index=False)
-
+        #export_df.to_excel(output, index=False)
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            export_df.to_excel(writer, index=False)
+            ws = writer.book.active
+            for col_idx, cell in enumerate(ws[1], 1):
+                if cell.value == 'Уверенность':
+                    for row in range(2, ws.max_row + 1):
+                        cell = ws.cell(row=row, column=col_idx)
+                        if isinstance(cell.value, (int, float)):
+                            cell.number_format = '0.000'
+                    break
         click.echo(f"✅ Excel сохранен: {output} ({len(export_df)} строк)")
 
     # Итоговая статистика
