@@ -2,7 +2,7 @@
 LLM Mask Generator
 Генерация regex масок через LLM (local/cloud) с каскадным fallback.
 
-LAST_FIX: 2026-05-15 12:52 UTC+3 — generate_mask: item_type передается как есть (уже нормализованный из ЕСН через automated_processor._generate_mask)
+LAST_FIX: 2026-05-15 17:11 UTC+3 — provider_priority динамический (default_service первым); _call_llm: client.complete + per-provider model; generate_mask: item_type из ЕСН
 """
 
 import logging
@@ -44,12 +44,13 @@ class GenerationResult:
 class LLMMaskGenerator:
     """
     Генератор масок через LLM с каскадным fallback:
-    1. OpenWebUI (local) -> 2. MWS (GPT-4) -> 3. GigaChat
+    1. default_service (из config.yaml) -> 2. Остальные доступные клиенты
 
     Features:
+    - Динамический provider_priority из конфигурации
+    - Per-provider model selection (из APIConfig.default_model)
     - Retry с увеличением temperature
     - Auto-validation после генерации
-    - Fallback между провайдерами
     """
 
     def __init__(
@@ -64,10 +65,40 @@ class LLMMaskGenerator:
         self.max_retries = max_retries
         self.min_examples = min_examples
 
-        # Порядок fallback
-        self.provider_priority = ['openwebui', 'mws', 'gigachat']
+        # Динамический порядок fallback:
+        # 1. default_service из settings.mask_generation (если указан и клиент доступен)
+        # 2. Все остальные доступные клиенты (ключи из self.clients)
+        self.provider_priority = self._build_provider_priority()
 
-        logger.info("LLMMaskGenerator initialized with %d clients", len(clients))
+        logger.info("LLMMaskGenerator initialized with %d clients, priority: %s",
+                    len(clients), self.provider_priority)
+
+    def _build_provider_priority(self) -> List[str]:
+        """Строит приоритет провайдеров: default_service первым, затем остальные."""
+        priority = []
+
+        # Сначала default_service из конфигурации
+        default_service = None
+        if self.settings:
+            # Пробуем получить из settings напрямую
+            default_service = getattr(self.settings, 'default_service', None)
+            # Или из mask_generation config
+            if not default_service and hasattr(self.settings, 'mask_generation'):
+                default_service = getattr(self.settings.mask_generation, 'default_service', None)
+
+        if default_service and default_service in self.clients:
+            priority.append(default_service)
+            logger.info("[LLM] default_service='%s' set as primary", default_service)
+        elif default_service:
+            logger.warning("[LLM] default_service='%s' not found in clients %s",
+                           default_service, list(self.clients.keys()))
+
+        # Затем все остальные доступные клиенты
+        for provider in self.clients.keys():
+            if provider not in priority:
+                priority.append(provider)
+
+        return priority
 
     def generate_mask(
         self,
@@ -146,7 +177,7 @@ class LLMMaskGenerator:
 
         prompt += """
 Требования:
-1. Паттерн должен быть в формате Python regex с именованными группами (?P<name>...)
+1. Паттерн должен быть в формате Python regex с именованными группами (?P<<name>...)
 2. Группы должны иметь короткие имена на русском языке (например: диаметр, длина, покрытие, исполнение)
 3. Обязательные параметры: номинальный диаметр, длина, покрытие
 4. Опциональные: исполнение, шаг резьбы, класс прочности
@@ -172,12 +203,35 @@ class LLMMaskGenerator:
         temperature = min(0.1 + attempt * 0.1, 0.5)
 
         try:
-            response = client.generate(
+            # Получаем модель для конкретного провайдера из конфига
+            model = None
+            if self.settings and hasattr(self.settings, 'api') and provider in self.settings.api:
+                api_cfg = self.settings.api[provider]
+                model = getattr(api_cfg, 'default_model', None)
+                logger.debug("[LLM] Using model '%s' from api.%s.default_model", model, provider)
+
+            # Fallback: общая default_model из mask_generation
+            if not model and self.settings and hasattr(self.settings, 'mask_generation'):
+                model = getattr(self.settings.mask_generation, 'default_model', None)
+                logger.debug("[LLM] Fallback to mask_generation.default_model: '%s'", model)
+
+            # Ultimate fallback
+            if not model:
+                model = "qwen2.5-72b-instruct"
+                logger.debug("[LLM] Ultimate fallback model: '%s'", model)
+
+            response = client.complete(
                 prompt=prompt,
-                temperature=temperature,
-                max_tokens=2000
+                model=model,
+                temperature=temperature
             )
-            return response
+            # response — это dict с ключами: success, content, raw, error, model
+            if response and response.get('success'):
+                return response.get('raw', '')
+            else:
+                error_msg = response.get('error', 'Unknown error') if response else 'No response'
+                logger.warning("LLM call failed: %s", error_msg)
+                return None
         except Exception as e:
             logger.warning("LLM call failed: %s", e)
             return None
