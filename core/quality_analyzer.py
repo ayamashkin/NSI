@@ -19,20 +19,19 @@ from core.automated_processor import AutomatedParametricProcessor
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class QualityStats:
     """Статистика по группе (item_type + standard)."""
     item_type: str = ""
     standard: str = ""
     total: int = 0
-    ens_code_found: int = 0          # ens_code определен
+    ens_code_found: int = 0  # ens_code определен
     ens_code_percent: float = 0.0
-    params_parsed: int = 0           # params распознаны (парсинг text)
+    params_parsed: int = 0  # params распознаны (парсинг text)
     params_percent: float = 0.0
-    ens_params_parsed: int = 0       # ens_params распознаны (из модели ENS)
+    ens_params_parsed: int = 0  # ens_params распознаны (из модели ENS)
     ens_params_percent: float = 0.0
-    both_params_parsed: int = 0      # и params, и ens_params
+    both_params_parsed: int = 0  # и params, и ens_params
     both_params_percent: float = 0.0
 
     def recalculate(self):
@@ -42,7 +41,6 @@ class QualityStats:
             self.params_percent = round(self.params_parsed / self.total * 100, 2)
             self.ens_params_percent = round(self.ens_params_parsed / self.total * 100, 2)
             self.both_params_percent = round(self.both_params_parsed / self.total * 100, 2)
-
 
 class QualityAnalyzer:
     """Анализатор качества распознавания параметрических данных."""
@@ -66,9 +64,15 @@ class QualityAnalyzer:
         import pandas as pd
         df = pd.read_excel(excel_path)
 
-        name_col = 'Краткое наименование'
-        if name_col not in df.columns:
-            name_cols = [c for c in df.columns if 'наименование' in str(c).lower()]
+        # FIX: поддержка разных вариантов названий колонки
+        name_col = None
+        for candidate in ['Наименование', 'Краткое наименование', 'Full name', 'Name']:
+            if candidate in df.columns:
+                name_col = candidate
+                break
+
+        if name_col is None:
+            name_cols = [c for c in df.columns if 'наимен' in str(c).lower() or 'name' in str(c).lower()]
             if name_cols:
                 name_col = name_cols[0]
             else:
@@ -222,10 +226,10 @@ class QualityAnalyzer:
         lines.append("=" * 120)
         lines.append("")
         lines.append("Легенда:")
-        lines.append("  ENS код   — определен ens_code (по TF-IDF или маске)")
-        lines.append("  Params    — распознаны params из текста (парсинг)")
-        lines.append("  ENS params — распознаны ens_params из модели ENS")
-        lines.append("  Оба       — и params, и ens_params распознаны")
+        lines.append(" ENS код — определен ens_code (по TF-IDF или маске)")
+        lines.append(" Params — распознаны params из текста (парсинг)")
+        lines.append(" ENS params — распознаны ens_params из модели ENS")
+        lines.append(" Оба — и params, и ens_params распознаны")
 
         return "\n".join(lines)
 
@@ -350,7 +354,6 @@ class QualityAnalyzer:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
         logger.info(f"[ANALYZE] JSON сохранен: {output_path}")
-
 
 def analyze_quality(
     excel_path: str,

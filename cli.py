@@ -2,8 +2,8 @@
 """
 Nomenclature Processor CLI
 LAST_FIX: 2026-05-18 22:15 UTC+3
-  - generate-masks: fallback search by case (upper/lower) for existing masks
-  - _init_llm_clients: only services from config.yaml (settings.api.keys())
+ - generate-masks: fallback search by case (upper/lower) for existing masks
+ - _init_llm_clients: only services from config.yaml (settings.api.keys())
 """
 
 import click
@@ -18,7 +18,6 @@ from datetime import datetime
 from config.settings import setup_logging
 
 logger = logging.getLogger(__name__)
-
 
 @click.group()
 @click.option('--config', '-c', default='config/config.yaml', help='Path to config')
@@ -38,10 +37,9 @@ def cli(ctx, config):
     except Exception as e:
         logger.warning("Failed to setup logging: %s", e)
 
-
-# ======================================================================
+# =======================================================================
 # LEGACY COMMANDS
-# ======================================================================
+# =======================================================================
 
 @cli.command()
 def prompts():
@@ -56,7 +54,6 @@ def prompts():
         click.echo(f"    Category: {cfg.category}")
         click.echo(f"    Service: {cfg.resolve_service(settings)}")
         click.echo(f"    Model: {cfg.resolve_model(settings)}")
-
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -94,7 +91,6 @@ def process(ctx, input_file, prompt, auto, workers, force):
         results = processor.process_batch(items, prompt_ids, force_reprocess=force)
     click.echo(f"Processed: {len(results)} items")
 
-
 @cli.command()
 @click.option('--output', '-o', default='results.json', help='Output file')
 @click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
@@ -120,7 +116,6 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
     )
     click.echo(f"Exported {len(results)} items to {output}")
 
-
 @cli.command()
 def stats():
     """Show processing statistics"""
@@ -132,7 +127,6 @@ def stats():
     click.echo(f"Total: {stats.get('total', 0)}")
     for status, count in stats.get('by_status', {}).items():
         click.echo(f"  {status}: {count}")
-
 
 @cli.command()
 @click.option('--limit', '-l', default=10, help='Error count')
@@ -151,7 +145,6 @@ def errors(limit, prompt):
     for i, result in enumerate(error_results, 1):
         click.echo(f"{i}. {result.get('article', 'N/A')}: {result.get('name', 'N/A')[:50]}...")
         click.echo(f"   Error: {result.get('error_message', 'N/A')[:100]}...")
-
 
 # ===================================================================
 # PARAMETRIC COMMANDS
@@ -219,7 +212,6 @@ def _init_llm_clients(settings, all_services=False):
             logger.warning("Failed to init %s: %s", service_name, e)
     return llm_clients
 
-
 @cli.command()
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Mask DB path')
@@ -261,7 +253,6 @@ def process_parametric(text, db, ens_index, llm):
     if result.ens_match:
         click.echo(f"ENS code: {result.ens_match.get('code')}")
 
-
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--db', '-d', default='cache/masks.db', help='Mask DB path')
@@ -284,9 +275,15 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
     click.echo(f"Processing {input_file}...")
     df = pd.read_excel(input_file)
 
-    name_col = 'Full name'
-    if name_col not in df.columns:
-        name_cols = [c for c in df.columns if 'name' in str(c).lower()]
+    # FIX: поддержка русских и английских заголовков колонок
+    name_col = None
+    for candidate in ['Наименование', 'Full name', 'Краткое наименование', 'Name']:
+        if candidate in df.columns:
+            name_col = candidate
+            break
+
+    if name_col is None:
+        name_cols = [c for c in df.columns if 'наимен' in str(c).lower() or 'name' in str(c).lower()]
         if name_cols:
             name_col = name_cols[0]
         else:
@@ -395,7 +392,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only, includ
     if success_only:
         click.echo(f"Filtered: {stats['filtered']}")
 
-
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--db', '-d', default='cache/masks.db', help='Mask DB path')
@@ -450,7 +446,6 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         analyzer.save_json(stats, json_output)
         click.echo(f"JSON report: {json_output}")
 
-
 @cli.command('diagnose')
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Mask DB path')
@@ -499,8 +494,8 @@ def diagnose(text, db, ens_index, llm, coating_map):
     item_type = extracted.get('item_type')
     click.echo("")
     click.echo("Step 0 (Standard extraction):")
-    click.echo(f"   standard_info: {standard_info.to_dict() if standard_info else None}")
-    click.echo(f"   item_type: {item_type}")
+    click.echo(f"  standard_info: {standard_info.to_dict() if standard_info else None}")
+    click.echo(f"  item_type: {item_type}")
 
     if not standard_info or not item_type:
         click.echo("")
@@ -514,24 +509,24 @@ def diagnose(text, db, ens_index, llm, coating_map):
     click.echo("")
     click.echo("Step 1 (Mask lookup):")
     mask = mask_db.get_mask(standard, search_item_type)
-    click.echo(f"   Search: standard='{standard}', item_type='{search_item_type}'")
-    click.echo(f"   Found: {mask is not None}")
+    click.echo(f"  Search: standard='{standard}', item_type='{search_item_type}'")
+    click.echo(f"  Found: {mask is not None}")
 
     if mask is None:
         mask = mask_db.get_mask(standard, item_type)
         if mask:
-            click.echo(f"   Found (case): item_type='{item_type}'")
+            click.echo(f"  Found (case): item_type='{item_type}'")
 
     if mask is None:
-        click.echo("   Mask not found in DB")
+        click.echo("  Mask not found in DB")
         return
 
-    click.echo(f"   mask.id: {getattr(mask, 'id', 'N/A')}")
-    click.echo(f"   mask.standard: {getattr(mask, 'standard', 'N/A')}")
-    click.echo(f"   mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
-    click.echo(f"   mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
-    click.echo(f"   mask.pattern (first 120 chars):")
-    click.echo(f"      {getattr(mask, 'pattern', 'N/A')[:120]}")
+    click.echo(f"  mask.id: {getattr(mask, 'id', 'N/A')}")
+    click.echo(f"  mask.standard: {getattr(mask, 'standard', 'N/A')}")
+    click.echo(f"  mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
+    click.echo(f"  mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
+    click.echo(f"  mask.pattern (first 120 chars):")
+    click.echo(f"  {getattr(mask, 'pattern', 'N/A')[:120]}")
 
     # Step 2
     effective_standard = getattr(mask, 'standard', None) or standard
@@ -539,11 +534,11 @@ def diagnose(text, db, ens_index, llm, coating_map):
     relaxed = client._relax_pattern(mask.pattern, standard=effective_standard)
     click.echo("")
     click.echo("Step 2 (Relax pattern):")
-    click.echo(f"   standard for relax: '{effective_standard}'")
-    click.echo(f"   relaxed (first 200 chars):")
-    click.echo(f"      {relaxed[:200]}")
+    click.echo(f"  standard for relax: '{effective_standard}'")
+    click.echo(f"  relaxed (first 200 chars):")
+    click.echo(f"  {relaxed[:200]}")
     if len(relaxed) > 200:
-        click.echo(f"      ... (total {len(relaxed)} chars)")
+        click.echo(f"  ... (total {len(relaxed)} chars)")
 
     # Step 3
     try:
@@ -552,45 +547,43 @@ def diagnose(text, db, ens_index, llm, coating_map):
         click.echo("")
         click.echo("Step 3 (Regex match):")
         if match:
-            click.echo("   MATCH")
-            click.echo(f"   groups: {match.groupdict()}")
+            click.echo("  MATCH")
+            click.echo(f"  groups: {match.groupdict()}")
         else:
-            click.echo("   NO MATCH")
+            click.echo("  NO MATCH")
             for i in range(len(text), 0, -1):
                 if compiled.search(text[:i]):
-                    click.echo(f"   longest matching prefix: '{text[:i]}'")
+                    click.echo(f"  longest matching prefix: '{text[:i]}'")
                     break
             else:
-                click.echo("   no prefix matches at all")
+                click.echo("  no prefix matches at all")
     except re.error as e:
         click.echo("")
         click.echo("Step 3 (Regex match):")
-        click.echo(f"   INVALID REGEX: {e}")
-        click.echo(f"   pattern: {relaxed[:100]}")
+        click.echo(f"  INVALID REGEX: {e}")
+        click.echo(f"  pattern: {relaxed[:100]}")
 
     # Step 4
     click.echo("")
     click.echo("Step 4 (Full processor result):")
     result = processor.process(text)
-    click.echo(f"   level: {result.level.value}")
-    click.echo(f"   success: {result.success}")
-    click.echo(f"   params: {result.params}")
-    click.echo(f"   ens_code: {result.ens_match.get('code') if result.ens_match else None}")
-    click.echo(f"   ens_params: {result.ens_params}")
-    click.echo(f"   confidence: {result.confidence:.3f}")
-    click.echo(f"   processing_time_ms: {result.processing_time_ms:.1f}")
+    click.echo(f"  level: {result.level.value}")
+    click.echo(f"  success: {result.success}")
+    click.echo(f"  params: {result.params}")
+    click.echo(f"  ens_code: {result.ens_match.get('code') if result.ens_match else None}")
+    click.echo(f"  ens_params: {result.ens_params}")
+    click.echo(f"  confidence: {result.confidence:.3f}")
+    click.echo(f"  processing_time_ms: {result.processing_time_ms:.1f}")
     if result.details:
-        click.echo(f"   details: {result.details}")
+        click.echo(f"  details: {result.details}")
 
     click.echo("")
     click.echo("=" * 60)
-
 
 @cli.group()
 def ens():
     """ENS index operations"""
     pass
-
 
 @ens.command('auto-mapping')
 @click.argument('excel_file', type=click.Path(exists=True))
@@ -606,7 +599,6 @@ def auto_mapping(excel_file, output, append):
         yaml.dump(mapping, f, allow_unicode=True, sort_keys=False)
     total = sum(len(v) for v in mapping.get('category_mapping', {}).values())
     click.echo(f"Mapped {total} columns: {output}")
-
 
 @ens.command()
 @click.argument('excel_file', type=click.Path(exists=True))
@@ -625,7 +617,6 @@ def build_index(excel_file, output, category):
         click.echo(f"Items: {meta.get('item_count', 0)}")
         click.echo(f"Category: {meta.get('category', 'unknown')}")
 
-
 @ens.command()
 @click.argument('query')
 @click.option('--index', '-i', required=True, help='Index path')
@@ -643,7 +634,6 @@ def search(query, index, top_k):
         name = item.get('name') or item.get('name', 'N/A')
         click.echo(f"{i}. [{score:.2f}] {name[:60]}...")
 
-
 @ens.command()
 @click.argument('excel_file', type=click.Path(exists=True))
 @click.option('--index', '-i', required=True, help='Index path')
@@ -653,14 +643,13 @@ def analyze(excel_file, index, sample):
     from core.integration import analyze_nomenclature
     stats = analyze_nomenclature(excel_file, index, sample_size=sample)
     click.echo(f"Analysis (sample {sample}):")
-    click.echo(f"   Regex parsed: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
-    click.echo(f"   Failed (need LLM): {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
+    click.echo(f"  Regex parsed: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
+    click.echo(f"  Failed (need LLM): {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
     if 'estimated_regex_parsed' in stats:
         total = stats.get('total', 0)
         click.echo("")
         click.echo(f"Estimated for all {total} items:")
-        click.echo(f"   Regex: {stats['estimated_regex_parsed']}")
-
+        click.echo(f"  Regex: {stats['estimated_regex_parsed']}")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db', help='Mask DB path')
@@ -738,7 +727,7 @@ def generate_masks(db, ens_index, llm, min_score, limit, standard, force):
                 if existing:
                     try:
                         mask_db.deactivate_mask(existing.id)
-                        click.echo(f"   Deactivated existing mask {existing.id} for {std}/{item_type}")
+                        click.echo(f"  Deactivated existing mask {existing.id} for {std}/{item_type}")
                     except Exception as e:
                         logger.warning("Failed to deactivate mask %s: %s", existing.id, e)
 
@@ -772,11 +761,10 @@ def generate_masks(db, ens_index, llm, min_score, limit, standard, force):
 
     click.echo("")
     click.echo("Results:")
-    click.echo(f"   Existing (skipped): {stats['existing']}")
-    click.echo(f"   Generated: {stats['generated']}")
-    click.echo(f"   Failed: {stats['failed']}")
-    click.echo(f"   Skipped (no LLM): {stats['skipped']}")
-
+    click.echo(f"  Existing (skipped): {stats['existing']}")
+    click.echo(f"  Generated: {stats['generated']}")
+    click.echo(f"  Failed: {stats['failed']}")
+    click.echo(f"  Skipped (no LLM): {stats['skipped']}")
 
 if __name__ == '__main__':
     cli()
