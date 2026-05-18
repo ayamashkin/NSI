@@ -486,16 +486,19 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm
 
 # Batch-обработка через тестовый индекс (Excel → Excel)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --workers 4
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl -o output/results.xlsx --workers 4
 
-# Batch-обработка с экспортом в JSON
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.json --workers 4
+# Batch-обработка (Excel → Excel + result.db)
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/results.xlsx
+
+# Batch-обработка (Excel → JSON + result.db)
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/results.json
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
 
 # Запуск с логированием DEBUG — видно все шаги PARAM_MATCH, Fallback, _apply_mask
-python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware/ens_hardware.pkl --output output/results.xlsx 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
+python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --output output/results.xlsx 2>&1 | grep -E "(PARAM_MATCH|Fallback|_apply_mask)"
 
 # Диагностика отдельной строки + паттерна
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl

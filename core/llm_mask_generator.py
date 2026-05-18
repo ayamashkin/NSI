@@ -3,6 +3,7 @@ LLM Mask Generator
 Генерация regex-масок для стандартов через LLM с fallback по провайдерам.
 
 LAST_FIXES:
+  2026-05-18 14:12 UTC+3 — _save_debug_file: заголовок с сервисом, моделью, температурой
   2026-05-18 13:10 UTC+3 — ВОССТАНОВЛЕН _build_prompt: field_stats, visible/invisible fields,
                            пропущенные поля, разнообразные примеры (как до 15.05)
   2026-05-18 12:45 UTC+3 — _build_prompt: наименования + значимые заполненные поля
@@ -95,7 +96,7 @@ class LLMMaskGenerator:
         )
 
     # ------------------------------------------------------------------
-    # PROVIDER PRIORITY (новое)
+    # PROVIDER PRIORITY
     # ------------------------------------------------------------------
 
     def _build_provider_priority(self) -> List[str]:
@@ -149,9 +150,15 @@ class LLMMaskGenerator:
         for attempt in range(1, self.max_retries + 1):
             for provider in self.provider_priority:
                 logger.info("Attempt %d/%d via %s", attempt, self.max_retries, provider)
-                response = self._call_llm(provider, prompt, attempt)
-                if response:
-                    self._save_debug_response(standard, item_type, attempt, response)
+                response_data = self._call_llm(provider, prompt, attempt)
+                if response_data:
+                    response = response_data['content']
+                    self._save_debug_response(
+                        standard, item_type, attempt, response,
+                        provider=response_data['provider'],
+                        model=response_data['model'],
+                        temperature=response_data['temperature']
+                    )
                     mask = self._parse_response(response, standard, item_type)
                     if mask:
                         logger.info("Generated mask via %s (attempt %d)", provider, attempt)
@@ -168,14 +175,20 @@ class LLMMaskGenerator:
         return None, None
 
     # ------------------------------------------------------------------
-    # LLM CALL (новое — Dict-ответы)
+    # LLM CALL — возвращает Dict с metadata
     # ------------------------------------------------------------------
 
-    def _call_llm(self, provider: str, prompt: str, attempt: int) -> Optional[str]:
+    def _call_llm(self, provider: str, prompt: str, attempt: int) -> Optional[Dict[str, Any]]:
+        """
+        Вызов LLM для генерации маски.
+        Возвращает dict: {content: str, provider: str, model: str, temperature: float}
+        или None при ошибке.
+        """
         client = self.clients.get(provider)
         if not client:
             return None
 
+        # Разрешаем модель
         model = None
         if self.settings and hasattr(self.settings, 'api') and provider in self.settings.api:
             api_cfg = self.settings.api[provider]
@@ -199,19 +212,38 @@ class LLMMaskGenerator:
                 temperature=temperature
             )
 
+            # response — dict с success, content, raw, error, model
             if response and response.get('success'):
+                # Если content уже распарсен (dict), сериализуем в JSON-строку
                 content = response.get('content')
                 if isinstance(content, dict):
                     logger.debug(
                         "[LLM] Provider %s returned pre-parsed dict, serializing to JSON",
                         provider
                     )
-                    return json.dumps(content, ensure_ascii=False)
+                    return {
+                        'content': json.dumps(content, ensure_ascii=False),
+                        'provider': provider,
+                        'model': model,
+                        'temperature': temperature
+                    }
+                # Иначе вернуть raw текст
                 raw = response.get('raw', '')
                 if raw:
-                    return raw
+                    return {
+                        'content': raw,
+                        'provider': provider,
+                        'model': model,
+                        'temperature': temperature
+                    }
+                # Если raw пустой, но content есть (не dict) — вернуть content
                 if content and not isinstance(content, dict):
-                    return str(content)
+                    return {
+                        'content': str(content),
+                        'provider': provider,
+                        'model': model,
+                        'temperature': temperature
+                    }
                 logger.warning(
                     "[LLM] Provider %s returned success=True but no raw/content",
                     provider
@@ -227,7 +259,7 @@ class LLMMaskGenerator:
             return None
 
     # ------------------------------------------------------------------
-    # RESPONSE PARSING (новое — robust JSON)
+    # RESPONSE PARSING
     # ------------------------------------------------------------------
 
     def _parse_response(self, response: str, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
@@ -236,7 +268,7 @@ class LLMMaskGenerator:
             logger.warning("Empty LLM response")
             return None
 
-        # Стратегия 1: Markdown code block
+        # Стратегия 1: Markdown code block ```json ... ``` / ```python ... ``` / ``` ... ```
         for lang in [r'(?:json)?', r'(?:python)?', r'']:
             pattern = rf'```{lang}\s*(.*?)\s*```'
             md_json = re.search(pattern, response, re.DOTALL)
@@ -322,7 +354,7 @@ class LLMMaskGenerator:
         }
 
     # ------------------------------------------------------------------
-    # PROMPT BUILDER (ВОССТАНОВЛЕНО из 54019ee8 — полная логика)
+    # PROMPT BUILDER (ВОССТАНОВЛЕНО из 54019ee8)
     # ------------------------------------------------------------------
 
     def _load_prompt_template(self) -> str:
@@ -350,7 +382,7 @@ class LLMMaskGenerator:
         return (
             "Ты — эксперт по техническим стандартам ГОСТ и регулярным выражениям Python.\n\n"
             "ЗАДАЧА: Создай regex-паттерн с named groups (?P...) "
-            "для извлечения параметров из номенклатуры типа \"{item_type}\" по стандарту {standard}.\n\n"
+            "для извлечения параметров из номенклатуры типа "{item_type}" по стандарту {standard}.\n\n"
             "### КРИТИЧЕСКОЕ ПРАВИЛО\n"
             "Создавай named groups ТОЛЬКО для параметров, которые реально видны в исходной строке.\n"
             "НЕ добавляй группы для метаданных ЕСН (тип_резьбы, марка_материала и т.д.), "
@@ -633,7 +665,7 @@ class LLMMaskGenerator:
         return result
 
     # ------------------------------------------------------------------
-    # DEBUG SAVE
+    # DEBUG SAVE — с сервисом, моделью, температурой
     # ------------------------------------------------------------------
 
     def _sanitize_filename(self, text: str) -> str:
@@ -642,12 +674,17 @@ class LLMMaskGenerator:
         return sanitized.strip('_')[:80]
 
     def _save_debug_prompt(self, standard: str, item_type: str, prompt: str):
-        self._save_debug_file(standard, item_type, "prompt", prompt)
+        self._save_debug_file(standard, item_type, "prompt", prompt,
+                              provider="PENDING", model="PENDING", temperature="PENDING")
 
-    def _save_debug_response(self, standard: str, item_type: str, attempt: int, response: str):
-        self._save_debug_file(standard, item_type, f"response_a{attempt}", response)
+    def _save_debug_response(self, standard: str, item_type: str, attempt: int, response: str,
+                             provider: str = "N/A", model: str = "N/A", temperature: float = 0.0):
+        self._save_debug_file(standard, item_type, f"response_a{attempt}", response,
+                              provider=provider, model=model, temperature=temperature)
 
-    def _save_debug_file(self, standard: str, item_type: str, suffix: str, content: str):
+    def _save_debug_file(self, standard: str, item_type: str, suffix: str, content: str,
+                         provider: str = "N/A", model: str = "N/A", temperature: Any = "N/A"):
+        """Сохранение debug-файла (prompt/response) с метаданными вызова."""
         save_enabled = False
         debug_dir = "prompts/debug"
 
@@ -675,6 +712,9 @@ class LLMMaskGenerator:
             header = (
                 f"# Тип: {item_type}\n"
                 f"# Стандарт: {standard}\n"
+                f"# Сервис: {provider}\n"
+                f"# Модель: {model}\n"
+                f"# Температура: {temperature}\n"
                 f"# Дата: {datetime.now().isoformat()}\n"
                 f"# {'=' * 50}\n\n"
             )
