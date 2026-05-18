@@ -520,7 +520,9 @@ python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.p
 python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm  --force
 
 # Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.xlsx
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/nomenclature1.xlsx
+
+python cli.py batch data/СТИ_КумАПП_из_АСУ_НСИ.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/СТИ_КумАПП_из_АСУ_НСИ.xlsx
 
 # Batch-обработка (Excel → JSON + result.db)
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.json
