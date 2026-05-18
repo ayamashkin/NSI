@@ -454,6 +454,9 @@ python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/
 
 # С debug-информацией (для анализа)
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --include-details --workers 8
+
+# Принудительная переобработка (игнорирует кэш result.db)
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/results.xlsx --workers 8 --force
 ```
 
 ### 4. Анализ качества распознавания
@@ -499,6 +502,9 @@ python -u cli.py batch data/nomenclature.xlsx --db cache/masks.db --ens-index mo
 
 # Диагностика отдельной строки + паттерна
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl
+
+# Диагностика с принудительным поиском (игнорирует кэш)
+python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/hardware2/ens_hardware.pkl --force
 ```
 
 ### Prod
@@ -515,6 +521,9 @@ python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware
 
 # Batch-обработка (Excel → JSON + result.db)
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.json
+
+# Принудительная batch-переобработка (игнорирует кэш result.db)
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.xlsx --force
 
 # Анализ качества
 python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl -o output/quality.xlsx -j output/quality.json
