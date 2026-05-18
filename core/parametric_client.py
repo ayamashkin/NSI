@@ -2,14 +2,17 @@
 Parametric ENS Client Module
 Level 6: Параметрическое сопоставление с использованием масок.
 
-VERSION: 2026-05-14
+VERSION: 2026-05-18
 
 LAST_FIXES:
- 2026-05-14 13:43 UTC+3 — ThreadPoolExecutor support: threading.Lock для _find_in_ens_cache, _pattern_cache, _ens_by_standard_type (thread-safety)
- 2026-05-14 10:32 UTC+3 — индексация ENS по (стандарт, тип) + O(1) поиск по коду + кэш compiled regex (производительность)
- 2026-05-08 13:10 UTC+3 — strict_union_keys: учитывается в _compare_param_sets (false=skip пустые ключи)
- 2026-05-08 11:45 UTC+3 — _remap_params ДО _find_in_ens: exact match теперь работает на уровне parametric_client
- 2026-05-07 12:10 UTC+3 — кэширование _find_in_ens (хеш по params/standard/item_type)
+ 2026-05-18 15:23 UTC+3 — skip_fields загружается из конфига/конструктора (убран хардкод),
+                          нормализация 'None' в _apply_mask,
+                          фильтрация meta_keys из params перед поиском,
+                          убрано логирование KEY SKIP (non-strict).
+ 2026-05-18 14:53 UTC+3 — fuzzy matching ключей параметров (_match_param_keys),
+                          нормализация покрытия в _normalize_name/_normalize_coating,
+                          fallback парсинг ENS-имени через маску БД,
+                          убран хардкод _remap_params.
 """
 
 import re
@@ -51,8 +54,7 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
     if _empty_equiv_cache is not None:
         return _empty_equiv_cache
 
-    default = {}  # Загружается из ens_column_mapping.yaml
-
+    default = {}
     try:
         import yaml
         from pathlib import Path
@@ -60,12 +62,12 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
             if Path(path).exists():
                 with open(path, 'r', encoding='utf-8') as f:
                     data = yaml.safe_load(f)
-                equiv = data.get('empty_equivalent_values', {})
-                if equiv:
-                    _empty_equiv_cache = {k: [str(v).strip() for v in vals]
-                                          for k, vals in equiv.items() if vals}
-                    return _empty_equiv_cache
-                break
+                    equiv = data.get('empty_equivalent_values', {})
+                    if equiv:
+                        _empty_equiv_cache = {k: [str(v).strip() for v in vals]
+                                              for k, vals in equiv.items() if vals}
+                        return _empty_equiv_cache
+                    break
     except Exception as e:
         logger.warning("Failed to load empty_equivalent_values: %s", e)
 
@@ -73,28 +75,15 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
     return _empty_equiv_cache
 
 def _text_similarity(a: str, b: str) -> float:
-    """
-    Token-based Jaccard similarity для текстовых параметров.
-    Удаляет цифры перед сравнением (Кд9.хр → кд, хр).
-
-    Examples:
-    'Хим.Пас' ~ 'Хим.Пас' = 1.0
-    'Кд' ~ 'Кд9.хр' = 0.5 (кд общий, хр нет)
-    'Кд.фос' ~ 'Кд.фос.окс' = 0.67
-    'Окс.Фос' ~ 'Фос.Окс' = 1.0
-    """
+    """Token-based Jaccard similarity для текстовых параметров."""
     import re
     if not a or not b:
         return 0.0
-
     a_str = str(a).lower().strip()
     b_str = str(b).lower().strip()
-
-    # Exact match
     if a_str == b_str:
         return 1.0
 
-    # Extract tokens, remove digits
     def _extract_tokens(text):
         raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
         cleaned = []
@@ -106,13 +95,10 @@ def _text_similarity(a: str, b: str) -> float:
 
     tokens_a = _extract_tokens(a_str)
     tokens_b = _extract_tokens(b_str)
-
     if not tokens_a or not tokens_b:
         return 0.0
-
     intersection = tokens_a & tokens_b
     union = tokens_a | tokens_b
-
     return len(intersection) / len(union)
 
 def _is_empty_equivalent(field: str, value: Any) -> bool:
@@ -133,10 +119,10 @@ class ParametricMatch:
     ens_name: Optional[str]
     mdm_key: Optional[str]
     matched_params: Dict[str, Any]
-    ens_params: Dict[str, Any]  # параметры из индекса ENS
-    ens_params_mask: Dict[str, Any]  # параметры из ens_name по маске
+    ens_params: Dict[str, Any]
+    ens_params_mask: Dict[str, Any]
     score: float
-    match_type: str  # 'exact', 'partial', 'fuzzy'
+    match_type: str
     confidence: float
     details: Dict[str, Any]
 
@@ -167,19 +153,14 @@ class ParametricMatch:
 class ParametricENSClient:
     """
     Клиент для параметрического поиска по ЕСН.
-
-    Архитектура:
-    1. Проверка наличия маски в MaskDatabase
-    2. Применение маски для извлечения параметров
-    3. Поиск по параметрам в ENSIndex
-    4. Расчет score сопоставления
     """
 
     def __init__(
         self,
         mask_db,
         ens_index_path: Optional[str] = None,
-        use_tfidf_fallback: bool = True
+        use_tfidf_fallback: bool = True,
+        skip_fields: Optional[List[str]] = None
     ):
         """
         Инициализация клиента.
@@ -188,76 +169,98 @@ class ParametricENSClient:
             mask_db: Экземпляр MaskDatabase
             ens_index_path: Путь к индексу ЕСН
             use_tfidf_fallback: Использовать TF-IDF fallback
+            skip_fields: Список служебных полей ENS для пропуска при сравнении.
+                         Если None — загружается из config.settings.output.ens_params_skip_fields,
+                         fallback на базовый набор.
         """
         self.mask_db = mask_db
         self.ens_index_path = ens_index_path
         self.use_tfidf_fallback = use_tfidf_fallback
         self._ens_index = None
-
-        # Кэш для _find_in_ens по хешу (params, standard, item_type)
         self._find_in_ens_cache: Dict[str, Any] = {}
-
-        # === ПРОИЗВОДИТЕЛЬНОСТЬ: индексы и кэши ===
         self._ens_by_standard_type: Dict[Tuple[str, str], List[Dict]] = {}
         self._ens_by_code: Dict[str, Dict] = {}
         self._pattern_cache: Dict[str, Any] = {}
-
-        # === THREAD-SAFETY: locks для кэшей ===
         self._find_in_ens_lock = threading.Lock()
         self._pattern_lock = threading.Lock()
+
+        # === SKIP FIELDS: загрузка из конфига или fallback ===
+        self._skip_fields: set = self._load_skip_fields(skip_fields)
+        logger.info("[SKIP_FIELDS] Loaded %d skip fields", len(self._skip_fields))
 
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
             self._build_indexes()
 
+    def _load_skip_fields(self, skip_fields: Optional[List[str]]) -> set:
+        """Загрузка списка служебных полей: приоритет аргумент > конфиг > fallback."""
+        if skip_fields is not None:
+            return set(skip_fields)
+
+        # Пробуем загрузить из settings
+        try:
+            from config.settings import get_settings
+            settings = get_settings()
+            if hasattr(settings, 'output') and hasattr(settings.output, 'ens_params_skip_fields'):
+                cfg_fields = settings.output.ens_params_skip_fields
+                if cfg_fields:
+                    return set(cfg_fields)
+        except Exception as e:
+            logger.debug("[SKIP_FIELDS] Failed to load from settings: %s", e)
+
+        # Fallback: базовый набор (синхронизирован с типовым config.yaml)
+        return {
+            '_id', '_index', '_source', 'id', 'created_at', 'updated_at',
+            'hash', 'pattern_hash',
+            'код', 'mdm_key', 'единицы_измерения', 'наименование_типа.1',
+            'полное_наименование', 'наименование', 'нтд', 'тип',
+            'вести_учет_по_характеристикам', 'гражданская_продукция',
+            'заблокировано', 'наименование_1', 'организация_корпорации',
+            'автор', 'дата_создания', 'пометка_удаления',
+            'базовая_единица_измерения', 'соответствие_тр_тс',
+            'габаритные_размеры_масса', 'специальная_приемка',
+            'ссылка', 'классификатор_енс', 'классификатор_енс_код',
+            'оквэд2', 'оквэд2_код', 'окпд2', 'окпд2_код',
+            'дата_последнего_изменения', 'автор_последнего_изменения',
+            'марка_материала_1', 'нормативный_документ',
+            'нормативный_документ_1', 'тип_изделия', 'наименование_типа',
+            'item_type', 'standard', '_match_score', '_match_type'
+        }
+
     def _build_indexes(self):
         """Построить индексы для O(1) / O(small N) доступа к ENS."""
         items = self._ens_index.get('items', []) if self._ens_index else []
         logger.info("Building ENS indexes for %d items...", len(items))
-
         for item in items:
             std = self._normalize_standard(item.get('нтд') or item.get('standard', ''))
             itype = str(item.get('тип_изделия') or item.get('наименование_типа', '')).upper().strip()
-
-            # Индекс по (стандарт, тип)
             key = (std, itype)
             self._ens_by_standard_type.setdefault(key, []).append(item)
-
-            # Индекс по коду
             code = str(item.get('код', '')).strip()
             mdm = str(item.get('mdm_key', '')).strip()
             if code:
                 self._ens_by_code[code] = item
             if mdm and mdm != code:
                 self._ens_by_code[mdm] = item
-
-        total_keys = len(self._ens_by_standard_type)
-        logger.info("ENS indexes built: %d (std,type) groups, %d codes", total_keys, len(self._ens_by_code))
+        logger.info("ENS indexes built: %d (std,type) groups, %d codes",
+                    len(self._ens_by_standard_type), len(self._ens_by_code))
 
     def _get_candidates_by_index(self, std_norm: Optional[str], query_type: Optional[str]) -> List[Dict]:
         """Получить кандидатов ENS через индекс (вместо полного скана)."""
         candidates = []
-
         if std_norm and query_type:
             key = (std_norm, query_type)
             candidates = self._ens_by_standard_type.get(key, [])
-
         if not candidates and std_norm:
-            # Fallback: все записи с этим стандартом
             for key, group in self._ens_by_standard_type.items():
                 if key[0] == std_norm:
                     candidates.extend(group)
-
         if not candidates and query_type:
-            # Fallback: все записи с этим типом
             for key, group in self._ens_by_standard_type.items():
                 if key[1] == query_type:
                     candidates.extend(group)
-
         if not candidates:
-            # Ultimate fallback (редко): все записи
             candidates = self._ens_index.get('items', []) if self._ens_index else []
-
         return candidates
 
     def _get_compiled_pattern(self, pattern: str) -> Any:
@@ -273,22 +276,15 @@ class ParametricENSClient:
 
     def _relax_pattern(self, pattern: str, standard: str = None) -> str:
         r"""
-        Исправления regex-масок для корректного matching'а:
-        1. Латинская t/a → русская т/а + \s* после типа изделия
-        2. \s* после )? опциональной группы
-        3. \s* перед \( в опциональной группе
-        4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (запятая как разделитель)
-        5. ОСТ1 → ОСТ\s*1 (пробел между ОСТ и цифрой)
-        6. Винт: вынести номинальный_диаметр_резьбы из опциональной группы
-        7. Шайба: добавить толщину между наружным_диаметром и покрытием
+        Исправления regex-масок для корректного matching'а.
         """
         relaxed = pattern
 
         # 1. Латинская t/a → русская т/а (без double \s*)
-        _ru_t = chr(0x0442)  # русская т
-        _ru_a = chr(0x0430)  # русская а
-        _ru_b = chr(0x0431)  # русская б
-        _ru_g = chr(0x0433)  # русская г
+        _ru_t = chr(0x0442)
+        _ru_a = chr(0x0430)
+        _ru_b = chr(0x0431)
+        _ru_g = chr(0x0433)
 
         for latin, cyr in [('Винt', 'Вин' + _ru_t), ('Болt', 'Бол' + _ru_t),
                            ('Шайba', 'Шай' + _ru_b + _ru_a), ('Гайka', 'Гай' + _ru_g + _ru_a)]:
@@ -296,18 +292,16 @@ class ParametricENSClient:
                 has_s = relaxed[relaxed.find(latin) + len(latin):].startswith(r'\s*')
                 relaxed = relaxed.replace(latin, cyr + (r'\s*' if not has_s else ''), 1)
 
-        # Fallback: fix any remaining mixed-script type names
         relaxed = relaxed.replace('Винt', 'Вин' + _ru_t)
         relaxed = relaxed.replace('Болt', 'Бол' + _ru_t)
         relaxed = relaxed.replace('Шайb', 'Шай' + _ru_b)
         relaxed = relaxed.replace('Гайk', 'Гай' + _ru_g)
 
-        # 2. )?(?P< → )?\s*(?P<
+        # 2. )?(?P< → )?	*(?P<
         relaxed = re.sub(r'\)\?\(\?P<', lambda m: r')?\s*(?P<', relaxed)
 
-        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)? (через .replace)
+        # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)?
         relaxed = relaxed.replace(r'\d+(?:\\.\d+)?', r'\d+(?:[.,]\d+)?')
-        # Also try with single backslash (masks loaded from DB)
         relaxed = relaxed.replace(r'\d+(?:\.\d+)?', r'\d+(?:[.,]\d+)?')
 
         # 5. ОСТ1 → ОСТ\s*1
@@ -333,12 +327,12 @@ class ParametricENSClient:
 
         # 8. Винт: добавить \s* перед \( в группе исполнения
         relaxed = relaxed.replace(
-            r'(?:\u005c(\u005cs*(?P<исполнение>',
+            r'(?:\\u005c(\\u005cs\*(?P<исполнение>',
             r'(?:\s*\(\s*(?P<исполнение>',
             1
         )
 
-        # 9. Исполнение: сделать скобки опциональными, разрешить пробел/дефис после
+        # 9. Исполнение: сделать скобки опциональными
         relaxed = relaxed.replace('$$?', r'\(')
         relaxed = relaxed.replace(r'$$\s*)', r'\)\s*)')
         relaxed = relaxed.replace(r'$$\s*(?P<', r'\)\s*(?P<')
@@ -346,32 +340,32 @@ class ParametricENSClient:
         relaxed = relaxed.replace('$(?P<', r'\((?P<')
         relaxed = relaxed.replace(r'$\s*)', r'\)\s*)')
         relaxed = relaxed.replace(r'$\s*(?P<', r'\)\s*(?P<')
-        relaxed = relaxed.replace(r'\$\$?\s*)', r'\)\s*)')
-        relaxed = relaxed.replace(r'\$\$?(?P<', r'\((?P<')
+        relaxed = relaxed.replace(r'\$$\?\s*)', r'\)\s*)')
+        relaxed = relaxed.replace(r'\$$?(?P<', r'\((?P<')
         relaxed = relaxed.replace(r'\$(?P<', r'\((?P<')
         relaxed = relaxed.replace(r'\)\s*', r'\)[-\s]*')
         if '$' in relaxed.rstrip('$').rstrip():
             relaxed = re.sub(r'\$(?=\s|[-\s]*\(|[-\s]*\d|[-\s]*[A-Z])', r'\)', relaxed)
             relaxed = re.sub(r'\$(?=\s*$)', r'\)', relaxed)
 
-        # 14. Разделители между параметрами: \s+ → [-\s]+
+        # 14. Разделители между параметрами
         relaxed = relaxed.replace(r')\s+(?P<', r')[-\s]+(?P<')
         relaxed = relaxed.replace(r'\d+\s+\d+', r'\d+[-\s]+\d+')
 
-        # 10. Метрическая резьба: добавить опциональный шаг (x1,25)
+        # 10. Метрическая резьба: добавить опциональный шаг
         relaxed = relaxed.replace(
             r'(?:M(?P<номинальный_диаметр_резьбы>\d+))',
             r'(?:M(?P<номинальный_диаметр_резьбы>\d+)(?:[xX\u00d7]\d+(?:[.,]\d+)?)?)',
             1
         )
 
-        # 10a. Сделать M опциональным перед номинальный_диаметр_резьбы
+        # 10a. Сделать M опциональным
         relaxed = relaxed.replace(
             r'(?P<номинальный_диаметр_резьбы>M',
             r'(?P<номинальный_диаметр_резьбы>(?:M)?'
         )
 
-        # 11. Класс поля допуска: ограничить буквами (без цифр)
+        # 11. Класс поля допуска
         relaxed = relaxed.replace(
             r'(?P<класс_поле_допуска>[\d+][\w]*)',
             r'(?P<класс_поле_допуска>[\d+][a-zA-Z\u0430-\u044f\u0410-\u042f]*)',
@@ -385,7 +379,7 @@ class ParametricENSClient:
             1
         )
 
-        # 13. Группа прочности: ограничить цифры перед точкой
+        # 13. Группа прочности
         relaxed = relaxed.replace(
             r'(?P<группа_класс_прочности>\d+\.\d+)',
             r'(?P<группа_класс_прочности>\d{1,2}(?:\.\d+)?)',
@@ -410,7 +404,6 @@ class ParametricENSClient:
             if std_suffix:
                 relaxed = relaxed.rstrip('$').rstrip() + std_suffix + r'\s*$'
 
-        # Проверяем что результат - валидный regex
         try:
             re.compile(relaxed)
         except re.error as e:
@@ -443,57 +436,32 @@ class ParametricENSClient:
         item_type: Optional[str] = None,
         pattern: Optional[str] = None
     ) -> ParametricMatch:
-        """
-        Параметрическое сопоставление.
-
-        Args:
-            text: Текст номенклатуры
-            standard: Стандарт (если известен)
-            item_type: Тип изделия (если известен)
-
-        Returns:
-            ParametricMatch
-        """
-        # Шаг 1: Получаем маску
+        """Параметрическое сопоставление."""
         mask = None
         if standard and item_type:
             mask = self.mask_db.get_mask(standard, item_type)
 
         if not mask:
-            # Fallback: пробуем извлечь стандарт и тип из текста
             from parsers.standard_extractor import get_standard_extractor
             extractor = get_standard_extractor()
             extracted = extractor.extract_all(text)
-
             std_info = extracted.get('standard_info')
             extracted_type = extracted.get('item_type')
-
             if std_info and extracted_type:
-                mask = self.mask_db.get_mask(
-                    std_info.normalized,
-                    extracted_type
-                )
+                mask = self.mask_db.get_mask(std_info.normalized, extracted_type)
 
-        # Шаг 2: Применяем маску (с релаксацией для совместимости)
-        # Если pattern передан напрямую - используем его (skip БД)
         effective_mask = mask
         if pattern and not mask:
-            # Создаём временный mask-like объект
             from types import SimpleNamespace
-            effective_mask = SimpleNamespace(
-                pattern=pattern, required=[], id=-1
-            )
+            effective_mask = SimpleNamespace(pattern=pattern, required=[], id=-1)
 
         if effective_mask:
-            # Используем стандарт из параметра match() если в маске пусто
             effective_standard = getattr(effective_mask, 'standard', None) or standard
             relaxed_pattern = self._relax_pattern(pattern or effective_mask.pattern, standard=effective_standard)
             extracted_params = self._apply_mask(relaxed_pattern, text, standard=effective_standard)
 
             if extracted_params:
-                # Шаг 3: Ищем в ЕСН
                 required = getattr(effective_mask, 'required', [])
-                # Если required - JSON строка, парсим
                 if isinstance(required, str):
                     try:
                         import json as _json
@@ -501,17 +469,19 @@ class ParametricENSClient:
                     except (ValueError, TypeError):
                         required = []
 
-                # Remap params для поиска в ENS (ENS индекс использует нормализованные имена)
-                search_params = self._remap_params(extracted_params)
+                # Фильтруем метаданные перед поиском
+                meta_keys = {'тип_изделия', 'item_type', 'standard', 'нтд', 'нтд_1',
+                             'наименование', 'полное_наименование', 'код', 'mdm_key'}
+                search_params = {k: v for k, v in self._remap_params(extracted_params).items()
+                                 if k not in meta_keys and v is not None}
                 match_result = self._find_in_ens(search_params, required, standard=standard, text=text, item_type=item_type)
 
                 if match_result:
-                    # Извлекаем данные из ENS
                     ens_code = match_result.get('код')
                     ens_name = match_result.get('полное_наименование') or match_result.get('наименование')
-                    ens_params_from_index = {k: v for k, v in match_result.items() if k not in ['_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд']}
+                    ens_params_from_index = {k: v for k, v in match_result.items()
+                                             if k not in self._skip_fields and not k.startswith('_')}
 
-                    # Парсим ens_name той же маской → ens_params_mask (raw, те же имена групп)
                     ens_params_mask = None
                     if ens_name:
                         try:
@@ -519,7 +489,6 @@ class ParametricENSClient:
                         except Exception as e:
                             logger.debug("[match] Failed to parse ens_name='%s': %s", ens_name, e)
 
-                    # Новая логика сопоставления
                     final_score, match_type, details = self._calculate_match_score_v2(
                         text=text,
                         ens_name=ens_name,
@@ -545,19 +514,17 @@ class ParametricENSClient:
                             **details
                         }
                     )
-                # Если ЕСН не нашёл - всё равно возвращаем extracted params
-                # (confidence от regex match)
+
                 required = getattr(effective_mask, 'required', [])
                 if required:
                     regex_confidence = self._calculate_confidence(extracted_params, required)
                 else:
-                    # Если required не заданы - считаем confidence по всем non-None полям
                     non_none = sum(1 for v in extracted_params.values() if v is not None)
                     regex_confidence = non_none / len(extracted_params) if extracted_params else 0.0
 
-                logger.debug("[REGEX_ONLY] extracted=%s, required=%s, confidence=%.2f", extracted_params, required, regex_confidence)
+                logger.debug("[REGEX_ONLY] extracted=%s, required=%s, confidence=%.2f",
+                             extracted_params, required, regex_confidence)
 
-                # Всегда возвращаем regex_only при непустых extracted (threshold 0.1)
                 if regex_confidence > 0.1:
                     return ParametricMatch(
                         ens_code=None,
@@ -573,12 +540,6 @@ class ParametricENSClient:
                         }
                     )
 
-        # Fallback: TF-IDF поиск
-        # NOTE: _tfidf_fallback не реализован в ParametricENSClient,
-        # используйте automated_processor для TF-IDF fallback
-        # if self.use_tfidf_fallback and self._ens_index:
-        #     return self._tfidf_fallback(text)
-
         return ParametricMatch(
             ens_code=None,
             mdm_key=None,
@@ -590,53 +551,34 @@ class ParametricENSClient:
         )
 
     def _apply_mask(self, pattern: str, text: str, standard: str = None) -> Optional[Dict[str, Any]]:
-        """Применение regex маски к тексту."""
+        """Применение regex маски к тексту. Нормализует 'None'/'null'/'nan' → None."""
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
             match = compiled.search(text)
 
             if match:
-                return match.groupdict()
+                result = {}
+                for k, v in match.groupdict().items():
+                    if v is None or str(v).strip().lower() in ('none', 'null', 'nan', ''):
+                        result[k] = None
+                    else:
+                        result[k] = v
+                return result
             else:
-                logger.debug("[_apply_mask] Regex did not match. Pattern: %r, Text: %r", pattern[:150], text[:80])
+                logger.debug("[_apply_mask] Regex did not match. Pattern: %r, Text: %r",
+                             pattern[:150], text[:80])
         except re.error as e:
-            # Логируем маску для диагностики - показываем первые 200 символов
             logger.error("Invalid mask pattern: %s. Pattern (first 200 chars): %r", e, pattern[:200])
 
         return None
 
     @staticmethod
     def _remap_params(params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Переименование неправильных имён групп из LLM-генерированных масок
-        в корректные ENS-имена параметров.
-        """
-        if not params:
-            return params
-        remapped = dict(params)
-        aliases = {
-            'наружный_диаметр_диаметр_вписа': 'номинальный_диаметр_резьбы',
-            'наружный_диаметр': 'номинальный_диаметр_резьбы',
-            'диаметр_вписанной_окружности': 'номинальный_диаметр_резьбы',
-            'd_вп': 'номинальный_диаметр_резьбы',
-            'наружный_диаметр_головки': 'диаметр_головки',
-            'диаметр_резьбы': 'номинальный_диаметр_резьбы',
-        }
-        for wrong, correct in aliases.items():
-            if wrong in remapped:
-                value = remapped.pop(wrong)
-                if correct in remapped and correct == 'номинальный_диаметр_резьбы':
-                    remapped['длина'] = remapped[correct]
-                remapped[correct] = value
-                logger.debug("[REMAP] %s → %s: %s", wrong, correct, value)
-        return remapped
+        """Переименование параметров — теперь pass-through (без хардкода имён столбцов)."""
+        return dict(params) if params else params
 
     def _expand_coating_variants(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Expand coating search variants.
-        When coating is 'Кд', also try 'Кд6', 'Кд9.фос.окс' etc.
-        Returns list of param dicts to try.
-        """
+        """Expand coating search variants."""
         variants = [params]
         coating = params.get('покрытие')
         if not coating:
@@ -644,22 +586,25 @@ class ParametricENSClient:
 
         coating_str = str(coating).strip().lower()
 
-        # Кд variants
         if coating_str in ('кд', 'кд.'):
             for variant in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
-                              'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
+                            'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
                 expanded = dict(params)
                 expanded['покрытие'] = variant
                 variants.append(expanded)
 
         return variants
 
-    def _find_in_ens(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Поиск по параметрам в индексе ЕНС. Fallback: точное совпадение наименования с проверкой типа."""
+    def _find_in_ens(self, params: Dict[str, Any], required: List[str],
+                     standard: Optional[str] = None, text: Optional[str] = None,
+                     item_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Поиск по параметрам в индексе ЕНС."""
         match, _ = self._find_in_ens_debug(params, required, standard, text, item_type)
         return match
 
-    def _find_in_ens_debug(self, params: Dict[str, Any], required: List[str], standard: Optional[str] = None, text: Optional[str] = None, item_type: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], List[Dict]]:
+    def _find_in_ens_debug(self, params: Dict[str, Any], required: List[str],
+                           standard: Optional[str] = None, text: Optional[str] = None,
+                           item_type: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], List[Dict]]:
         """
         Поиск по параметрам в индексе ЕНС с подробным debug-выводом.
         Возвращает: (best_match, debug_candidates_list)
@@ -669,8 +614,6 @@ class ParametricENSClient:
             logger.warning("[_find_in_ens] ENS index not loaded!")
             return None, debug_candidates
 
-        # === КЭШИРОВАНИЕ (thread-safe) ===
-        # Кэшируем результат по хешу (params, required, standard, item_type)
         cache_key = "{}:{}:{}:{}".format(
             hash(str(sorted(params.items()))),
             hash(str(required)),
@@ -686,15 +629,13 @@ class ParametricENSClient:
         best_match = None
         best_score = 0.0
 
-        # Нормализуем запрошенный стандарт и тип для сравнения
         query_std_norm = self._normalize_standard(standard) if standard else None
         query_type = item_type.upper().strip() if item_type else None
 
-        # === ИНДЕКСАЦИЯ: получаем кандидатов вместо полного скана ===
         candidates = self._get_candidates_by_index(query_std_norm, query_type)
-        logger.debug("[_find_in_ens] Candidates via index: %d (std=%s, type=%s)", len(candidates), query_std_norm, query_type)
+        logger.debug("[_find_in_ens] Candidates via index: %d (std=%s, type=%s)",
+                     len(candidates), query_std_norm, query_type)
 
-        # Try with coating variants
         param_variants = self._expand_coating_variants(params)
 
         for try_params in param_variants:
@@ -702,14 +643,12 @@ class ParametricENSClient:
                 item_name = item.get('наименование', item.get('полное_наименование', 'N/A'))
                 item_code = item.get('код', item.get('mdm_key', 'N/A'))
 
-                # Фильтр по стандарту (нтд) - обязательное совпадение
                 if query_std_norm:
                     item_std = item.get('нтд') or item.get('standard')
                     item_std_norm = self._normalize_standard(item_std) if item_std else None
                     if item_std_norm and query_std_norm != item_std_norm:
                         continue
 
-                # Фильтр по типу изделия (если указан)
                 if query_type:
                     item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
                     if item_type_field and item_type_field != query_type:
@@ -717,9 +656,10 @@ class ParametricENSClient:
 
                 score = self._calculate_match_score(try_params, required, item)
 
-                # Собираем debug info
-                skip_fields = {'_match_score', '_match_type', 'код', 'полное_наименование', 'наименование', 'mdm_key', 'нтд', 'тип_изделия', 'наименование_типа'}
-                ens_params = {k: v for k, v in item.items() if k not in skip_fields and not k.startswith('_') and v is not None and str(v).strip()}
+                # Фильтруем служебные поля для debug-вывода
+                ens_params = {k: v for k, v in item.items()
+                              if k not in self._skip_fields and not k.startswith('_')
+                              and v is not None and str(v).strip()}
 
                 debug_entry = {
                     'stage': 'parametric',
@@ -733,11 +673,11 @@ class ParametricENSClient:
 
                 if score > 0:
                     debug_candidates.append(debug_entry)
-                    # Подробный debug per-parameter (управляется через config.yaml matching.debug_per_parameter)
                     if _get_matching_config().debug_per_parameter:
                         source_str = ", ".join("{}={}".format(k, v) for k, v in debug_entry['source_params'].items())
                         ens_str = ", ".join("{}={}".format(k, v) for k, v in debug_entry['ens_params'].items())
-                        logger.debug("[_find_in_ens] Candidate '%s' (code=%s): score=%.3f", debug_entry['name'][:50], debug_entry['ens_code'], score)
+                        logger.debug("[_find_in_ens] Candidate '%s' (code=%s): score=%.3f",
+                                     debug_entry['name'][:50], debug_entry['ens_code'], score)
                         logger.debug("[_find_in_ens] Source params: %s", source_str)
                         logger.debug("[_find_in_ens] ENS params: %s", ens_str)
 
@@ -745,59 +685,56 @@ class ParametricENSClient:
                     best_score = score
                     best_match = item
 
-        # Fallback: точное совпадение наименования (с проверкой типа)
-        fallback_matched = False
-        if best_score < 0.99 and text:
-            text_norm = self._normalize_name(text)
-            for item in candidates:
-                if query_std_norm:
-                    item_std = item.get('нтд') or item.get('standard')
-                    item_std_norm = self._normalize_standard(item_std) if item_std else None
-                    if item_std_norm and query_std_norm != item_std_norm:
-                        continue
-                if query_type:
-                    item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
-                    if item_type_field and item_type_field != query_type:
-                        continue
-                for name_field in ['полное_наименование', 'наименование']:
-                    item_name = item.get(name_field)
-                    if item_name and self._normalize_name(str(item_name)) == text_norm:
-                        best_match = item
-                        best_score = 1.0
-                        fallback_matched = True
-                        debug_candidates.append({
-                            'stage': 'name_fallback',
-                            'name': str(item_name)[:60],
-                            'ens_code': str(item.get('код', item.get('mdm_key', 'N/A'))),
-                            'score': 1.0,
-                            'method': 'name_exact',
-                            'matched_name': str(item_name)[:60],
-                        })
+            # Fallback: точное совпадение наименования
+            if best_score < 0.99 and text:
+                text_norm = self._normalize_name(text)
+                for item in candidates:
+                    if query_std_norm:
+                        item_std = item.get('нтд') or item.get('standard')
+                        item_std_norm = self._normalize_standard(item_std) if item_std else None
+                        if item_std_norm and query_std_norm != item_std_norm:
+                            continue
+                    if query_type:
+                        item_type_field = str(item.get('тип_изделия', '') or item.get('наименование_типа', '')).upper().strip()
+                        if item_type_field and item_type_field != query_type:
+                            continue
+                    for name_field in ['полное_наименование', 'наименование']:
+                        item_name = item.get(name_field)
+                        if item_name and self._normalize_name(str(item_name)) == text_norm:
+                            best_match = item
+                            best_score = 1.0
+                            debug_candidates.append({
+                                'stage': 'name_fallback',
+                                'name': str(item_name)[:60],
+                                'ens_code': str(item.get('код', item.get('mdm_key', 'N/A'))),
+                                'score': 1.0,
+                                'method': 'name_exact',
+                                'matched_name': str(item_name)[:60],
+                            })
+                            break
+                    if best_score >= 0.99:
                         break
-                if best_score >= 0.99:
-                    break
 
-        # Сортируем по score убыванию
         debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
 
-        # Итоговый debug: top candidates (только при debug_per_parameter=true)
         if debug_candidates and _get_matching_config().debug_per_parameter:
             top_n = min(5, len(debug_candidates))
             logger.debug("[_find_in_ens] Top %d parametric candidates:", top_n)
             for i, cd in enumerate(debug_candidates[:top_n], 1):
                 ens_p_str = ", ".join("{}={}".format(k, v) for k, v in cd.get('ens_params', {}).items())
-                logger.debug("[_find_in_ens] #%d: '%s' score=%s, code=%s", i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
+                logger.debug("[_find_in_ens] #%d: '%s' score=%s, code=%s",
+                             i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
                 logger.debug("[_find_in_ens] ENS: %s", ens_p_str)
 
         if best_match:
             best_match = dict(best_match)
             best_match['_match_score'] = best_score
             best_match['_match_type'] = 'exact' if best_score > 0.9 else 'partial'
-            logger.info("[_find_in_ens] RETURNING match: score=%.2f, name=%s", best_score, best_match.get('наименование', '')[:50])
+            logger.info("[_find_in_ens] RETURNING match: score=%.2f, name=%s",
+                        best_score, best_match.get('наименование', '')[:50])
         else:
             logger.info("[_find_in_ens] No match found (best_score=%.2f < 0.7 threshold)", best_score)
 
-        # Сохраняем в кэш перед возвратом (thread-safe)
         with self._find_in_ens_lock:
             self._find_in_ens_cache[cache_key] = {
                 'match': best_match if best_score >= 0.7 else None,
@@ -811,8 +748,15 @@ class ParametricENSClient:
 
     @staticmethod
     def _normalize_name(name: str) -> str:
-        """Нормализация наименования: убираем пробелы, нижний регистр."""
-        return re.sub(r'\s+', '', str(name).lower().strip())
+        """Нормализация наименования: убираем пробелы, нижний регистр, сортируем токены покрытия."""
+        name = re.sub(r'\s+', '', str(name).lower().strip())
+        def _sort_coating_tokens(m):
+            tokens = m.group(0).split('.')
+            tokens = [t.strip() for t in tokens if t.strip()]
+            tokens.sort()
+            return '.'.join(tokens)
+        name = re.sub(r'([a-zа-яё]+(?:\.[a-zа-яё]+)+)', _sort_coating_tokens, name)
+        return name
 
     @staticmethod
     def _normalize_standard(std: Optional[str]) -> str:
@@ -825,11 +769,7 @@ class ParametricENSClient:
 
     @staticmethod
     def _normalize_ens_value(val: Any) -> Any:
-        """Нормализация значения для сравнения с ENS:
-        - float 2.0 → int 2
-        - str '2.0' → int 2
-        - str 'abc' → str 'abc'
-        """
+        """Нормализация значения для сравнения с ENS."""
         if isinstance(val, float):
             if val == int(val):
                 return int(val)
@@ -845,7 +785,7 @@ class ParametricENSClient:
         return val
 
     def _calculate_confidence(self, params: Dict[str, Any], required: List[str]) -> float:
-        """Расчет уверенности в извлечении (заполненность required-полей)."""
+        """Расчет уверенности в извлечении."""
         if isinstance(required, str):
             try:
                 import json as _json
@@ -865,25 +805,40 @@ class ParametricENSClient:
     ) -> float:
         """
         Сравнение params с ENS записью через _compare_param_sets.
-        Используем только required поля для поиска кандидатов.
+        Fallback: если поля записи пустые — парсим наименование ENS той же маской из БД.
         """
-        # Извлекаем параметры из ENS записи (без служебных полей)
-        skip_fields = {
-            '_match_score', '_match_type', 'код', 'полное_наименование',
-            'наименование', 'mdm_key', 'нтд', 'тип_изделия', 'наименование_типа',
-            'item_type', 'standard'
-        }
+        # Используем self._skip_fields (загружено из конфига/конструктора)
         ens_params = {k: v for k, v in ens_item.items()
-                     if k not in skip_fields and not k.startswith('_')}
+                      if k not in self._skip_fields and not k.startswith('_')}
 
-        # Берём только required поля из params
         if not required:
             return 0.0
         subset = {k: params[k] for k in required if k in params and params[k] is not None}
         if not subset:
             return 0.0
 
-        return self._compare_param_sets(subset, ens_params)
+        score = self._compare_param_sets(subset, ens_params)
+
+        # Fallback: поля записи пустые — парсим наименование через маску из БД
+        if score == 0 and self.mask_db:
+            std = self._normalize_standard(ens_item.get('нтд') or ens_item.get('standard', ''))
+            itype = str(ens_item.get('тип_изделия') or ens_item.get('наименование_типа', '')).upper().strip()
+            mask = self.mask_db.get_mask(std, itype)
+            if mask and getattr(mask, 'pattern', None):
+                for name_field in ['полное_наименование', 'наименование']:
+                    ens_name = ens_item.get(name_field)
+                    if not ens_name:
+                        continue
+                    try:
+                        parsed = self._apply_mask(mask.pattern, str(ens_name), standard=std)
+                        if parsed:
+                            score = self._compare_param_sets(subset, parsed)
+                            if score > 0:
+                                break
+                    except Exception:
+                        continue
+
+        return score
 
     def _calculate_match_score_v2(
         self,
@@ -899,7 +854,6 @@ class ParametricENSClient:
         1. name_exact: text vs ens_name
         2. params vs ens_params
         3. params vs ens_params_mask
-        Возвращает: (score, match_type, details)
         """
         details = {}
 
@@ -925,16 +879,45 @@ class ParametricENSClient:
                 return 1.0, 'params_mask_exact', {'level': 'params_mask', 'score': score_mask}
 
         best_score = max(score_ens, score_mask if ens_params_mask else 0.0)
-        return best_score, 'partial', {'level': 'partial', 'score_ens': score_ens, 'score_mask': score_mask if ens_params_mask else None}
+        return best_score, 'partial', {'level': 'partial', 'score_ens': score_ens,
+                                       'score_mask': score_mask if ens_params_mask else None}
+
+    @staticmethod
+    def _match_param_keys(key_a: str, keys_b: List[str]) -> Optional[str]:
+        """Fuzzy matching имени параметра key_a со списком ключей keys_b."""
+        if not key_a or not keys_b:
+            return None
+        tokens_a = [t for t in key_a.lower().split('_') if len(t) >= 3]
+        if not tokens_a:
+            return None
+        best_match = None
+        best_score = 0.0
+        for key_b in keys_b:
+            tokens_b = [t for t in key_b.lower().split('_') if len(t) >= 3]
+            if not tokens_b:
+                continue
+            matched = 0
+            for ta in tokens_a:
+                for tb in tokens_b:
+                    if ta == tb:
+                        matched += 1
+                        break
+                    if len(ta) >= 4 and len(tb) >= 4:
+                        if ta.startswith(tb) or tb.startswith(ta):
+                            matched += 1
+                            break
+            score = matched / max(len(tokens_a), len(tokens_b)) if max(len(tokens_a), len(tokens_b)) > 0 else 0.0
+            if score > best_score:
+                best_score = score
+                best_match = key_b
+        if best_score >= 0.5:
+            return best_match
+        return None
 
     def _compare_param_sets(self, params_a: Dict[str, Any], params_b: Dict[str, Any]) -> float:
         """
-        Сравнение двух наборов параметров.
-        Score=1.0 если все НЕ-ПУСТЫЕ параметры из ОБОИХ наборов совпадают.
-        Ключи, пустые в ОБОИХ наборах — игнорируются.
-        Ключ, пустой только в одном наборе:
-        - strict_union_keys=true → mismatch (return 0.0)
-        - strict_union_keys=false → skip (continue)
+        Сравнение двух наборов параметров с fuzzy matching ключей.
+        Score=1.0 если все НЕ-ПУСТЫЕ параметры совпадают.
         """
         if not params_a or not params_b:
             return 0.0
@@ -944,43 +927,88 @@ class ParametricENSClient:
         strict_mode = getattr(config, 'strict_union_keys', False)
 
         # Параметры, которые не участвуют в сравнении (метаданные/служебные)
-        skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд'}
+        skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд', 'нтд_1',
+                       'наименование', 'полное_наименование', 'код', 'mdm_key'}
 
-        # Сравниваем по ОБЪЕДИНЕНИЮ ключей
-        all_keys = set(params_a.keys()) | set(params_b.keys())
+        # Fuzzy matching ключей: строим маппинг key_a -> key_b
+        keys_b_available = set(params_b.keys()) - skip_params
+        matched_map = {}
+        used_b = set()
+
+        for key_a in params_a.keys():
+            if key_a in skip_params:
+                continue
+            val_a = params_a[key_a]
+            if val_a is None or str(val_a).strip() == '':
+                continue
+            # Точное совпадение
+            if key_a in keys_b_available and key_a not in used_b:
+                matched_map[key_a] = key_a
+                used_b.add(key_a)
+                continue
+            # Fuzzy match
+            candidates = [k for k in keys_b_available if k not in used_b]
+            best_b = self._match_param_keys(key_a, candidates)
+            if best_b:
+                matched_map[key_a] = best_b
+                used_b.add(best_b)
+            elif strict_mode:
+                if debug_detail:
+                    logger.debug("[_compare] KEY MISSING (strict): %s has no match in ENS", key_a)
+                return 0.0
+
+        # Strict mode: проверяем, что все непустые ключи из params_b тоже имеют пару
+        if strict_mode:
+            for key_b in keys_b_available:
+                if key_b in used_b:
+                    continue
+                val_b = params_b[key_b]
+                if val_b is None or str(val_b).strip() == '':
+                    continue
+                found = False
+                for key_a in params_a.keys():
+                    if key_a in skip_params:
+                        continue
+                    val_a = params_a[key_a]
+                    if val_a is None or str(val_a).strip() == '':
+                        continue
+                    if matched_map.get(key_a) == key_b:
+                        found = True
+                        break
+                if not found:
+                    if debug_detail:
+                        logger.debug("[_compare] KEY MISSING (strict): ENS key %s has no match in extracted", key_b)
+                    return 0.0
+
+        # Сравниваем значения по маппингу
         checked = 0
         matched = 0
 
-        for param in all_keys:
-            if param in skip_params:
-                continue
-
-            val_a = params_a.get(param)
-            val_b = params_b.get(param)
+        for key_a, key_b in matched_map.items():
+            val_a = params_a[key_a]
+            val_b = params_b.get(key_b)
             str_a = str(val_a).lower().strip() if val_a is not None else ''
             str_b = str(val_b).lower().strip() if val_b is not None else ''
 
-            # Если оба пустые — пропускаем (не влияет на score)
+            # Если оба пустые — пропускаем
             if not str_a and not str_b:
                 continue
 
-            # Если один пустой (None/''), а другой нет
+            # Если один пустой
             if not str_a or not str_b:
                 if strict_mode:
-                    # Строгий режим: пустой ключ = mismatch
                     if debug_detail:
-                        logger.debug("[_compare] KEY MISSING (strict): %s = '%s' vs '%s'", param, val_a, val_b)
+                        logger.debug("[_compare] VALUE MISSING (strict): %s = '%s' vs '%s'", key_a, val_a, val_b)
                     return 0.0
                 else:
-                    # Нестрогий режим: пустой ключ = skip (не влияет на score)
-                    if debug_detail:
-                        logger.debug("[_compare] KEY SKIP (non-strict): %s = '%s' vs '%s'", param, val_a, val_b)
+                    # Не логируем SKIP в non-strict — иначе лог засоряется
                     continue
 
             checked += 1
 
             # Сравниваем значения
-            if param == 'покрытие':
+            is_coating = (key_a == 'покрытие') or (key_b and 'покрытие' in key_b)
+            if is_coating:
                 norm_a = self._normalize_coating(str_a)
                 norm_b = self._normalize_coating(str_b)
                 sim = _text_similarity(norm_a, norm_b)
@@ -1005,7 +1033,6 @@ class ParametricENSClient:
                         return 0.0
                     matched += 1
 
-        # Если нечего сравнивать (все поля пустые) — mismatch
         if checked == 0:
             return 0.0
 
@@ -1015,20 +1042,30 @@ class ParametricENSClient:
         """
         Нормализация покрытия:
         - Убирает технологические коды: Кд3 → Кд, Ц9 → Ц
-        - Убирает суффиксы: Кд3.хр → Кд
+        - Сортирует токены: Окс.Фос.ЭФП → окс.эфп.фос
         """
         if not coating:
             return coating
         coating_str = str(coating).strip().lower()
-        # Убираем цифры после базового покрытия
+        if '.' in coating_str:
+            tokens = coating_str.split('.')
+            tokens = [re.sub(r'\d+', '', t) for t in tokens]
+            tokens = [t for t in tokens if t]
+            tokens.sort()
+            return '.'.join(tokens)
         base = re.sub(r'^(кд|ц|окс|фос|н|ан|хим|пас|бп|неп)\d+', r'\1', coating_str)
-        # Убираем суффиксы .хр, .фос
-        base = re.sub(r'\.(хр|фос|окс|пас)$', '', base)
         return base
 
     def _normalize_name(self, name: str) -> str:
-        """Нормализация наименования: убираем пробелы, нижний регистр."""
-        return re.sub(r'\s+', '', str(name).lower().strip())
+        """Нормализация наименования: убираем пробелы, нижний регистр, сортируем токены покрытия."""
+        name = re.sub(r'\s+', '', str(name).lower().strip())
+        def _sort_coating_tokens(m):
+            tokens = m.group(0).split('.')
+            tokens = [t.strip() for t in tokens if t.strip()]
+            tokens.sort()
+            return '.'.join(tokens)
+        name = re.sub(r'([a-zа-яё]+(?:\.[a-zа-яё]+)+)', _sort_coating_tokens, name)
+        return name
 
     def _tfidf_fallback(self, text: str) -> 'ParametricMatch':
         """TF-IDF fallback — возвращает пустой результат."""
