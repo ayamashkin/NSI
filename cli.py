@@ -289,79 +289,76 @@ def models(api_name):
 # PARAMETRIC COMMANDS (New)
 # =============================================================================
 def _init_llm_clients(settings, all_services=False):
-    """Инициализация LLM-клиентов с правильными именами классов."""
-    from api_clients.openwebui import OpenWebUIClient
-    from api_clients.mws_gpt import MWSGPTClient  # ← было MWSClient
-    from api_clients.gigachat import GigaChatClient
-    from api_clients.mts_ai import MTSAIClient
+    """Инициализация LLM клиентов.
+    По умолчанию — только default_service из mask_generation.
+    Если all_services=True — инициализируем ВСЕ сервисы, указанные в config.yaml (settings.api),
+    но НЕ хардкодный список всех возможных сервисов.
+    """
+    llm_clients = {}
 
-    clients = {}
-
-    # OpenWebUI
-    if 'openwebui' in settings.api:
-        try:
-            cfg = settings.api['openwebui']
-            cfg.load_credentials()
-            clients['openwebui'] = OpenWebUIClient(
-                base_url=cfg.base_url,
-                username=cfg.username,
-                password=cfg.password,
-                api_key=cfg.api_key,
-                timeout=cfg.timeout
-            )
-            logger.info("[INIT] OpenWebUI client created (key=%s)", bool(cfg.api_key or cfg.password))
-        except Exception as e:
-            logger.warning("[INIT] OpenWebUI client failed: %s", e)
-
-    # MWS Cloud GPT
-    if 'mws' in settings.api:
-        try:
-            cfg = settings.api['mws']
-            cfg.load_credentials()
-            clients['mws'] = MWSGPTClient(  # ← было MWSClient
-                base_url=cfg.base_url,
-                api_key=cfg.api_key,
-                timeout=cfg.timeout
-            )
-            logger.info("[INIT] MWS client created (key=%s)", bool(cfg.api_key))
-        except Exception as e:
-            logger.warning("[INIT] MWS client failed: %s", e)
-
-    # GigaChat
-    if 'gigachat' in settings.api:
-        try:
-            cfg = settings.api['gigachat']
-            cfg.load_credentials()
-            clients['gigachat'] = GigaChatClient(
-                base_url=cfg.base_url,
-                api_key=cfg.api_key,
-                scope=cfg.scope,
-                timeout=cfg.timeout
-            )
-            logger.info("[INIT] GigaChat client created (key=%s)", bool(cfg.api_key))
-        except Exception as e:
-            logger.warning("[INIT] GigaChat client failed: %s", e)
-
-    # MTS AI
-    if 'mts_ai' in settings.api:
-        try:
-            cfg = settings.api['mts_ai']
-            cfg.load_credentials()
-            if not cfg.api_key:
-                logger.error("[INIT] MTS AI api_key is EMPTY after load_credentials!")
-            clients['mts_ai'] = MTSAIClient(
-                base_url=cfg.base_url,
-                api_key=cfg.api_key,
-                timeout=cfg.timeout
-            )
-            logger.info("[INIT] MTS AI client created (key=%s)", bool(cfg.api_key))
-        except Exception as e:
-            logger.error("[INIT] MTS AI client failed: %s", e)
+    if all_services:
+        # Используем только те сервисы, что реально указаны в config.yaml
+        services = list(settings.api.keys())
+        logger.info(f"LLM: initializing all configured services: {services}")
     else:
-        logger.warning("[INIT] MTS AI config NOT FOUND in settings.api")
+        # Используем только default_service из mask_generation
+        services = [settings.mask_generation.default_service]
+        logger.info(f"LLM: using default_service='{services[0]}'")
 
-    logger.info("[INIT] Total LLM clients ready: %s", list(clients.keys()))
-    return clients
+    for service_name in services:
+        if service_name not in settings.api:
+            logger.warning(f"Service '{service_name}' not found in settings.api, skipping")
+            continue
+        try:
+            cfg = settings.api[service_name]
+            # --- Проверка credentials ---
+            if service_name == 'openwebui':
+                if not cfg.api_key and not (cfg.username and cfg.password):
+                    logger.debug(f"Skipping {service_name}: no credentials")
+                    continue
+                from api_clients.openwebui import OpenWebUIClient
+                llm_clients[service_name] = OpenWebUIClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key,
+                    username=cfg.username, password=cfg.password
+                )
+            elif service_name == 'mws':
+                if not cfg.api_key:
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                from api_clients.mws_gpt import MWSGPTClient
+                llm_clients[service_name] = MWSGPTClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
+                )
+            elif service_name == 'gigachat':
+                if not cfg.api_key:
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                from api_clients.gigachat import GigaChatClient
+                llm_clients[service_name] = GigaChatClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key,
+                    scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
+                    timeout=cfg.timeout, verify_ssl=False
+                )
+            elif service_name == 'mts_ai':
+                if not cfg.api_key:
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                from api_clients.mts_ai import MTSAIClient
+                llm_clients[service_name] = MTSAIClient(
+                    base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
+                )
+            else:
+                # Для неизвестных сервисов — попробуем инициализировать если есть api_key
+                if not getattr(cfg, 'api_key', None):
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                logger.warning(f"Unknown service '{service_name}', skipping (add handler if needed)")
+                continue
+            logger.info(f"LLM client initialized: {service_name}")
+        except Exception as e:
+            logger.warning(f"Failed to init {service_name}: {e}")
+    return llm_clients
+
 
 @cli.command()
 @click.argument('text')
