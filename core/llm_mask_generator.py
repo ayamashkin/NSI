@@ -70,7 +70,7 @@ class LLMMaskGenerator:
         standard: str,
         item_type: str,
         examples: List[str]
-    ) -> Optional[Dict[str, Any]]:
+    ) -> tuple[Optional[Dict[str, Any]], None]:
         """Генерация маски через LLM с fallback по провайдерам."""
         prompt = self._build_prompt(standard, item_type, examples)
 
@@ -82,7 +82,7 @@ class LLMMaskGenerator:
                     mask = self._parse_response(response, standard, item_type)
                     if mask:
                         logger.info("Generated mask via %s (attempt %d)", provider, attempt)
-                        return mask
+                        return mask, None
                     else:
                         logger.warning(
                             "Failed to parse response from %s (attempt %d)",
@@ -92,7 +92,7 @@ class LLMMaskGenerator:
                     logger.warning("No response from %s (attempt %d)", provider, attempt)
 
         logger.error("Failed to generate mask after %d attempts", self.max_retries)
-        return None
+        return None, None
 
     def _build_prompt(self, standard: str, item_type: str, examples: List[str]) -> str:
         """Строит промпт для LLM."""
