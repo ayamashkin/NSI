@@ -107,7 +107,7 @@ class LLMMaskGenerator:
 
         logger.info("[LLM] Final provider_priority: %s", priority)
         return priority
-    
+
     def generate_mask(
         self,
         standard: str,
@@ -202,86 +202,144 @@ class LLMMaskGenerator:
         return prompt
 
     def _call_llm(self, provider: str, prompt: str, attempt: int) -> Optional[str]:
-        """Вызов LLM через клиент."""
+        """
+        Вызов LLM для генерации маски.
+        """
         client = self.clients.get(provider)
         if not client:
             return None
 
-        # Увеличиваем temperature с каждой попыткой
+        # Получаем модель для конкретного провайдера из конфига
+        model = None
+        if self.settings and hasattr(self.settings, 'api') and provider in self.settings.api:
+            api_cfg = self.settings.api[provider]
+            model = getattr(api_cfg, 'default_model', None)
+            logger.debug("[LLM] Using model '%s' from api.%s.default_model", model, provider)
+
+        # Fallback: общая default_model из mask_generation
+        if not model and self.settings and hasattr(self.settings, 'mask_generation'):
+            model = getattr(self.settings.mask_generation, 'default_model', None)
+            logger.debug("[LLM] Fallback to mask_generation.default_model: '%s'", model)
+
+        # Ultimate fallback
+        if not model:
+            model = "qwen2.5-72b-instruct"
+            logger.debug("[LLM] Ultimate fallback model: '%s'", model)
+
+        # Temperature с ростом по attempt
         temperature = min(0.1 + attempt * 0.1, 0.5)
 
         try:
-            # Получаем модель для конкретного провайдера из конфига
-            model = None
-            if self.settings and hasattr(self.settings, 'api') and provider in self.settings.api:
-                api_cfg = self.settings.api[provider]
-                model = getattr(api_cfg, 'default_model', None)
-                logger.debug("[LLM] Using model '%s' from api.%s.default_model", model, provider)
-
-            # Fallback: общая default_model из mask_generation
-            if not model and self.settings and hasattr(self.settings, 'mask_generation'):
-                model = getattr(self.settings.mask_generation, 'default_model', None)
-                logger.debug("[LLM] Fallback to mask_generation.default_model: '%s'", model)
-
-            # Ultimate fallback
-            if not model:
-                model = "qwen2.5-72b-instruct"
-                logger.debug("[LLM] Ultimate fallback model: '%s'", model)
-
             response = client.complete(
                 prompt=prompt,
                 model=model,
                 temperature=temperature
             )
-            # response — это dict с ключами: success, content, raw, error, model
+
+            # response — dict с success, content, raw, error, model
             if response and response.get('success'):
-                return response.get('raw', '')
+                # Если content уже распарсен (dict), вернуть его как JSON-строку
+                content = response.get('content')
+                if isinstance(content, dict):
+                    logger.debug("[LLM] Provider %s returned pre-parsed dict, serializing to JSON", provider)
+                    return json.dumps(content, ensure_ascii=False)
+                # Иначе вернуть raw текст
+                raw = response.get('raw', '')
+                if raw:
+                    return raw
+                # Если raw пустой, но content есть (не dict) — вернуть content
+                if content and not isinstance(content, dict):
+                    return str(content)
+                logger.warning("[LLM] Provider %s returned success=True but no raw/content", provider)
+                return None
             else:
                 error_msg = response.get('error', 'Unknown error') if response else 'No response'
                 logger.warning("LLM call failed: %s", error_msg)
                 return None
+
         except Exception as e:
             logger.warning("LLM call failed: %s", e)
             return None
 
-    def _parse_response(
-        self,
-        response: str,
-        standard: str,
-        item_type: str
-    ) -> Optional[Dict[str, Any]]:
-        """Парсинг ответа LLM."""
-        try:
-            # Извлекаем JSON из ответа
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if not json_match:
-                logger.warning("No JSON found in LLM response")
-                return None
+    def _parse_response(self, response: str, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
+        """Парсинг ответа LLM с robust JSON extraction."""
+        if not response:
+            logger.warning("Empty LLM response")
+            return None
 
-            data = json.loads(json_match.group())
-
-            pattern = data.get('pattern', '')
-            params = data.get('params', [])
-            required = data.get('required', [])
-
-            # Валидация паттерна
+        # Стратегия 1: Markdown code block
+        md_json = re.search(r'```(?:json)?\s*(.*?)\s*```', response, re.DOTALL)
+        if md_json:
             try:
-                re.compile(pattern, re.IGNORECASE)
-            except re.error as e:
-                logger.warning("Invalid regex pattern: %s", e)
+                data = json.loads(md_json.group(1))
+                return self._validate_mask_dict(data, standard, item_type)
+            except json.JSONDecodeError as e:
+                logger.debug(f"Markdown JSON parse failed: {e}")
+
+        # Стратегия 2: Balanced braces (robust)
+        for start in re.finditer(r'(?m)^\s*\{', response):
+            pos = start.start()
+            brace_count = 0
+            in_string = False
+            escape = False
+            for i, ch in enumerate(response[pos:], start=pos):
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\':
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if ch == '{':
+                        brace_count += 1
+                    elif ch == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            candidate = response[pos:i + 1]
+                            try:
+                                data = json.loads(candidate)
+                                return self._validate_mask_dict(data, standard, item_type)
+                            except json.JSONDecodeError:
+                                break
+            # если brace_count не 0 — не валидный
+
+        # Стратегия 3: Простой fallback
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                return self._validate_mask_dict(data, standard, item_type)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse LLM response JSON: {e}. Preview: {response[:200]!r}")
                 return None
 
-            return {
-                'standard': standard,
-                'item_type': item_type,
-                'pattern': pattern,
-                'params': params,
-                'required': required
-            }
+        logger.warning("No JSON found in LLM response. Preview: %r", response[:200])
+        return None
 
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response: %s", e)
+    def _validate_mask_dict(self, data: Dict[str, Any], standard: str, item_type: str) -> Optional[Dict[str, Any]]:
+        """Валидация и нормализация словаря маски."""
+        pattern = data.get('pattern', '')
+        params = data.get('params', [])
+        required = data.get('required', [])
+
+        if not pattern:
+            logger.warning("Mask dict missing 'pattern' field")
             return None
-        except Exception as e:
-            logger.warning("Unexpected error parsing response: %s", e)
+
+        # Валидация паттерна
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            logger.warning(f"Invalid regex pattern: {e}")
             return None
+
+        return {
+            'standard': standard,
+            'item_type': item_type,
+            'pattern': pattern,
+            'params': params,
+            'required': required
+        }

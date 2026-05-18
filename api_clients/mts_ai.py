@@ -7,10 +7,15 @@ Auth: API_KEY в заголовке Authorization: Bearer {API_KEY}
 Docs: https://demo6-fundres.dev.mts.ai/
 
 LAST_FIXES:
+  2026-05-18 10:35 UTC+3 — complete()/chat_completion() возвращают Dict[str, Any]
+                           (success, content, raw, error, model) для совместимости с LLMMaskGenerator
+  2026-05-18 10:50 UTC+3 — Улучшенное извлечение JSON из markdown-блоков и длинных ответов
   2026-05-07 13:30 UTC+3 — создание клиента по аналогии с mws_gpt
 """
 
+import json
 import logging
+import re
 import requests
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -18,6 +23,63 @@ from pathlib import Path
 from api_clients.base import BaseLLMClient
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Извлекает JSON-объект из текста с markdown-блоками или inline JSON.
+    Пробует несколько стратегий: markdown code blocks, balanced braces.
+    """
+    if not text:
+        return None
+
+    # Стратегия 1: Markdown code block ```json ... ```
+    md_json = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+    if md_json:
+        try:
+            return json.loads(md_json.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Стратегия 2: Найти первый {...} с балансом скобок
+    # Ищем с начала строки или после переноса
+    for start in re.finditer(r'(?m)^\s*\{', text):
+        pos = start.start()
+        brace_count = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[pos:], start=pos):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == '{':
+                    brace_count += 1
+                elif ch == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        candidate = text[pos:i+1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break  # пробуем следующий match
+        # если brace_count не 0 — не валидный JSON, идём дальше
+
+    # Стратегия 3: Простой fallback — первый {...}
+    simple = re.search(r'\{.*?\}', text, re.DOTALL)
+    if simple:
+        try:
+            return json.loads(simple.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 class MTSAIClient(BaseLLMClient):
@@ -60,10 +122,11 @@ class MTSAIClient(BaseLLMClient):
             "Content-Type": "application/json"
         }
 
-    def complete(self, prompt: str, **kwargs) -> Optional[str]:
+    def complete(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """
         Реализация abstract method из BaseLLMClient.
-        Принимает строку prompt, отправляет как single-turn chat completion.
+        Возвращает Dict с полями: success, content, raw, error, model
+        (совместимо с LLMMaskGenerator._call_llm).
         """
         messages = [{"role": "user", "content": prompt}]
         return self.chat_completion(messages, **kwargs)
@@ -75,19 +138,18 @@ class MTSAIClient(BaseLLMClient):
         temperature: float = 0.1,
         max_tokens: Optional[int] = None,
         **kwargs
-    ) -> Optional[str]:
+    ) -> Dict[str, Any]:
         """
         Отправка запроса к /v1/chat/completions.
 
-        Args:
-            messages: Список сообщений [{"role": "...", "content": "..."}]
-            model: Имя модели (default: cotype_pro_2.5)
-            temperature: Температура (0.0-2.0)
-            max_tokens: Максимум токенов в ответе
-            **kwargs: Дополнительные параметры
-
         Returns:
-            Текст ответа модели или None при ошибке
+            Dict[str, Any]: {
+                "success": bool,
+                "content": Any | None,   # распарсенный JSON (если есть)
+                "raw": str | None,       # сырой текст ответа
+                "error": str | None,
+                "model": str
+            }
         """
         model = model or self.default_model
         url = f"{self.base_url}/v1/chat/completions"
@@ -122,20 +184,57 @@ class MTSAIClient(BaseLLMClient):
                 f"tokens_completion={usage.get('completion_tokens')}, "
                 f"content_length={len(content)}"
             )
-            return content
+
+            # Извлекаем JSON из ответа (для совместимости с mask generation)
+            parsed = _extract_json_from_text(content)
+            if parsed is None:
+                logger.warning(f"[MTSAI] Could not extract JSON from response (len={len(content)}). "
+                               f"Raw preview: {content[:200]!r}")
+
+            return {
+                "success": True,
+                "content": parsed,
+                "raw": content,
+                "error": None,
+                "model": model
+            }
 
         except requests.exceptions.Timeout:
             logger.error(f"[MTSAI] Timeout after {self.timeout}s")
-            return None
+            return {
+                "success": False,
+                "content": None,
+                "raw": None,
+                "error": f"Timeout after {self.timeout}s",
+                "model": model
+            }
         except requests.exceptions.HTTPError as e:
             logger.error(f"[MTSAI] HTTP error: {e.response.status_code} - {e.response.text[:200]}")
-            return None
+            return {
+                "success": False,
+                "content": None,
+                "raw": None,
+                "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}",
+                "model": model
+            }
         except requests.exceptions.RequestException as e:
             logger.error(f"[MTSAI] Request error: {e}")
-            return None
+            return {
+                "success": False,
+                "content": None,
+                "raw": None,
+                "error": str(e),
+                "model": model
+            }
         except Exception as e:
             logger.error(f"[MTSAI] Unexpected error: {e}")
-            return None
+            return {
+                "success": False,
+                "content": None,
+                "raw": None,
+                "error": str(e),
+                "model": model
+            }
 
     def get_models(self) -> List[str]:
         """Получение списка доступных моделей через /v1/models."""
