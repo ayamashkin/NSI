@@ -1,77 +1,36 @@
 """
 LLM Mask Generator
-Генерация regex масок через LLM (local/cloud) с каскадным fallback.
+Генерация regex-масок для стандартов через LLM с fallback по провайдерам.
 
-LAST_FIX: 2026-05-15 17:11 UTC+3 — provider_priority динамический (default_service первым); _call_llm: client.complete + per-provider model; generate_mask: item_type из ЕСН
+LAST_FIXES:
+  2026-05-18 11:16 UTC+3 — _parse_response: поддержка ```python + balanced braces JSON extraction
+  2026-05-18 10:35 UTC+3 — _call_llm: работа с Dict-ответами (success/content/raw/error/model)
+  2026-05-18 10:35 UTC+3 — _build_provider_priority: диагностика default_service
 """
 
+import json
 import logging
 import re
-import json
-from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass
-from pathlib import Path
+from typing import Dict, Any, List, Optional
+
+from api_clients.base import BaseLLMClient
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class GenerationResult:
-    """Результат генерации маски."""
-    pattern: str
-    params: List[str]
-    required: List[str]
-    standard: str
-    item_type: str
-    score: float = 0.0
-    test_examples: List[Dict] = None
-    raw_response: str = ""
-    attempts: int = 0
-    provider: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'pattern': self.pattern,
-            'params': self.params,
-            'required': self.required,
-            'standard': self.standard,
-            'item_type': self.item_type,
-            'score': self.score,
-            'test_examples': self.test_examples or []
-        }
-
-
 class LLMMaskGenerator:
-    """
-    Генератор масок через LLM с каскадным fallback:
-    1. default_service (из config.yaml) -> 2. Остальные доступные клиенты
+    """Генератор масок через LLM с fallback по провайдерам."""
 
-    Features:
-    - Динамический provider_priority из конфигурации
-    - Per-provider model selection (из APIConfig.default_model)
-    - Retry с увеличением temperature
-    - Auto-validation после генерации
-    """
-
-    def __init__(
-        self,
-        clients: Dict[str, Any],
-        settings: Optional[Any] = None,
-        max_retries: int = 3,
-        min_examples: int = 10
-    ):
+    def __init__(self, clients: Dict[str, BaseLLMClient], settings=None, max_retries: int = 3):
         self.clients = clients
         self.settings = settings
         self.max_retries = max_retries
-        self.min_examples = min_examples
-
-        # Динамический порядок fallback:
-        # 1. default_service из settings.mask_generation (если указан и клиент доступен)
-        # 2. Все остальные доступные клиенты (ключи из self.clients)
         self.provider_priority = self._build_provider_priority()
-
-        logger.info("LLMMaskGenerator initialized with %d clients, priority: %s",
-                    len(clients), self.provider_priority)
+        logger.info(
+            "LLMMaskGenerator initialized with %d clients, priority: %s",
+            len(clients), self.provider_priority
+        )
 
     def _build_provider_priority(self) -> List[str]:
         """Строит приоритет провайдеров: default_service первым, затем остальные."""
@@ -79,9 +38,7 @@ class LLMMaskGenerator:
         default_service = None
 
         if self.settings is not None:
-            # Пробуем получить из settings напрямую (не должно сработать, т.к. поле в mask_generation)
             default_service = getattr(self.settings, 'default_service', None)
-            # Основной источник — mask_generation
             if not default_service and hasattr(self.settings, 'mask_generation'):
                 default_service = getattr(self.settings.mask_generation, 'default_service', None)
                 logger.info("[LLM] default_service from mask_generation: '%s'", default_service)
@@ -112,92 +69,51 @@ class LLMMaskGenerator:
         self,
         standard: str,
         item_type: str,
-        examples: List[Dict],
-        name: str = "",
-        standard_info: Optional[Any] = None
-    ) -> Tuple[Optional[Dict[str, Any]], int]:
-        """
-        Генерация маски через LLM.
+        examples: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Генерация маски через LLM с fallback по провайдерам."""
+        prompt = self._build_prompt(standard, item_type, examples)
 
-        Args:
-            standard: Стандарт (например, 'ОСТ 1 31133-80')
-            item_type: Тип изделия (например, 'шайба', 'болт', 'винт') — уже нормализован из ЕСН
-            examples: Примеры из ЕСН
-            name: Исходное наименование (для контекста)
-            standard_info: Информация о стандарте
-
-        Returns:
-            Tuple[mask_dict, attempts_count]
-        """
-        if len(examples) < self.min_examples:
-            logger.warning("Not enough examples: %d < %d", len(examples), self.min_examples)
-            return None, 0
-
-        # Подготовка промпта
-        prompt = self._build_prompt(standard, item_type, examples, standard_info)
-
-        # Попытки генерации через разных провайдеров
-        for attempt in range(self.max_retries):
+        for attempt in range(1, self.max_retries + 1):
             for provider in self.provider_priority:
-                if provider not in self.clients:
-                    continue
-
-                try:
-                    result = self._call_llm(provider, prompt, attempt)
-                    if result:
-                        mask = self._parse_response(result, standard, item_type)
-                        if mask:
-                            logger.info("Generated mask via %s (attempt %d)", provider, attempt + 1)
-                            return mask, attempt + 1
-                except Exception as e:
-                    logger.warning("LLM %s failed (attempt %d): %s", provider, attempt + 1, e)
+                logger.info("Attempt %d/%d via %s", attempt, self.max_retries, provider)
+                response = self._call_llm(provider, prompt, attempt)
+                if response:
+                    mask = self._parse_response(response, standard, item_type)
+                    if mask:
+                        logger.info("Generated mask via %s (attempt %d)", provider, attempt)
+                        return mask
+                    else:
+                        logger.warning(
+                            "Failed to parse response from %s (attempt %d)",
+                            provider, attempt
+                        )
+                else:
+                    logger.warning("No response from %s (attempt %d)", provider, attempt)
 
         logger.error("Failed to generate mask after %d attempts", self.max_retries)
-        return None, self.max_retries
+        return None
 
-    def _build_prompt(
-        self,
-        standard: str,
-        item_type: str,
-        examples: List[Dict],
-        standard_info: Optional[Any] = None
-    ) -> str:
-        """Построение промпта для LLM."""
-        # Берем примеры наименований
-        sample_names = []
-        for ex in examples[:20]:
-            name = ex.get('полное_наименование') or ex.get('наименование', '')
-            if name:
-                sample_names.append(name)
+    def _build_prompt(self, standard: str, item_type: str, examples: List[str]) -> str:
+        """Строит промпт для LLM."""
+        examples_text = "\n".join(f"  {i+1}. {ex}" for i, ex in enumerate(examples[:20]))
+        prompt = f"""На основе следующих примеров наименований изделий типа "{item_type}" по стандарту {standard}:
 
-        # Уникальные примеры
-        unique_names = list(dict.fromkeys(sample_names))[:15]
+{examples_text}
 
-        prompt = f"""Сгенерируй Python regex паттерн для извлечения параметров из наименований крепежа.
+Создай Python regex паттерн с именованными группами (?P<<name>...) для извлечения параметров.
+Верни результат строго в формате JSON:
 
-Стандарт: {standard}
-Тип изделия: {item_type}
-
-Примеры наименований:
-"""
-        for name in unique_names:
-            prompt += f"- {name}\n"
-
-        prompt += """
-Требования:
-1. Паттерн должен быть в формате Python regex с именованными группами (?P<<name>...)
-2. Группы должны иметь короткие имена на русском языке (например: диаметр, длина, покрытие, исполнение)
-3. Обязательные параметры: номинальный диаметр, длина, покрытие
-4. Опциональные: исполнение, шаг резьбы, класс прочности
-5. Паттерн должен быть case-insensitive
-6. Разделители: пробел, дефис, точка
-
-Верни результат в формате JSON:
-{
+{{
     "pattern": "regex pattern here",
     "params": ["param1", "param2", ...],
     "required": ["param1", ...]
-}
+}}
+
+Правила:
+- pattern: валидный Python regex (флаг re.IGNORECASE будет применён при использовании)
+- params: список имён групп из pattern
+- required: список обязательных параметров (не может быть пустым)
 """
         return prompt
 
@@ -241,7 +157,10 @@ class LLMMaskGenerator:
                 # Если content уже распарсен (dict), вернуть его как JSON-строку
                 content = response.get('content')
                 if isinstance(content, dict):
-                    logger.debug("[LLM] Provider %s returned pre-parsed dict, serializing to JSON", provider)
+                    logger.debug(
+                        "[LLM] Provider %s returned pre-parsed dict, serializing to JSON",
+                        provider
+                    )
                     return json.dumps(content, ensure_ascii=False)
                 # Иначе вернуть raw текст
                 raw = response.get('raw', '')
@@ -250,7 +169,10 @@ class LLMMaskGenerator:
                 # Если raw пустой, но content есть (не dict) — вернуть content
                 if content and not isinstance(content, dict):
                     return str(content)
-                logger.warning("[LLM] Provider %s returned success=True but no raw/content", provider)
+                logger.warning(
+                    "[LLM] Provider %s returned success=True but no raw/content",
+                    provider
+                )
                 return None
             else:
                 error_msg = response.get('error', 'Unknown error') if response else 'No response'
@@ -267,14 +189,16 @@ class LLMMaskGenerator:
             logger.warning("Empty LLM response")
             return None
 
-        # Стратегия 1: Markdown code block
-        md_json = re.search(r'```(?:json)?\s*(.*?)\s*```', response, re.DOTALL)
-        if md_json:
-            try:
-                data = json.loads(md_json.group(1))
-                return self._validate_mask_dict(data, standard, item_type)
-            except json.JSONDecodeError as e:
-                logger.debug(f"Markdown JSON parse failed: {e}")
+        # Стратегия 1: Markdown code block ```json ... ``` / ```python ... ``` / ``` ... ```
+        for lang in [r'(?:json)?', r'(?:python)?', r'']:
+            pattern = rf'```{lang}\s*(.*?)\s*```'
+            md_json = re.search(pattern, response, re.DOTALL)
+            if md_json:
+                try:
+                    data = json.loads(md_json.group(1))
+                    return self._validate_mask_dict(data, standard, item_type)
+                except json.JSONDecodeError as e:
+                    logger.debug("Markdown JSON parse failed: %s", e)
 
         # Стратегия 2: Balanced braces (robust)
         for start in re.finditer(r'(?m)^\s*\{', response):
@@ -313,13 +237,21 @@ class LLMMaskGenerator:
                 data = json.loads(json_match.group())
                 return self._validate_mask_dict(data, standard, item_type)
             except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse LLM response JSON: {e}. Preview: {response[:200]!r}")
+                logger.warning(
+                    "Failed to parse LLM response JSON: %s. Preview: %r",
+                    e, response[:200]
+                )
                 return None
 
         logger.warning("No JSON found in LLM response. Preview: %r", response[:200])
         return None
 
-    def _validate_mask_dict(self, data: Dict[str, Any], standard: str, item_type: str) -> Optional[Dict[str, Any]]:
+    def _validate_mask_dict(
+        self,
+        data: Dict[str, Any],
+        standard: str,
+        item_type: str
+    ) -> Optional[Dict[str, Any]]:
         """Валидация и нормализация словаря маски."""
         pattern = data.get('pattern', '')
         params = data.get('params', [])
@@ -333,7 +265,7 @@ class LLMMaskGenerator:
         try:
             re.compile(pattern, re.IGNORECASE)
         except re.error as e:
-            logger.warning(f"Invalid regex pattern: {e}")
+            logger.warning("Invalid regex pattern: %s", e)
             return None
 
         return {

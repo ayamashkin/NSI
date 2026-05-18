@@ -7,9 +7,9 @@ Auth: API_KEY в заголовке Authorization: Bearer {API_KEY}
 Docs: https://demo6-fundres.dev.mts.ai/
 
 LAST_FIXES:
+  2026-05-18 11:16 UTC+3 — _extract_json_from_text: поддержка markdown ```python + balanced braces
   2026-05-18 10:35 UTC+3 — complete()/chat_completion() возвращают Dict[str, Any]
                            (success, content, raw, error, model) для совместимости с LLMMaskGenerator
-  2026-05-18 10:50 UTC+3 — Улучшенное извлечение JSON из markdown-блоков и длинных ответов
   2026-05-07 13:30 UTC+3 — создание клиента по аналогии с mws_gpt
 """
 
@@ -28,21 +28,22 @@ logger = logging.getLogger(__name__)
 def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     """
     Извлекает JSON-объект из текста с markdown-блоками или inline JSON.
-    Пробует несколько стратегий: markdown code blocks, balanced braces.
+    Пробует несколько стратегий: markdown code blocks (json/python/none), balanced braces.
     """
     if not text:
         return None
 
-    # Стратегия 1: Markdown code block ```json ... ```
-    md_json = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
-    if md_json:
-        try:
-            return json.loads(md_json.group(1))
-        except json.JSONDecodeError:
-            pass
+    # Стратегия 1: Markdown code block ```json ... ``` / ```python ... ``` / ``` ... ```
+    for lang in [r'(?:json)?', r'(?:python)?', r'']:
+        pattern = rf'```{lang}\s*(.*?)\s*```'
+        md_json = re.search(pattern, text, re.DOTALL)
+        if md_json:
+            try:
+                return json.loads(md_json.group(1))
+            except json.JSONDecodeError:
+                pass
 
-    # Стратегия 2: Найти первый {...} с балансом скобок
-    # Ищем с начала строки или после переноса
+    # Стратегия 2: Найти первый {...} с балансом скобок (игнорируем содержимое строк)
     for start in re.finditer(r'(?m)^\s*\{', text):
         pos = start.start()
         brace_count = 0
@@ -188,8 +189,10 @@ class MTSAIClient(BaseLLMClient):
             # Извлекаем JSON из ответа (для совместимости с mask generation)
             parsed = _extract_json_from_text(content)
             if parsed is None:
-                logger.warning(f"[MTSAI] Could not extract JSON from response (len={len(content)}). "
-                               f"Raw preview: {content[:200]!r}")
+                logger.warning(
+                    f"[MTSAI] Could not extract JSON from response (len={len(content)}). "
+                    f"Raw preview: {content[:200]!r}"
+                )
 
             return {
                 "success": True,
