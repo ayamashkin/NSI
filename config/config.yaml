@@ -196,13 +196,13 @@ logging:
   # Уровень логирования: DEBUG, INFO, WARNING, ERROR
   # DEBUG = подробные логи с per-parameter сравнением (много вывода)
   # INFO  = только ключевые события (REJECTED, auto-substitution, итоговый score)
-  level: "INFO"
+  level: "DEBUG"
 
   # Путь к файлу логов
   file: "logs/processor.log"
 
   # Максимальный размер одного файла логов
-  max_size: "10MB"
+  max_size: "50MB"
 
   # Количество ротированных файлов (backup)
   backup_count: 20
