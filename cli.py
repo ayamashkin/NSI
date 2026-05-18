@@ -286,61 +286,80 @@ def models(api_name):
 # =============================================================================
 # PARAMETRIC COMMANDS (New)
 # =============================================================================
-
 def _init_llm_clients(settings, all_services=False):
-    """Инициализация LLM клиентов."""
-    llm_clients = {}
+    """Инициализация LLM-клиентов с правильными именами классов."""
+    from api_clients.openwebui import OpenWebUIClient
+    from api_clients.mws_gpt import MWSGPTClient  # ← было MWSClient
+    from api_clients.gigachat import GigaChatClient
+    from api_clients.mts_ai import MTSAIClient
 
-    if all_services:
-        services = ['mws', 'mts_ai', 'gigachat', 'openwebui']
-    else:
-        services = [settings.mask_generation.default_service]
-        logger.info("LLM: using default_service='%s'", services[0])
+    clients = {}
 
-    for service_name in services:
-        if service_name not in settings.api:
-            continue
+    # OpenWebUI
+    if 'openwebui' in settings.api:
         try:
-            cfg = settings.api[service_name]
-            if service_name == 'openwebui':
-                if not cfg.api_key and not (cfg.username and cfg.password):
-                    logger.debug("Skipping %s: no credentials", service_name)
-                    continue
-                from api_clients.openwebui import OpenWebUIClient
-                llm_clients[service_name] = OpenWebUIClient(
-                    base_url=cfg.base_url, api_key=cfg.api_key,
-                    username=cfg.username, password=cfg.password
-                )
-            elif service_name == 'mws':
-                if not cfg.api_key:
-                    logger.debug("Skipping %s: no api_key", service_name)
-                    continue
-                from api_clients.mws_gpt import MWSGPTClient
-                llm_clients[service_name] = MWSGPTClient(
-                    base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
-                )
-            elif service_name == 'gigachat':
-                if not cfg.api_key:
-                    logger.debug("Skipping %s: no api_key", service_name)
-                    continue
-                from api_clients.gigachat import GigaChatClient
-                llm_clients[service_name] = GigaChatClient(
-                    base_url=cfg.base_url, api_key=cfg.api_key,
-                    scope=getattr(cfg, 'scope', 'GIGACHAT_API_PERS'),
-                    timeout=cfg.timeout, verify_ssl=False
-                )
-            elif service_name == 'mts_ai':
-                if not cfg.api_key:
-                    logger.debug("Skipping %s: no api_key", service_name)
-                    continue
-                from api_clients.mts_ai import MTSAIClient
-                llm_clients[service_name] = MTSAIClient(
-                    base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
-                )
-            logger.info("LLM client initialized: %s", service_name)
+            cfg = settings.api['openwebui']
+            cfg.load_credentials()
+            clients['openwebui'] = OpenWebUIClient(
+                base_url=cfg.base_url,
+                username=cfg.username,
+                password=cfg.password,
+                api_key=cfg.api_key,
+                timeout=cfg.timeout
+            )
+            logger.info("[INIT] OpenWebUI client created (key=%s)", bool(cfg.api_key or cfg.password))
         except Exception as e:
-            logger.warning("Failed to init %s: %s", service_name, e)
-    return llm_clients
+            logger.warning("[INIT] OpenWebUI client failed: %s", e)
+
+    # MWS Cloud GPT
+    if 'mws' in settings.api:
+        try:
+            cfg = settings.api['mws']
+            cfg.load_credentials()
+            clients['mws'] = MWSGPTClient(  # ← было MWSClient
+                base_url=cfg.base_url,
+                api_key=cfg.api_key,
+                timeout=cfg.timeout
+            )
+            logger.info("[INIT] MWS client created (key=%s)", bool(cfg.api_key))
+        except Exception as e:
+            logger.warning("[INIT] MWS client failed: %s", e)
+
+    # GigaChat
+    if 'gigachat' in settings.api:
+        try:
+            cfg = settings.api['gigachat']
+            cfg.load_credentials()
+            clients['gigachat'] = GigaChatClient(
+                base_url=cfg.base_url,
+                api_key=cfg.api_key,
+                scope=cfg.scope,
+                timeout=cfg.timeout
+            )
+            logger.info("[INIT] GigaChat client created (key=%s)", bool(cfg.api_key))
+        except Exception as e:
+            logger.warning("[INIT] GigaChat client failed: %s", e)
+
+    # MTS AI
+    if 'mts_ai' in settings.api:
+        try:
+            cfg = settings.api['mts_ai']
+            cfg.load_credentials()
+            if not cfg.api_key:
+                logger.error("[INIT] MTS AI api_key is EMPTY after load_credentials!")
+            clients['mts_ai'] = MTSAIClient(
+                base_url=cfg.base_url,
+                api_key=cfg.api_key,
+                timeout=cfg.timeout
+            )
+            logger.info("[INIT] MTS AI client created (key=%s)", bool(cfg.api_key))
+        except Exception as e:
+            logger.error("[INIT] MTS AI client failed: %s", e)
+    else:
+        logger.warning("[INIT] MTS AI config NOT FOUND in settings.api")
+
+    logger.info("[INIT] Total LLM clients ready: %s", list(clients.keys()))
+    return clients
 
 @cli.command()
 @click.argument('text')

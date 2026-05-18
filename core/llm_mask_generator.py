@@ -76,30 +76,38 @@ class LLMMaskGenerator:
     def _build_provider_priority(self) -> List[str]:
         """Строит приоритет провайдеров: default_service первым, затем остальные."""
         priority = []
-
-        # Сначала default_service из конфигурации
         default_service = None
-        if self.settings:
-            # Пробуем получить из settings напрямую
+
+        if self.settings is not None:
+            # Пробуем получить из settings напрямую (не должно сработать, т.к. поле в mask_generation)
             default_service = getattr(self.settings, 'default_service', None)
-            # Или из mask_generation config
+            # Основной источник — mask_generation
             if not default_service and hasattr(self.settings, 'mask_generation'):
                 default_service = getattr(self.settings.mask_generation, 'default_service', None)
+                logger.info("[LLM] default_service from mask_generation: '%s'", default_service)
+            elif default_service:
+                logger.info("[LLM] default_service from settings: '%s'", default_service)
+        else:
+            logger.warning("[LLM] self.settings is None — default_service ignored!")
 
-        if default_service and default_service in self.clients:
-            priority.append(default_service)
-            logger.info("[LLM] default_service='%s' set as primary", default_service)
-        elif default_service:
-            logger.warning("[LLM] default_service='%s' not found in clients %s",
-                           default_service, list(self.clients.keys()))
+        if default_service:
+            if default_service in self.clients:
+                priority.append(default_service)
+                logger.info("[LLM] default_service='%s' set as primary", default_service)
+            else:
+                logger.error(
+                    "[LLM] default_service='%s' NOT FOUND in clients %s. "
+                    "Check api_key / config / import errors.",
+                    default_service, list(self.clients.keys())
+                )
 
-        # Затем все остальные доступные клиенты
         for provider in self.clients.keys():
             if provider not in priority:
                 priority.append(provider)
 
+        logger.info("[LLM] Final provider_priority: %s", priority)
         return priority
-
+    
     def generate_mask(
         self,
         standard: str,
