@@ -3,7 +3,9 @@ LLM Mask Generator
 Генерация regex-масок для стандартов через LLM с fallback по провайдерам.
 
 LAST_FIXES:
-  2026-05-18 12:45 UTC+3 — _build_prompt: наименования + значимые заполненные поля (без None и _-служебных)
+  2026-05-18 13:10 UTC+3 — ВОССТАНОВЛЕН _build_prompt: field_stats, visible/invisible fields,
+                           пропущенные поля, разнообразные примеры (как до 15.05)
+  2026-05-18 12:45 UTC+3 — _build_prompt: наименования + значимые заполненные поля
   2026-05-18 11:50 UTC+3 — Восстановлены _save_debug_prompt/_save_debug_response
   2026-05-18 11:16 UTC+3 — _parse_response: поддержка ```python + balanced braces JSON extraction
   2026-05-18 10:35 UTC+3 — _call_llm: работа с Dict-ответами (success/content/raw/error/model)
@@ -11,6 +13,7 @@ LAST_FIXES:
 
 import json
 import logging
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -22,68 +25,60 @@ from config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
-# Поля, которые НЕ несут смысловой нагрузки для генерации маски
-_SKIP_FIELDS = {
-    '_ens_category', '_source_file', '_available_columns', '_detected_prompt_id',
-    '_detected_category', '_detection_confidence', '_implicit_тип',
-    '_original_код', '_original_наименование', '_original_полное_наименование',
-    '_original_нтд', '_original_нтд.1', '_original_марка_материала',
-    '_original_длина', '_original_класс_(поле)_допуска', '_original_покрытие',
-    '_original_группа_(класс)_прочности', '_original_шаг_резьбы',
-    '_original_исполнение', '_original_наименование_типа', '_original_тип_резьбы',
-    '_original_номинальный_диаметр_резьбы', '_original_толщина_покрытия',
-    '_original_марка_материала.1', '_original_наименование.1',
-    'код', 'mdm_key', 'ссылка', 'дата_создания', 'дата_последнего_изменения',
-    'автор', 'автор_последнего_изменения', 'комментарий_эксперта',
-    'базовая_единица_измерения', 'единицы_измерения', 'наличие_бп',
-    'организация_корпорации', 'торговая_марка', 'торговая_марка.1',
-    'гражданская_продукция', 'заблокировано', 'вести_учет_по_характеристикам',
-    'специальная_приемка', 'соответствие_тр_тс', 'тр_тс', 'оквэд2', 'оквэд2_код',
-    'окпд2', 'окпд2_код', 'оквэд2_код', 'окпд2_код', 'классификатор_енс',
-    'классификатор_енс_код', 'пометка_удаления', 'тип', 'тип_позиции',
-    'вид_специальной_приемки', 'технические_характеристики', 'свойства',
-    'обозначение_тип_артикул', 'нтд_на_материал', 'нтд_на_материал.1',
-    'каталожный_номер', 'класс_качества', 'типоразмер', 'особые_условия',
-    'конструкция', 'состояние_поверхности', 'серия_товара_изделия_продукта',
-    'категория_качества', 'видприемки', 'номинальный_диаметр',
-    'обозначение_длины_резьбы', 'наличие_фаски', 'тип_шлица', 'наличие_отверстий',
-    'класс_степень_точности', 'обозначение_болта', 'обозначение_винта',
-    'обозначение_гайки', 'обозначение_шайбы', 'обозначение_заклепки',
-    'вариант_исполнения', 'категория_размещения', 'марка_товара_изделия_продукта',
-    'число_шагов_резьбы_на_дюйм', 'обозначение_размера_под_ключ',
-    'тип_круга_головки', 'тип_болта', 'условное_обозначение_длины',
-    'индекс_диаметра', 'климатическое_исполнение', 'предельные_отклонения',
-    'обозначение_диаметра_корпуса', 'толщина_проката_стенки_полки',
-    'состояние_материала', 'диаметр_наружный_режущей_части', 'шкала_твердости',
-    'длина_хвостовика', 'состояние_поставки_металлопроката', 'диаметр_цилиндра',
-    'обозначение_ширины_фаски', 'диаметр_проволоки', 'высота', 'марка_проволоки',
-    'число_витков', 'температурный_диапазон_выкипания_эксплуатации',
-    'расстояние_между_гранями', 'условное_обозначение_номера_цвета',
-    'условное_обозначение_толщины', 'форма_поставки', 'вид_и_сторона_покрытия',
-    'тип_зуба', 'лакокрасочное_и_полимерное_покрытие', 'давление', 'радиус', 'уклон',
-    'способ_изготовления', 'категория_проката', 'направление_резьбы',
-    'обозначение_толщины_покрытия', 'обозначение', 'внутренний_диаметр_условный_проход',
-    'цвет', 'шаг_второй_резьбы', 'класс_поле_допуска_ввинчиваемого_конца',
-    'расстояние_между_осями', 'условное_обозначение_марки_материала',
-    'тип_отделки_концов', 'назначение_материала', 'способ_получения_стали',
-    'длина_ввинчиваемого_конца', 'диаметр_посадочного_отверстия',
-    'длина_общая_oal', 'твердость', 'комплектность', 'обозначение',
-    'длина_резьбы', 'наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения',
-}
+def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Извлекает JSON-объект из текста с markdown-блоками или inline JSON.
+    """
+    if not text:
+        return None
 
+    # Стратегия 1: Markdown code block ```json ... ``` / ```python ... ``` / ``` ... ```
+    for lang in [r'(?:json)?', r'(?:python)?', r'']:
+        pattern = rf'```{lang}\s*(.*?)\s*```'
+        md_json = re.search(pattern, text, re.DOTALL)
+        if md_json:
+            try:
+                return json.loads(md_json.group(1))
+            except json.JSONDecodeError:
+                pass
 
-def _extract_significant_fields(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Извлекает значимые заполненные поля из записи ЕНС (без None и служебных)."""
-    significant = {}
-    for key, val in item.items():
-        if key.startswith('_') or key in _SKIP_FIELDS:
-            continue
-        if val is None or val == '' or val == 'Нет':
-            continue
-        # Только простые типы
-        if isinstance(val, (str, int, float)):
-            significant[key] = val
-    return significant
+    # Стратегия 2: Найти первый {...} с балансом скобок
+    for start in re.finditer(r'(?m)^\s*\{', text):
+        pos = start.start()
+        brace_count = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[pos:], start=pos):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == '{':
+                    brace_count += 1
+                elif ch == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        candidate = text[pos:i + 1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break
+
+    # Стратегия 3: Простой fallback
+    simple = re.search(r'\{.*?\}', text, re.DOTALL)
+    if simple:
+        try:
+            return json.loads(simple.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 class LLMMaskGenerator:
@@ -98,6 +93,10 @@ class LLMMaskGenerator:
             "LLMMaskGenerator initialized with %d clients, priority: %s",
             len(clients), self.provider_priority
         )
+
+    # ------------------------------------------------------------------
+    # PROVIDER PRIORITY (новое)
+    # ------------------------------------------------------------------
 
     def _build_provider_priority(self) -> List[str]:
         """Строит приоритет провайдеров: default_service первым, затем остальные."""
@@ -132,14 +131,19 @@ class LLMMaskGenerator:
         logger.info("[LLM] Final provider_priority: %s", priority)
         return priority
 
+    # ------------------------------------------------------------------
+    # MASK GENERATION
+    # ------------------------------------------------------------------
+
     def generate_mask(
         self,
         standard: str,
         item_type: str,
-        examples: List[str]
+        examples: List[Dict[str, Any]],
+        context: Optional[Dict] = None
     ) -> tuple[Optional[Dict[str, Any]], None]:
         """Генерация маски через LLM с fallback по провайдерам."""
-        prompt = self._build_prompt(standard, item_type, examples)
+        prompt = self._build_prompt(standard, item_type, examples, context)
         self._save_debug_prompt(standard, item_type, prompt)
 
         for attempt in range(1, self.max_retries + 1):
@@ -163,86 +167,29 @@ class LLMMaskGenerator:
         logger.error("Failed to generate mask after %d attempts", self.max_retries)
         return None, None
 
-    def _build_prompt(self, standard: str, item_type: str, examples: List[Any]) -> str:
-        """Строит промпт для LLM: наименования + значимые заполненные поля."""
-        # examples может быть List[str] (только имена) или List[Dict] (полные записи ЕНС)
-        entries = []
-        for ex in examples[:20]:
-            if isinstance(ex, dict):
-                name = ex.get('наименование') or ex.get('полное_наименование') or ex.get('name', '')
-                fields = _extract_significant_fields(ex)
-                # Убираем дубли наименования из fields
-                fields.pop('наименование', None)
-                fields.pop('полное_наименование', None)
-                entries.append((name, fields))
-            else:
-                entries.append((str(ex), {}))
-
-        # Уникальные наименования (сохраняем порядок)
-        seen = set()
-        unique_entries = []
-        for name, fields in entries:
-            if name and name not in seen:
-                seen.add(name)
-                unique_entries.append((name, fields))
-                if len(unique_entries) >= 15:
-                    break
-
-        # Формируем текст примеров
-        examples_text = ""
-        for i, (name, fields) in enumerate(unique_entries, 1):
-            examples_text += f"  {i}. {name}"
-            if fields:
-                # Форматируем поля компактно: ключ=значение
-                field_strs = [f"{k}={v}" for k, v in fields.items()]
-                examples_text += f"  [{', '.join(field_strs)}]"
-            examples_text += "\n"
-
-        prompt = f"""На основе следующих примеров наименований изделий типа "{item_type}" по стандарту {standard}:
-
-{examples_text}
-Создай Python regex паттерн с именованными группами (?P<<name>...) для извлечения параметров.
-Верни результат строго в формате JSON:
-
-{{
-    "pattern": "regex pattern here",
-    "params": ["param1", "param2", ...],
-    "required": ["param1", ...]
-}}
-
-Правила:
-- pattern: валидный Python regex (флаг re.IGNORECASE будет применён при использовании)
-- params: список имён групп из pattern
-- required: список обязательных параметров (не может быть пустым)
-"""
-        return prompt
+    # ------------------------------------------------------------------
+    # LLM CALL (новое — Dict-ответы)
+    # ------------------------------------------------------------------
 
     def _call_llm(self, provider: str, prompt: str, attempt: int) -> Optional[str]:
-        """
-        Вызов LLM для генерации маски.
-        """
         client = self.clients.get(provider)
         if not client:
             return None
 
-        # Получаем модель для конкретного провайдера из конфига
         model = None
         if self.settings and hasattr(self.settings, 'api') and provider in self.settings.api:
             api_cfg = self.settings.api[provider]
             model = getattr(api_cfg, 'default_model', None)
             logger.debug("[LLM] Using model '%s' from api.%s.default_model", model, provider)
 
-        # Fallback: общая default_model из mask_generation
         if not model and self.settings and hasattr(self.settings, 'mask_generation'):
             model = getattr(self.settings.mask_generation, 'default_model', None)
             logger.debug("[LLM] Fallback to mask_generation.default_model: '%s'", model)
 
-        # Ultimate fallback
         if not model:
             model = "qwen2.5-72b-instruct"
             logger.debug("[LLM] Ultimate fallback model: '%s'", model)
 
-        # Temperature с ростом по attempt
         temperature = min(0.1 + attempt * 0.1, 0.5)
 
         try:
@@ -252,9 +199,7 @@ class LLMMaskGenerator:
                 temperature=temperature
             )
 
-            # response — dict с success, content, raw, error, model
             if response and response.get('success'):
-                # Если content уже распарсен (dict), вернуть его как JSON-строку
                 content = response.get('content')
                 if isinstance(content, dict):
                     logger.debug(
@@ -262,11 +207,9 @@ class LLMMaskGenerator:
                         provider
                     )
                     return json.dumps(content, ensure_ascii=False)
-                # Иначе вернуть raw текст
                 raw = response.get('raw', '')
                 if raw:
                     return raw
-                # Если raw пустой, но content есть (не dict) — вернуть content
                 if content and not isinstance(content, dict):
                     return str(content)
                 logger.warning(
@@ -283,13 +226,17 @@ class LLMMaskGenerator:
             logger.warning("LLM call failed: %s", e)
             return None
 
+    # ------------------------------------------------------------------
+    # RESPONSE PARSING (новое — robust JSON)
+    # ------------------------------------------------------------------
+
     def _parse_response(self, response: str, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
         """Парсинг ответа LLM с robust JSON extraction."""
         if not response:
             logger.warning("Empty LLM response")
             return None
 
-        # Стратегия 1: Markdown code block ```json ... ``` / ```python ... ``` / ``` ... ```
+        # Стратегия 1: Markdown code block
         for lang in [r'(?:json)?', r'(?:python)?', r'']:
             pattern = rf'```{lang}\s*(.*?)\s*```'
             md_json = re.search(pattern, response, re.DOTALL)
@@ -300,7 +247,7 @@ class LLMMaskGenerator:
                 except json.JSONDecodeError as e:
                     logger.debug("Markdown JSON parse failed: %s", e)
 
-        # Стратегия 2: Balanced braces (robust)
+        # Стратегия 2: Balanced braces
         for start in re.finditer(r'(?m)^\s*\{', response):
             pos = start.start()
             brace_count = 0
@@ -328,7 +275,6 @@ class LLMMaskGenerator:
                                 return self._validate_mask_dict(data, standard, item_type)
                             except json.JSONDecodeError:
                                 break
-            # если brace_count не 0 — не валидный
 
         # Стратегия 3: Простой fallback
         json_match = re.search(r'\{.*\}', response, re.DOTALL)
@@ -361,7 +307,6 @@ class LLMMaskGenerator:
             logger.warning("Mask dict missing 'pattern' field")
             return None
 
-        # Валидация паттерна
         try:
             re.compile(pattern, re.IGNORECASE)
         except re.error as e:
@@ -377,11 +322,321 @@ class LLMMaskGenerator:
         }
 
     # ------------------------------------------------------------------
-    # DEBUG SAVE METHODS
+    # PROMPT BUILDER (ВОССТАНОВЛЕНО из 54019ee8 — полная логика)
+    # ------------------------------------------------------------------
+
+    def _load_prompt_template(self) -> str:
+        """Загрузка шаблона промпта из файла."""
+        if self.settings and hasattr(self.settings, 'mask_generation'):
+            mg = self.settings.mask_generation
+            template_path = getattr(mg, 'prompt_template', None)
+            if template_path and Path(template_path).exists():
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+
+        for path in [
+            'prompts/templates/mask_generation.txt',
+            'config/prompts/templates/mask_generation.txt',
+            '../prompts/templates/mask_generation.txt',
+        ]:
+            if Path(path).exists():
+                with open(path, 'r', encoding='utf-8') as f:
+                    return f.read()
+
+        logger.warning("[LLMMaskGenerator] Шаблон промпта не найден, используем fallback")
+        return self._default_prompt_template()
+
+    def _default_prompt_template(self) -> str:
+        return (
+            "Ты — эксперт по техническим стандартам ГОСТ и регулярным выражениям Python.\n\n"
+            "ЗАДАЧА: Создай regex-паттерн с named groups (?P...) "
+            "для извлечения параметров из номенклатуры типа \"{item_type}\" по стандарту {standard}.\n\n"
+            "### КРИТИЧЕСКОЕ ПРАВИЛО\n"
+            "Создавай named groups ТОЛЬКО для параметров, которые реально видны в исходной строке.\n"
+            "НЕ добавляй группы для метаданных ЕСН (тип_резьбы, марка_материала и т.д.), "
+            "если их значения не присутствуют в номенклатурной строке.\n"
+            "Примеры показывают 'ВИДИМЫЕ В СТРОКЕ' и 'МЕТАДАННЫЕ БД' — используй только ВИДИМЫЕ для regex.\n\n"
+            "Примеры:\n{examples_text}\n\n"
+            "Статистика:\n{stats_text}\n\n"
+            "### Формат ответа\n"
+            "```json\n"
+            "{{\n"
+            "  \"pattern\": \"...\",\n"
+            "  \"params\": {params_list},\n"
+            "  \"required\": {required_list}\n"
+            "}}\n"
+            "```\n\n"
+            "### Строгое соответствие вывода\n"
+            "Выведите результат в виде одного JSON-объекта. "
+            "Не добавляйте в ответ никаких других объектов или комментариев, кроме итогового JSON."
+        )
+
+    def _load_skip_fields(self) -> set:
+        """Загрузка skip_fields из ens_column_mapping.yaml."""
+        default = {
+            'код', 'mdm_key', 'единицы_измерения', 'наименование_типа.1',
+            'полное_наименование', 'наименование', 'нтд',
+            'наименование_типа'
+        }
+        try:
+            import yaml
+            for path in ['config/ens_column_mapping.yaml', 'ens_column_mapping.yaml']:
+                if Path(path).exists():
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    fields = data.get('skip_fields', [])
+                    if fields:
+                        return set(fields)
+                    break
+        except Exception as e:
+            logger.warning(f"[LLMMaskGenerator] Не удалось загрузить skip_fields: {e}")
+        return default
+
+    @staticmethod
+    def _select_diverse_examples(examples: List[Dict], n: int = 10) -> List[Dict]:
+        """Выбор разнообразных примеров (включая с пропущенными ключевыми полями)."""
+        if len(examples) <= n:
+            return examples
+
+        selected = []
+        seen_patterns = set()
+        selected.append(examples[0])
+        seen_patterns.add('full')
+
+        key_fields = [
+            'исполнение', 'покрытие', 'тип_резьбы',
+            'марка_материала', 'шаг_резьбы', 'номинальный_диаметр_резьбы'
+        ]
+
+        for field in key_fields:
+            for ex in examples[1:]:
+                pattern_key = f"missing_{field}"
+                if pattern_key in seen_patterns:
+                    continue
+                if not ex.get(field) or not str(ex.get(field)).strip():
+                    has_some = any(
+                        ex.get(f) and str(ex.get(f)).strip()
+                        for f in key_fields if f != field
+                    )
+                    if has_some:
+                        selected.append(ex)
+                        seen_patterns.add(pattern_key)
+                        break
+                if len(selected) >= n // 2:
+                    break
+
+        random.seed(42)
+        remaining = [ex for ex in examples if ex not in selected]
+        random.shuffle(remaining)
+        needed = n - len(selected)
+        if remaining and needed > 0:
+            selected.extend(remaining[:needed])
+
+        return selected[:n]
+
+    def _build_prompt(
+        self,
+        standard: str,
+        item_type: str,
+        examples: List[Dict[str, Any]],
+        context: Optional[Dict] = None
+    ) -> str:
+        """Построение промпта с field_stats, visible/invisible fields, пропущенные поля."""
+        template = self._load_prompt_template()
+
+        # --- Алиасы полей ---
+        field_aliases = {'тип_изделия': 'наименование_типа'}
+        aliased_examples = []
+        for ex in examples:
+            new_ex = dict(ex)
+            for target, source in field_aliases.items():
+                if target not in new_ex or not new_ex.get(target):
+                    if source in new_ex and new_ex.get(source):
+                        new_ex[target] = new_ex[source]
+            aliased_examples.append(new_ex)
+        examples = aliased_examples
+
+        # --- Статистика по полям ---
+        field_stats = {}
+        for ex in examples:
+            for key, val in ex.items():
+                if key.startswith('_'):
+                    continue
+                if val is None or (isinstance(val, str) and not val.strip()):
+                    continue
+                field_stats[key] = field_stats.get(key, 0) + 1
+
+        total = len(examples)
+        threshold = max(1, int(total * 0.1))
+        sorted_fields = sorted(field_stats.items(), key=lambda x: -x[1])
+        relevant_fields = [k for k, v in sorted_fields if v >= threshold]
+
+        if 'тип_изделия' not in relevant_fields:
+            relevant_fields.insert(0, 'тип_изделия')
+        else:
+            relevant_fields.remove('тип_изделия')
+            relevant_fields.insert(0, 'тип_изделия')
+
+        skip_fields = self._load_skip_fields()
+
+        # --- Чистка имён полей для named groups ---
+        def clean_name(n: str, max_len: int = 30) -> str:
+            result = n.replace('.', '_').replace('-', '_').replace('(', '_').replace(')', '_').replace(',', '_')
+            while '__' in result:
+                result = result.replace('__', '_')
+            result = result.strip('_')
+            if len(result) > max_len:
+                result = result[:max_len].rstrip('_')
+            return result
+
+        field_name_map = {}
+        seen_names = set()
+        for f in relevant_fields:
+            if f not in skip_fields:
+                cleaned = clean_name(f)
+                original_cleaned = cleaned
+                suffix = 2
+                while cleaned in seen_names:
+                    suffix_str = f"_{suffix}"
+                    cleaned = original_cleaned[:max_len - len(suffix_str)] + suffix_str
+                    suffix += 1
+                seen_names.add(cleaned)
+                field_name_map[f] = cleaned
+
+        if 'тип_изделия' not in field_name_map:
+            field_name_map['тип_изделия'] = 'тип_изделия'
+
+        # --- Видимые vs Невидимые поля ---
+        visible_fields = set()
+        for ex in examples:
+            name = ex.get('полное_наименование') or ex.get('наименование', '')
+            if not name:
+                continue
+            name_lower = name.lower()
+            for field in list(field_name_map.keys()):
+                val = ex.get(field)
+                if val is None:
+                    continue
+                val_str = str(val).strip()
+                if not val_str:
+                    continue
+                val_norm = val_str.lower().replace('.', '').replace(' ', '').replace(',', '')
+                name_norm = name_lower.replace('.', '').replace(' ', '').replace(',', '')
+                if val_str.lower() in name_lower or val_norm in name_norm:
+                    visible_fields.add(field)
+
+        visible_field_names = [f for f in relevant_fields if f in visible_fields and f not in skip_fields]
+        invisible_field_names = [f for f in relevant_fields if f not in visible_fields and f not in skip_fields]
+
+        regex_fields = [field_name_map[f] for f in visible_field_names if f in field_name_map]
+
+        # Тип изделия всегда первый
+        if 'тип_изделия' not in visible_field_names and 'тип_изделия' in field_name_map:
+            visible_field_names.insert(0, 'тип_изделия')
+            if field_name_map['тип_изделия'] not in regex_fields:
+                regex_fields.insert(0, field_name_map['тип_изделия'])
+
+        display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
+
+        # --- Формирование примеров ---
+        sample_examples = self._select_diverse_examples(examples, n=10)
+
+        examples_lines = []
+        for i, ex in enumerate(sample_examples, 1):
+            name = ex.get('полное_наименование') or ex.get('наименование', '')
+            if not name:
+                continue
+
+            filled_fields = [f"  полное_наименование: {name}"]
+            for field in display_fields:
+                val = ex.get(field)
+                if val is not None and str(val).strip():
+                    filled_fields.append(f"  {field}: {val}")
+
+            missing_fields = [f for f in display_fields if not ex.get(f) or not str(ex.get(f)).strip()]
+            if missing_fields:
+                filled_fields.append(f"  [ПРОПУЩЕНЫ: {', '.join(missing_fields)}]")
+
+            visible_parts = []
+            for field in visible_field_names:
+                val = ex.get(field)
+                if val is not None and str(val).strip():
+                    group_name = field_name_map.get(field, field)
+                    visible_parts.append(f"(?P<{group_name}>{val})")
+
+            invisible_parts = []
+            for field in invisible_field_names:
+                val = ex.get(field)
+                if val is not None and str(val).strip():
+                    invisible_parts.append(f"{field}={val}")
+
+            structure_lines = []
+            if visible_parts:
+                structure_lines.append("  ВИДИМЫЕ В СТРОКЕ: " + ' '.join(visible_parts))
+            if invisible_parts:
+                structure_lines.append("  МЕТАДАННЫЕ БД: " + ', '.join(invisible_parts))
+
+            examples_lines.append(
+                f"{i}. ИСХОДНАЯ СТРОКА: \"{name}\"\n" +
+                "\n".join(structure_lines) + "\n" +
+                "  ПОЛЯ ЕСН:\n" +
+                "\n".join(filled_fields)
+            )
+
+        examples_text = "\n\n".join(examples_lines) if examples_lines else "Нет примеров"
+
+        # --- Статистика ---
+        stats_lines = []
+        for k in visible_field_names:
+            if k in field_name_map:
+                stats_lines.append(f"  {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
+        if invisible_field_names:
+            stats_lines.append("  --- МЕТАДАННЫЕ (не для regex): ---")
+            for k in invisible_field_names:
+                if k in field_name_map:
+                    stats_lines.append(
+                        f"  {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в БД, не в строке]"
+                    )
+        stats_text = "\n".join(stats_lines) if stats_lines else "Нет статистики"
+
+        # --- JSON-списки для шаблона ---
+        params_list = json.dumps(regex_fields, ensure_ascii=False)
+        optional_params = {'исполнение', 'покрытие', 'марка_материала'}
+        required_fields = [f for f in regex_fields if f not in optional_params]
+        required_list = json.dumps(required_fields, ensure_ascii=False)
+        params_hint = ", ".join(regex_fields[:10])
+        context_text = context.get('context', '') if context else ''
+
+        # --- Подстановка в шаблон ---
+        result = template
+        replacements = {
+            "{item_type}": item_type,
+            "{standard}": standard,
+            "{example_count}": str(len(sample_examples)),
+            "{examples_text}": examples_text,
+            "{stats_text}": stats_text,
+            "{params_hint}": params_hint,
+            "{params_list}": params_list,
+            "{required_list}": required_list,
+            "{context_text}": context_text,
+        }
+        for placeholder, value in replacements.items():
+            result = result.replace(placeholder, value)
+
+        remaining = [m for m in re.finditer(r'\{[a-z_]+\}', result) if m.group() not in ('{{', '}}')]
+        if remaining:
+            logger.warning(
+                "[LLMMaskGenerator] Неподставленные placeholder'ы: %s",
+                [m.group() for m in remaining[:5]]
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # DEBUG SAVE
     # ------------------------------------------------------------------
 
     def _sanitize_filename(self, text: str) -> str:
-        """Санитизация строки для использования в имени файла."""
         sanitized = re.sub(r'[\\/:*?"<>|]', '_', str(text))
         sanitized = re.sub(r'_+', '_', sanitized)
         return sanitized.strip('_')[:80]
@@ -393,7 +648,6 @@ class LLMMaskGenerator:
         self._save_debug_file(standard, item_type, f"response_a{attempt}", response)
 
     def _save_debug_file(self, standard: str, item_type: str, suffix: str, content: str):
-        """Сохранение debug-файла (prompt/response)."""
         save_enabled = False
         debug_dir = "prompts/debug"
 

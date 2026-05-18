@@ -1178,13 +1178,9 @@ def generate_masks(db, ens_index, min_score, llm, limit, standard):
 
             if generator:
                 # === ИЗВЛЕКАЕМ ТОЛЬКО НАИМЕНОВАНИЯ (строки), не полные словари ЕНС ===
-                example_names = [
-                    ex.get('наименование') or ex.get('полное_наименование') or ex.get('name', '')
-                    for ex in examples[:30]  # ограничиваем 30 примерами для скорости
-                ]
-                example_names = [n for n in example_names if n]
+                limited_examples = examples[:20]
+                mask, _ = generator.generate_mask(std, item_type, limited_examples)
 
-                mask, _ = generator.generate_mask(std, item_type, example_names)
                 if mask:
                     # Нормализуем item_type в uppercase (стандарты: БОЛТ, ВИНТ, ШАЙБА)
                     item_type_normalized = item_type.upper()
