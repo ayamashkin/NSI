@@ -462,17 +462,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     # Mask DB
     mask_db = MaskDatabase(db_path=db)
 
-    # Results DB for caching
+    # Note: results.db caching removed to avoid creating DB in output folder.
+    # If caching is needed, configure path explicitly in config.yaml.
     output_path = Path(output)
-    results_db_path = output_path.parent / 'results.db'
-    try:
-        from core.database import DatabaseManager
-        results_db = DatabaseManager(str(results_db_path))
-        has_cache = True
-    except Exception as e:
-        logger.warning(f"Results DB not available: {e}")
-        has_cache = False
-        results_db = None
 
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
@@ -487,31 +479,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         click.echo("⚡ Режим: только успешные (пропускаем ошибки)")
 
     results = []
-    stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0, 'cached': 0}
+    stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
     for text in tqdm(texts, desc="Обработка"):
         stats['total'] += 1
 
-        # Check cache first
-        cached_result = None
-        if has_cache and results_db:
-            try:
-                cached = results_db.get_all_results(limit=1)
-                # Simplified cache check - in real impl would query by text hash
-            except:
-                pass
-
-        if cached_result:
-            result = cached_result
-            stats['cached'] += 1
-        else:
-            result = processor.process(text)
-            # Save to cache
-            if has_cache and results_db:
-                try:
-                    results_db.save_result(text, result.to_dict())
-                except Exception as e:
-                    logger.debug(f"Cache save failed: {e}")
+        result = processor.process(text)
 
         if result.success:
             stats['success'] += 1
@@ -527,8 +500,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         has_mask = False
         if result.standard:
             try:
-                has_mask = mask_db.has_mask(result.standard)
-            except:
+                # Use get_mask to check existence (returns None if not found)
+                has_mask = mask_db.get_mask(result.standard) is not None
+            except Exception:
                 has_mask = False
 
         row = {
@@ -567,14 +541,18 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         # EXCEL OUTPUT - NOT JSON!
         df_out = pd.DataFrame(results)
 
-        # Convert dict columns to JSON strings for Excel
-        dict_cols = ['params', 'ens_params', 'ens_params_mask', 'details',
+        # Skip 'details' column for Excel (too large, causes MemoryError)
+        if 'details' in df_out.columns:
+            df_out = df_out.drop(columns=['details'])
+
+        # Convert dict columns to compact JSON strings for Excel
+        dict_cols = ['params', 'ens_params', 'ens_params_mask',
                      'coating_substitution', 'fuzzy_mismatched_params',
                      'fuzzy_params_comparison']
         for col in dict_cols:
             if col in df_out.columns:
                 df_out[col] = df_out[col].apply(
-                    lambda x: json.dumps(x, ensure_ascii=False, indent=2) if x else ''
+                    lambda x: json.dumps(x, ensure_ascii=False, separators=(',', ':')) if x else ''
                 )
 
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -608,7 +586,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     click.echo(f"   Всего: {stats['total']}")
     click.echo(f"   Успешно: {stats['success']}")
     click.echo(f"   Ошибки: {stats['failed']}")
-    click.echo(f"   Из кэша: {stats['cached']}")
+
     if success_only:
         click.echo(f"   Отфильтровано (неуспешные): {stats['filtered']}")
 
