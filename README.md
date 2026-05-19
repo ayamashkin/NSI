@@ -489,10 +489,10 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm
 
 # Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/results.xlsx
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/nomenclature.xlsx
 
 # Batch-обработка (Excel → JSON + result.db)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/results.json
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/nomenclature.json
 
 # Анализ качества
 python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/quality.xlsx -j output/quality.json
@@ -522,7 +522,7 @@ python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware
 python cli.py batch data/СТИ_КумАПП_из_АСУ_НСИ.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 2 -o output/СТИ_КумАПП_из_АСУ_НСИ.xlsx
 
 # Batch-обработка (Excel → JSON + result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.json
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/nomenclature1.json
 
 # Принудительная batch-переобработка (игнорирует кэш result.db)
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 4 -o output/results.xlsx --force

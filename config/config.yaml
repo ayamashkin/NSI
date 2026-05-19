@@ -253,7 +253,7 @@ output:
   include_mask_pattern: true
 
   # true = добавлять подробности matching'а (ENS имя, fuzzy score, ens_params)
-  include_ens_details: false
+  include_ens_details: true
 
   # Поля ЕСН, исключаемые из ens_params в JSON-выводе.
   # Служебные/внутренние/дублирующие поля, не несущие полезной информации.

@@ -511,8 +511,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
             stats['filtered'] += 1
             continue
 
-        # Извлечение стандарта и типа для проверки маски
-        standard, item_type = extractor.extract(text)
+        # Используем стандарт и тип из результата процессора
+        standard = result.standard or ''
+        item_type = result.item_type or ''
         has_mask = False
         mask_pattern = ''
         if standard and item_type:
