@@ -3,15 +3,14 @@ core/automated_processor.py
 Automated Parametric Processor for ENS nomenclature matching.
 
 FIXES (2026-05-19):
-1. CRITICAL: _find_ens_match now returns ens_params_mask instead of full ens_item dict.
-   This fixes 8+ GB output files caused by serializing entire ENS records.
-2. Correct success/confidence logic based on actual scores
-3. Coating substitution validates ALL critical parameters
-4. Fuzzy fallback respects score thresholds
-5. V2 scoring properly gates success
-6. Added has_mask info to results
+1. CRITICAL: _load_ens_index properly handles {'items': [...]} ENS index structure.
+2. CRITICAL: _find_ens_match uses correct field names ('нтд', 'standard', 'тип_изделия').
+3. CRITICAL: _find_ens_match normalizes standards (ОСТ 1 → ОСТ1) for proper comparison.
+4. _calculate_match_score uses fuzzy key matching like parametric_client.
+5. _finalize_result uses correct thresholds (success_threshold from config).
+6. Restored ParametricENSClient delegation for proven matching logic.
 
-LAST_FIX: 2026-05-19 14:33 UTC+3
+LAST_FIX: 2026-05-19 16:45 UTC+3
 """
 
 import logging
@@ -24,6 +23,27 @@ from pathlib import Path
 import pickle
 
 logger = logging.getLogger(__name__)
+
+# Lazy import для доступа к MatchingConfig (избегаем circular dependency)
+_matching_config = None
+
+def _get_matching_config():
+    """Ленивая загрузка MatchingConfig из settings."""
+    global _matching_config
+    if _matching_config is None:
+        try:
+            from config.settings import get_settings
+            _matching_config = get_settings().matching
+        except Exception:
+            class _FallbackMatchingConfig:
+                success_threshold = 0.7
+                fuzzy_threshold = 0.6
+                v2_exact_threshold = 0.99
+                coating_similarity_threshold = 0.8
+                strict_union_keys = False
+                debug_per_parameter = False
+            _matching_config = _FallbackMatchingConfig()
+    return _matching_config
 
 
 @dataclass
@@ -53,7 +73,6 @@ class ProcessingResult:
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         d = asdict(self)
-        # Handle nested dataclasses if any
         return d
 
 
@@ -129,7 +148,8 @@ class StandardExtractor:
 
 class AutomatedParametricProcessor:
     """
-    Fixed version with proper scoring logic for ENS parametric matching.
+    Fixed version with proper ENS index handling and matching logic.
+    Delegates parametric matching to ParametricENSClient for proven reliability.
     """
 
     # Critical parameters that must match exactly
@@ -149,89 +169,53 @@ class AutomatedParametricProcessor:
         # Thresholds from config or defaults
         self.min_v2_threshold = 0.85
         self.min_fuzzy_threshold = 0.80
+        self.success_threshold = 0.7
         if settings:
-            self.min_v2_threshold = getattr(settings, 'min_v2_score',
-                settings.get('matching', {}).get('min_v2_score', 0.85) if isinstance(settings, dict) else 0.85)
-            self.min_fuzzy_threshold = getattr(settings, 'min_fuzzy_score',
-                settings.get('matching', {}).get('min_fuzzy_score', 0.80) if isinstance(settings, dict) else 0.80)
+            if isinstance(settings, dict):
+                self.min_v2_threshold = settings.get('matching', {}).get('min_v2_score', 0.85)
+                self.min_fuzzy_threshold = settings.get('matching', {}).get('min_fuzzy_score', 0.80)
+                self.success_threshold = settings.get('matching', {}).get('success_threshold', 0.7)
+            else:
+                self.min_v2_threshold = getattr(settings, 'min_v2_score', 0.85)
+                self.min_fuzzy_threshold = getattr(settings, 'min_fuzzy_score', 0.80)
+                self.success_threshold = getattr(settings, 'success_threshold', 0.7)
 
-        # Load ENS index
+        # Load ENS index for direct access (ParametricENSClient also loads its own)
         self.ens_index = {}
+        self.ens_items_by_code = {}
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index(ens_index_path)
-
-    def _load_ens_index(self, path):
-        """Load ENS index from pickle file. Handles both dict and list structures."""
-        import pickle
-        try:
-            with open(path, 'rb') as f:
-                data = pickle.load(f)
-
-            # Handle different structures:
-            # 1. Dict {code: dict} — standard
-            # 2. Dict {code: list} — values are lists
-            # 3. List of dicts
-            # 4. List of lists/records
-
-            if isinstance(data, dict):
-                # Check if values are lists and convert if needed
-                converted = {}
-                for key, value in data.items():
-                    if isinstance(value, list):
-                        # Convert list to pseudo-dict for uniform access
-                        value_str = ' '.join(str(x) for x in value if x is not None)
-                        converted[key] = {
-                            '_raw_list': value,
-                            '_str': value_str,
-                            'нтд_1': value_str,
-                            'наименование_типа': value_str,
-                            'наименование': value_str
-                        }
-                    elif isinstance(value, dict):
-                        converted[key] = value
-                    else:
-                        converted[key] = {'_raw': value, 'нтд_1': str(value)}
-                self.ens_index = converted
-                logger.info(f"ENS index loaded (dict): {len(self.ens_index)} items")
-            elif isinstance(data, list):
-                if data and len(data) > 0:
-                    if isinstance(data[0], dict):
-                        # List of dicts — convert to dict by code
-                        if 'код' in data[0]:
-                            self.ens_index = {str(item['код']): item for item in data}
-                        elif 'ens_code' in data[0]:
-                            self.ens_index = {str(item['ens_code']): item for item in data}
-                        else:
-                            self.ens_index = {str(i): item for i, item in enumerate(data)}
-                    elif isinstance(data[0], (list, tuple)):
-                        # List of lists — wrap each in pseudo-dict
-                        self.ens_index = {}
-                        for i, item in enumerate(data):
-                            item_str = ' '.join(str(x) for x in item if x is not None)
-                            self.ens_index[str(i)] = {
-                                '_raw_list': item,
-                                '_str': item_str,
-                                'нтд_1': item_str,
-                                'наименование_типа': item_str,
-                                'наименование': item_str
-                            }
-                    else:
-                        self.ens_index = {str(i): item for i, item in enumerate(data)}
-                else:
-                    self.ens_index = {}
-                logger.info(f"ENS index loaded (list): {len(self.ens_index)} items")
-            else:
-                self.ens_index = {}
-                logger.warning(f"Unknown ENS index structure: {type(data)}")
-        except Exception as e:
-            logger.warning(f"Failed to load ENS index: {e}")
-            self.ens_index = {}
 
         # Standard extractor
         self.standard_extractor = StandardExtractor()
 
         # Coating mapper (lazy init)
         self._coating_mapper = None
+
+        # Initialize ParametricENSClient for proven matching logic
+        self._init_parametric_client()
+
+    def _init_parametric_client(self):
+        """Initialize ParametricENSClient with proper skip_fields."""
+        skip_fields = None
+        if self.settings:
+            if isinstance(self.settings, dict):
+                skip_fields = self.settings.get('output', {}).get('ens_params_skip_fields')
+            else:
+                if hasattr(self.settings, 'output') and hasattr(self.settings.output, 'ens_params_skip_fields'):
+                    skip_fields = self.settings.output.ens_params_skip_fields
+
+        try:
+            from core.parametric_client import ParametricENSClient
+            self.parametric_client = ParametricENSClient(
+                mask_db=self.mask_db,
+                ens_index_path=self.ens_index_path,
+                skip_fields=skip_fields
+            )
+            logger.info("[AutomatedProcessor] ParametricENSClient initialized")
+        except Exception as e:
+            logger.warning("[AutomatedProcessor] Failed to init ParametricENSClient: %s", e)
+            self.parametric_client = None
 
     @property
     def coating_mapper(self):
@@ -242,6 +226,72 @@ class AutomatedParametricProcessor:
             except Exception:
                 self._coating_mapper = {}
         return self._coating_mapper
+
+    def _load_ens_index(self, path):
+        """Load ENS index from pickle file. Handles standard structures."""
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+
+            items = []
+            # Handle standard structure: {'items': [...], 'metadata': {...}}
+            if isinstance(data, dict):
+                if 'items' in data and isinstance(data['items'], list):
+                    items = data['items']
+                    logger.info("[ENS] Loaded %d items from 'items' key", len(items))
+                else:
+                    # Fallback: assume dict values are items
+                    for key, value in data.items():
+                        if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                            items.extend(value)
+                        elif isinstance(value, dict):
+                            items.append(value)
+                    logger.info("[ENS] Loaded %d items from dict values", len(items))
+            elif isinstance(data, list):
+                items = data
+                logger.info("[ENS] Loaded %d items from list", len(items))
+
+            # Build code-indexed dict
+            self.ens_index = {}
+            for item in items:
+                if isinstance(item, dict):
+                    code = str(item.get('код', '')).strip()
+                    mdm = str(item.get('mdm_key', '')).strip()
+                    if code:
+                        self.ens_index[code] = item
+                        self.ens_items_by_code[code] = item
+                    if mdm and mdm != code:
+                        self.ens_index[mdm] = item
+                        self.ens_items_by_code[mdm] = item
+                    if not code and not mdm:
+                        # Use hash of item as key
+                        item_key = str(hash(str(item)))
+                        self.ens_index[item_key] = item
+                elif isinstance(item, list):
+                    # Convert list to pseudo-dict
+                    item_str = ' '.join(str(x) for x in item if x is not None)
+                    item_key = str(len(self.ens_index))
+                    self.ens_index[item_key] = {
+                        '_raw_list': item,
+                        '_str': item_str,
+                        'наименование': item_str,
+                        'полное_наименование': item_str,
+                    }
+
+            logger.info("[ENS] Index ready: %d unique items", len(self.ens_index))
+        except Exception as e:
+            logger.warning("[ENS] Failed to load ENS index: %s", e)
+            self.ens_index = {}
+
+    @staticmethod
+    def _normalize_standard(std: Optional[str]) -> str:
+        """Нормализация стандарта для сравнения: ОСТ 1 → ОСТ1."""
+        if not std:
+            return ''
+        s = str(std).strip()
+        s = re.sub(r'ОСТ\s*1', 'ОСТ1', s)
+        s = re.sub(r'\s+', '', s)
+        return s.upper()
 
     def process(self, text: str) -> ProcessingResult:
         """Process a single nomenclature text through parametric pipeline."""
@@ -265,11 +315,10 @@ class AutomatedParametricProcessor:
 
         result.item_type = item_type.upper() if item_type else ""
         result.standard = standard_info.normalized
-
-        # Step 1: Mask lookup
         standard = result.standard
         search_item_type = result.item_type
 
+        # Step 1: Mask lookup
         mask = self.mask_db.get_mask(standard, search_item_type)
         if mask is None:
             # Fallback: try without uppercasing
@@ -288,19 +337,60 @@ class AutomatedParametricProcessor:
         # Step 2: Extract params with mask
         try:
             params = self._extract_params_with_mask(text, mask)
-            result.params = params
+            result.params = params or {}
         except Exception as e:
-            logger.debug(f"Param extraction failed for '{text}': {e}")
+            logger.debug("Param extraction failed for '%s': %s", text, e)
             params = {}
+            result.params = {}
 
-        # Step 3: Find ENS match
-        match_info = self._find_ens_match(text, standard, item_type, params, mask)
+        # Step 3: Parametric matching via ParametricENSClient (proven logic)
+        match_info = None
+        if self.parametric_client and params:
+            try:
+                effective_standard = getattr(mask, 'standard', None) or standard
+                match_result = self.parametric_client.match(
+                    text=text,
+                    standard=effective_standard,
+                    item_type=mask.item_type if hasattr(mask, 'item_type') else item_type
+                )
 
-        # Step 4: Apply coating substitution if needed
+                if match_result and match_result.ens_code:
+                    # Build match_info from ParametricENSClient result
+                    match_info = {
+                        'ens_code': match_result.ens_code,
+                        'ens_name': match_result.ens_name,
+                        'ens_params': match_result.ens_params,
+                        'ens_params_mask': match_result.ens_params_mask,
+                        'score': match_result.score,
+                        'v2_score': match_result.score,
+                        'match_result_score': match_result.score,
+                        'fuzzy_score': match_result.score,
+                        'match_type': match_result.match_type,
+                        'match_type_ru': self._match_type_to_ru(match_result.match_type),
+                        'needs_coating_substitution': False,
+                        'debug_candidates': [],
+                    }
+
+                    # Check if coating substitution is needed
+                    if match_result.score < 1.0 and params.get('покрытие'):
+                        match_info['needs_coating_substitution'] = True
+
+                elif match_result and match_result.matched_params:
+                    # Regex-only match
+                    result.params = match_result.matched_params
+
+            except Exception as e:
+                logger.warning("[AutomatedProcessor] ParametricENSClient match failed: %s", e)
+
+        # Step 4: Fallback direct ENS search if parametric_client didn't find match
+        if not match_info and params:
+            match_info = self._find_ens_match_direct(text, standard, item_type, params, mask)
+
+        # Step 5: Apply coating substitution if needed
         if match_info and match_info.get('needs_coating_substitution'):
             match_info = self._apply_coating_substitution(text, match_info, params)
 
-        # Step 5: Finalize with CORRECT logic
+        # Step 6: Finalize result
         self._finalize_result(result, match_info, params)
 
         result.processing_time_ms = (time.time() - start_time) * 1000
@@ -329,46 +419,37 @@ class AutomatedParametricProcessor:
                 cleaned[key] = value.strip() if value else None
         return cleaned
 
-    def _find_ens_match(self, text: str, standard: str, item_type: str,
-                        params: Dict, mask) -> Optional[Dict]:
-        """
-        Find best ENS match for extracted parameters.
-        Returns match_info dict with scores and candidate data.
-        Handles both dict and list structures for ens_items.
-        """
+    def _find_ens_match_direct(self, text: str, standard: str, item_type: str,
+                                params: Dict, mask) -> Optional[Dict]:
+        """Direct ENS search as fallback when ParametricENSClient fails."""
         if not self.ens_index:
             return None
 
-        # Filter ENS items by standard and type
+        std_norm = self._normalize_standard(standard)
+        query_type = item_type.upper().strip() if item_type else None
+
         candidates = []
         for code, ens_item in self.ens_index.items():
-            # Handle list-type ens_items (convert to dict if needed)
-            if isinstance(ens_item, list):
-                ens_item_str = ' '.join(str(x) for x in ens_item if x is not None)
-                ens_std = ens_item_str
-                ens_type = ens_item_str.lower()
-
-                if standard not in ens_std and ens_std not in standard:
-                    continue
-                if item_type not in ens_type and ens_type not in item_type:
-                    continue
-
-                # Wrap list in a pseudo-dict for uniform access
-                ens_item = {'_raw_list': ens_item, '_str': ens_item_str}
-                candidates.append((code, ens_item))
-                continue
-
-            # Normal dict-type ens_item
             if not isinstance(ens_item, dict):
-                logger.debug(f"ENS item {code} has unexpected type: {type(ens_item)}")
                 continue
 
-            ens_std = str(ens_item.get('нтд_1', '')).strip()
-            ens_type = str(ens_item.get('наименование_типа', '')).strip().lower()
+            # Check standard - try multiple field names
+            item_std = (ens_item.get('нтд') or
+                       ens_item.get('standard') or
+                       ens_item.get('нтд_1', ''))
+            item_std_norm = self._normalize_standard(item_std) if item_std else ''
 
-            if standard not in ens_std and ens_std not in standard:
+            if std_norm and item_std_norm and std_norm != item_std_norm:
                 continue
-            if item_type not in ens_type and ens_type not in item_type:
+
+            # Check type
+            item_type_field = str(
+                ens_item.get('тип_изделия', '') or
+                ens_item.get('наименование_типа', '') or
+                ens_item.get('тип', '')
+            ).upper().strip()
+
+            if query_type and item_type_field and query_type != item_type_field:
                 continue
 
             candidates.append((code, ens_item))
@@ -392,15 +473,12 @@ class AutomatedParametricProcessor:
                 best_comparison = comparison
                 best_mismatched = mismatched
 
-        if not best_candidate:
+        if not best_candidate or best_score < 0.5:
             return None
 
         code, ens_item = best_candidate
 
-        # Determine match type based on score
-        match_type = 'fuzzy_fallback'
-        match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
-
+        # Determine match type
         if best_score >= 1.0:
             match_type = 'name_exact'
             match_type_ru = 'Совпадение по наименованию'
@@ -410,14 +488,9 @@ class AutomatedParametricProcessor:
         elif best_score >= 0.5:
             match_type = 'parametric_partial'
             match_type_ru = 'Частичное совпадение параметров'
-
-        # Check if coating substitution is needed
-        needs_substitution = False
-        if best_mismatched:
-            for param, info in best_mismatched.items():
-                if param == 'покрытие':
-                    needs_substitution = True
-                    break
+        else:
+            match_type = 'fuzzy_fallback'
+            match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
 
         # Build ens_params_mask
         ens_params_mask = {}
@@ -428,7 +501,9 @@ class AutomatedParametricProcessor:
 
         return {
             'ens_code': code,
-            'ens_name': ens_item.get('наименование', f"{ens_item.get('наименование_типа', '')} {code}"),
+            'ens_name': (ens_item.get('наименование') or
+                        ens_item.get('полное_наименование') or
+                        f"{ens_item.get('наименование_типа', '')} {code}"),
             'ens_params': ens_params_mask,
             'ens_params_mask': ens_params_mask,
             'score': best_score,
@@ -439,24 +514,20 @@ class AutomatedParametricProcessor:
             'match_type_ru': match_type_ru,
             'fuzzy_params_comparison': best_comparison,
             'fuzzy_mismatched_params': best_mismatched,
-            'needs_coating_substitution': needs_substitution,
+            'needs_coating_substitution': bool(best_mismatched.get('покрытие')),
             'debug_candidates': []
         }
 
-    def _calculate_match_score(self, params: Dict, ens_item, text: str) -> Tuple[float, Dict, Dict]:
-        """
-        Calculate match score between extracted params and ENS item.
-        Handles both dict and list structures for ens_item.
-        Returns (score, comparison_dict, mismatched_dict).
-        """
+    def _calculate_match_score(self, params: Dict, ens_item: Dict, text: str) -> Tuple[float, Dict, Dict]:
+        """Calculate match score with fuzzy key matching."""
         comparison = {}
         mismatched = {}
 
         if not params:
             return 0.0, {}, {}
 
-        # Handle pseudo-dict from list conversion (_raw_list key)
         if isinstance(ens_item, dict) and '_raw_list' in ens_item:
+            # Pseudo-dict from list
             ens_item_str = ens_item.get('_str', '')
             matched_count = 0
             total_weight = 0
@@ -467,35 +538,7 @@ class AutomatedParametricProcessor:
                 total_weight += weight
                 if str(extracted_val) in ens_item_str:
                     matched_count += weight
-                    comparison[param] = {
-                        'status': 'exact',
-                        'extracted': str(extracted_val),
-                        'ens_value': 'found in list',
-                        'similarity': 1.0
-                    }
-                else:
-                    mismatched[param] = f"{extracted_val} not found in list"
-            score = matched_count / total_weight if total_weight > 0 else 0.0
-            return score, comparison, mismatched
-
-        # Handle raw list-type ens_items
-        if isinstance(ens_item, list):
-            ens_item_str = ' '.join(str(x) for x in ens_item if x is not None)
-            matched_count = 0
-            total_weight = 0
-            for param, extracted_val in params.items():
-                if param.startswith('_'):
-                    continue
-                weight = 2.0
-                total_weight += weight
-                if str(extracted_val) in ens_item_str:
-                    matched_count += weight
-                    comparison[param] = {
-                        'status': 'exact',
-                        'extracted': str(extracted_val),
-                        'ens_value': 'found in list',
-                        'similarity': 1.0
-                    }
+                    comparison[param] = {'status': 'exact', 'similarity': 1.0}
                 else:
                     mismatched[param] = f"{extracted_val} not found in list"
             score = matched_count / total_weight if total_weight > 0 else 0.0
@@ -504,10 +547,9 @@ class AutomatedParametricProcessor:
         if not isinstance(ens_item, dict):
             return 0.0, {}, {}
 
-        matched_count = 0
-        total_weight = 0
+        matched_count = 0.0
+        total_weight = 0.0
 
-        # Parameter weights
         weights = {
             'исполнение': 5.0,
             'номинальный_диаметр_резьбы': 5.0,
@@ -518,7 +560,22 @@ class AutomatedParametricProcessor:
             'группа_класс_прочности': 3.0,
             'тип_изделия': 2.0,
             'нтд_1': 2.0,
+            'нтд': 2.0,
         }
+
+        # Build key mapping with fuzzy matching
+        ens_keys = list(ens_item.keys())
+        key_map = {}
+        for param in params.keys():
+            if param.startswith('_'):
+                continue
+            if param in ens_item:
+                key_map[param] = param
+            else:
+                # Fuzzy key match
+                best_key = self._fuzzy_match_key(param, ens_keys)
+                if best_key:
+                    key_map[param] = best_key
 
         for param, extracted_val in params.items():
             if param.startswith('_'):
@@ -527,7 +584,8 @@ class AutomatedParametricProcessor:
             weight = weights.get(param, 2.0)
             total_weight += weight
 
-            ens_val = ens_item.get(param)
+            ens_key = key_map.get(param)
+            ens_val = ens_item.get(ens_key) if ens_key else None
 
             status, similarity = self._compare_values(extracted_val, ens_val, param)
 
@@ -546,8 +604,20 @@ class AutomatedParametricProcessor:
         score = matched_count / total_weight if total_weight > 0 else 0.0
         return score, comparison, mismatched
 
+    def _fuzzy_match_key(self, param: str, ens_keys: List[str]) -> Optional[str]:
+        """Find best matching key in ens_keys for param."""
+        param_lower = param.lower().replace('_', '')
+        for key in ens_keys:
+            key_lower = key.lower().replace('_', '')
+            if param_lower == key_lower:
+                return key
+            # Check if one contains the other
+            if param_lower in key_lower or key_lower in param_lower:
+                return key
+        return None
+
     def _compare_values(self, val1, val2, param_name: str) -> Tuple[str, float]:
-        """Compare two parameter values. Returns (status, similarity)."""
+        """Compare two parameter values."""
         if val1 is None and val2 is None:
             return ('exact', 1.0)
         if val1 is None or val2 is None:
@@ -603,12 +673,18 @@ class AutomatedParametricProcessor:
                 substituted_params = dict(params)
                 substituted_params['покрытие'] = correct_coating
 
-                # Recalculate score with substituted coating
-                new_score, new_comparison, new_mismatched = self._calculate_match_score(
-                    substituted_params, match_info.get('ens_params', {}), text
-                )
+                # Recalculate score
+                # Find the ENS item
+                ens_code = match_info.get('ens_code')
+                ens_item = self.ens_index.get(ens_code) if ens_code else None
+                if ens_item:
+                    new_score, new_comparison, new_mismatched = self._calculate_match_score(
+                        substituted_params, ens_item, text
+                    )
+                else:
+                    new_score = match_info.get('score', 0.0)
+                    new_mismatched = {}
 
-                # Update match info
                 match_info['coating_substitution'] = {
                     'original': current_coating,
                     'corrected': correct_coating,
@@ -618,24 +694,17 @@ class AutomatedParametricProcessor:
                 }
                 match_info['v2_score'] = new_score
                 match_info['match_result_score'] = new_score
-                match_info['fuzzy_params_comparison'] = new_comparison
-                match_info['fuzzy_mismatched_params'] = new_mismatched
                 match_info['match_type'] = 'coating_substituted'
                 match_info['match_type_ru'] = 'Совпадение после подбора правильного покрытия'
                 match_info['needs_coating_substitution'] = False
-
+                match_info['fuzzy_mismatched_params'] = new_mismatched
                 return match_info
 
         return match_info
 
     def _finalize_result(self, result: ProcessingResult, match_info: Optional[Dict],
                          extracted_params: Dict):
-        """
-        CORRECTED success/confidence logic.
-
-        CRITICAL FIX: success and confidence are now based on actual scores,
-        not hardcoded to True/1.0.
-        """
+        """Finalize result with proper success logic."""
         if not match_info:
             result.success = False
             result.confidence = 0.0
@@ -644,11 +713,9 @@ class AutomatedParametricProcessor:
             result.match_type_ru = 'Не определено'
             return
 
-        # Extract scores
+        score = match_info.get('score', 0.0)
         v2_score = match_info.get('v2_score', 0.0)
-        match_result_score = match_info.get('match_result_score', 0.0)
-        fuzzy_score = match_info.get('fuzzy_score', 0.0)
-        effective_score = max(v2_score, match_result_score)
+        effective_score = max(score, v2_score)
 
         match_type = match_info.get('match_type', '')
         result.match_type = match_type
@@ -663,7 +730,7 @@ class AutomatedParametricProcessor:
         result.fuzzy_mismatched_params = match_info.get('fuzzy_mismatched_params')
         result.fuzzy_params_comparison = match_info.get('fuzzy_params_comparison')
 
-        # Build details dict
+        # Build details
         result.details = {
             'mask_id': result.mask_id,
             'mask_pattern': result.mask_pattern,
@@ -671,30 +738,16 @@ class AutomatedParametricProcessor:
             'match_type_ru': result.match_type_ru,
             'extracted_standard': self.standard_extractor.extract_all(result.text).get('standard_info', {}).to_dict() if self.standard_extractor.extract_all(result.text).get('standard_info') else None,
             'extracted_type': result.item_type.lower() if result.item_type else None,
-            'fuzzy_used': match_type in ('fuzzy_fallback', 'coating_substituted'),
-            'debug_candidates': match_info.get('debug_candidates', []),
-            'fuzzy_score': fuzzy_score,
-            'match_result_score': match_result_score,
+            'fuzzy_used': match_type == 'fuzzy_fallback',
+            'fuzzy_score': match_info.get('fuzzy_score', 0.0),
+            'match_result_score': match_info.get('match_result_score', 0.0),
             'v2_score': v2_score,
-            'v2_computed': True,
             'coating_substitution': result.coating_substitution,
-            'fuzzy_mismatched_params': result.fuzzy_mismatched_params
+            'fuzzy_mismatched_params': result.fuzzy_mismatched_params,
         }
 
-        # === CRITICAL FIX: Proper success logic based on scores ===
-
-        if match_type == 'name_exact':
-            if effective_score >= self.min_v2_threshold:
-                result.success = True
-                result.confidence = effective_score
-                result.level = 'parametric_match'
-            else:
-                result.success = False
-                result.confidence = 0.0
-                result.level = 'parametric_match'
-                result.match_type_ru = 'Совпадение по наименованию (низкий score)'
-
-        elif match_type == 'parametric_full':
+        # Success logic: use success_threshold from config (default 0.7)
+        if match_type in ('name_exact', 'parametric_full', 'params_ens_exact', 'params_mask_exact'):
             if effective_score >= self.min_v2_threshold:
                 result.success = True
                 result.confidence = effective_score
@@ -704,17 +757,25 @@ class AutomatedParametricProcessor:
                 result.confidence = 0.0
                 result.level = 'parametric_match'
 
-        elif match_type == 'parametric_partial':
-            if effective_score >= self.min_v2_threshold:
+        elif match_type == 'coating_substituted':
+            mismatched = match_info.get('fuzzy_mismatched_params', {})
+            has_critical_mismatch = any(p in mismatched for p in self.CRITICAL_PARAMS)
+
+            if has_critical_mismatch:
+                result.success = False
+                result.confidence = 0.0
+                result.match_type_ru = 'Подмена покрытия отклонена (несовпадение параметров)'
+                result.level = 'parametric_match'
+            elif effective_score >= self.min_v2_threshold:
                 result.success = True
-                result.confidence = effective_score
+                result.confidence = min(effective_score, 0.95)
                 result.level = 'parametric_match'
             else:
                 result.success = False
                 result.confidence = 0.0
                 result.level = 'parametric_match'
 
-        elif match_type == 'fuzzy_fallback':
+        elif match_type in ('fuzzy_fallback', 'parametric_partial'):
             mismatched = match_info.get('fuzzy_mismatched_params', {})
             has_critical_mismatch = any(p in mismatched for p in self.CRITICAL_PARAMS)
 
@@ -732,26 +793,43 @@ class AutomatedParametricProcessor:
                 result.confidence = 0.0
                 result.level = 'parametric_match'
 
-        elif match_type == 'coating_substituted':
-            mismatched = match_info.get('fuzzy_mismatched_params', {})
-            has_critical_mismatch = any(p in mismatched for p in self.CRITICAL_PARAMS)
-
-            if has_critical_mismatch:
-                result.success = False
-                result.confidence = 0.0
-                result.match_type = 'coating_substituted_rejected'
-                result.match_type_ru = 'Подмена покрытия отклонена (несовпадение параметров)'
-                result.level = 'parametric_match'
-            elif effective_score >= self.min_v2_threshold:
+        else:
+            if effective_score >= self.success_threshold:
                 result.success = True
-                result.confidence = min(effective_score, 0.95)
+                result.confidence = effective_score
                 result.level = 'parametric_match'
             else:
                 result.success = False
                 result.confidence = 0.0
-                result.level = 'parametric_match'
+                result.level = 'no_match'
 
-        else:
-            result.success = False
-            result.confidence = 0.0
-            result.level = 'no_match'
+    @staticmethod
+    def _match_type_to_ru(match_type: str) -> str:
+        """Convert match type to Russian description."""
+        mapping = {
+            'name_exact': 'Совпадение по наименованию',
+            'params_ens_exact': 'Полное совпадение параметров с индексом',
+            'params_mask_exact': 'Полное совпадение параметров с маской ENS',
+            'v2_exact': 'Полное совпадение V2',
+            'parametric_full': 'Полное совпадение параметров',
+            'parametric_partial': 'Частичное совпадение параметров',
+            'fuzzy_fallback': 'Нечеткое совпадение (fuzzy matching)',
+            'coating_substituted': 'Совпадение после подбора правильного покрытия',
+            'regex_only': 'Только regex (без ENS)',
+            'failed': 'Не определено',
+        }
+        return mapping.get(match_type, match_type)
+
+    def batch_process(self, texts: List[str]) -> List[ProcessingResult]:
+        """Пакетная обработка."""
+        return [self.process(text) for text in texts]
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Статистика процессора."""
+        return {
+            'mask_db_stats': self.mask_db.get_statistics() if hasattr(self.mask_db, 'get_statistics') else {},
+            'llm_generation_enabled': self.use_llm_generation,
+            'min_v2_threshold': self.min_v2_threshold,
+            'min_fuzzy_threshold': self.min_fuzzy_threshold,
+            'success_threshold': self.success_threshold,
+        }
