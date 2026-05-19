@@ -246,7 +246,10 @@ class AutomatedParametricProcessor:
         try:
             from core.result_database import ResultDatabaseManager
             manager = ResultDatabaseManager(db_path=self.result_db_path)
+            logger.debug("[CACHE] DB lookup: article=%r name=%s", article, text[:50])
             cached = manager.get_result(article, text)
+            if cached:
+                logger.debug("[CACHE] DB found: ens_code=%s updated_at=%s", cached.get('ens_code'), cached.get('updated_at'))
             if cached:
                 # Проверяем TTL
                 updated_at = cached.get('updated_at')
@@ -326,12 +329,20 @@ class AutomatedParametricProcessor:
         start_time = time.time()
 
         # === CACHE CHECK ===
+        logger.debug("[CACHE] process() called: article=%r text=%s result_db_path=%s", article, text[:50], self.result_db_path)
         if not force and self.result_db_path:
             cached = self._check_cache(article, text)
             if cached:
-                logger.info("[CACHE] Returning cached result for '%s' (code=%s, mask=%s)",
+                logger.info("[CACHE] HIT for '%s' (code=%s, mask=%s)",
                             text[:50], cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
                 return self._result_from_cache(cached)
+            else:
+                logger.debug("[CACHE] MISS for article=%r text=%s", article, text[:50])
+        else:
+            if force:
+                logger.debug("[CACHE] skipped (force=True)")
+            elif not self.result_db_path:
+                logger.debug("[CACHE] skipped (result_db_path not set)")
         self._cache_stats['misses'] += 1
 
         clean_text = text.strip().rstrip(',.;: ')

@@ -1,13 +1,13 @@
+#!/usr/bin/env python3
 """
 Result Database Manager
 Хранение результатов обработки номенклатуры с отслеживанием версий масок.
 
-VERSION: 2026-05-14
+VERSION: 2026-05-19
 
 LAST_FIXES:
- 2026-05-14 11:54 UTC+3 — upsert с отслеживанием mask_pattern_hash: обновляем запись если маска изменилась
- 2026-05-14 11:54 UTC+3 — поддержка Excel batch с сохранением артикула и наименования
- 2026-05-14 11:54 UTC+3 — методы export_to_excel и get_changed_records
+ 2026-05-19 22:05 UTC+3 — Ключ кэша изменён с UNIQUE(article, name) на UNIQUE(name, standard).
+   Теперь кэш работает по наименованию + стандарту, а не по артикулу.
 """
 
 import sqlite3
@@ -56,7 +56,7 @@ class ResultDatabaseManager:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS nomenclature_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    article TEXT NOT NULL,
+                    article TEXT,
                     name TEXT NOT NULL,
                     standard TEXT,
                     item_type TEXT,
@@ -79,11 +79,13 @@ class ResultDatabaseManager:
                     processing_time_ms REAL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(article, name)
+                    UNIQUE(name, standard)
                 )
             """)
             # Индексы для быстрого поиска
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_article ON nomenclature_results(article)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON nomenclature_results(name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_standard ON nomenclature_results(standard)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_name_std ON nomenclature_results(name, standard)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ens_code ON nomenclature_results(ens_code)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_success ON nomenclature_results(success)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_mask_hash ON nomenclature_results(mask_pattern_hash)")
@@ -99,10 +101,12 @@ class ResultDatabaseManager:
 
     def upsert_result(
         self,
-        article: str,
         name: str,
-        level: str,
-        success: bool,
+        article: Optional[str] = None,
+        standard: Optional[str] = None,
+        item_type: Optional[str] = None,
+        level: Optional[str] = None,
+        success: bool = False,
         params: Optional[Dict] = None,
         ens_code: Optional[str] = None,
         ens_name: Optional[str] = None,
@@ -115,23 +119,22 @@ class ResultDatabaseManager:
         fuzzy_mismatched_params: Optional[Dict] = None,
         mask_id: Optional[int] = None,
         mask_pattern: Optional[str] = None,
-        standard: Optional[str] = None,
-        item_type: Optional[str] = None,
         details: Optional[Dict] = None,
         processing_time_ms: float = 0.0,
     ) -> Tuple[bool, str]:
         """
         Upsert результата. Возвращает (changed, reason).
         changed=True если запись новая или маска изменилась.
+        Ключ: name + standard.
         """
         mask_hash = self._hash_mask(mask_pattern)
         now = datetime.now().isoformat()
 
         with sqlite3.connect(self.db_path) as conn:
-            # Проверяем существующую запись
+            # Проверяем существующую запись по name + standard
             cursor = conn.execute(
-                "SELECT id, mask_pattern_hash FROM nomenclature_results WHERE article = ? AND name = ?",
-                (article, name)
+                "SELECT id, mask_pattern_hash FROM nomenclature_results WHERE name = ? AND (standard = ? OR (standard IS NULL AND ? IS NULL))",
+                (name, standard, standard)
             )
             existing = cursor.fetchone()
 
@@ -140,28 +143,27 @@ class ResultDatabaseManager:
                 if existing_hash == mask_hash:
                     # Маска не изменилась — обновляем только время (soft update)
                     conn.execute(
-                        """UPDATE nomenclature_results
-                           SET updated_at = ?
-                           WHERE id = ?""",
+                        "UPDATE nomenclature_results SET updated_at = ? WHERE id = ?",
                         (now, existing_id)
                     )
                     conn.commit()
                     return False, "mask_unchanged"
                 else:
                     # Маска изменилась — полное обновление
-                    logger.info("[RESULT_DB] Mask changed for %s / %s: %s -> %s", article[:30], name[:30], existing_hash, mask_hash)
+                    logger.info("[RESULT_DB] Mask changed for '%s' / %s: %s -> %s",
+                                name[:50], standard, existing_hash, mask_hash)
                     conn.execute(
                         """UPDATE nomenclature_results SET
-                            standard = ?, item_type = ?, level = ?, success = ?,
+                            article = ?, standard = ?, item_type = ?, level = ?, success = ?,
                             params = ?, ens_code = ?, ens_name = ?, ens_params = ?,
                             ens_params_mask = ?, confidence = ?, match_type = ?,
                             match_type_ru = ?, coating_substitution = ?,
                             fuzzy_mismatched_params = ?, mask_id = ?, mask_pattern = ?,
                             mask_pattern_hash = ?, details = ?, processing_time_ms = ?,
                             updated_at = ?
-                           WHERE id = ?""",
+                        WHERE id = ?""",
                         (
-                            standard, item_type, level, int(success),
+                            article, standard, item_type, level, int(success),
                             _json_dumps(params), ens_code, ens_name,
                             _json_dumps(ens_params), _json_dumps(ens_params_mask),
                             confidence, match_type, match_type_ru,
@@ -199,14 +201,20 @@ class ResultDatabaseManager:
                 conn.commit()
                 return True, "new_record"
 
-    def get_result(self, article: str, name: str) -> Optional[Dict]:
-        """Получить одну запись по артикулу и наименованию."""
+    def get_result(self, name: str, standard: Optional[str] = None) -> Optional[Dict]:
+        """Получить одну запись по наименованию (и опционально по стандарту)."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM nomenclature_results WHERE article = ? AND name = ?",
-                (article, name)
-            )
+            if standard:
+                cursor = conn.execute(
+                    "SELECT * FROM nomenclature_results WHERE name = ? AND standard = ? ORDER BY updated_at DESC LIMIT 1",
+                    (name, standard)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM nomenclature_results WHERE name = ? ORDER BY updated_at DESC LIMIT 1",
+                    (name,)
+                )
             row = cursor.fetchone()
             if row:
                 return self._deserialize_row(dict(row))
@@ -270,14 +278,14 @@ class ResultDatabaseManager:
             for row in cursor.fetchall():
                 by_match_type[row[0] or "unknown"] = row[1]
 
-        return {
-            "total": total,
-            "success": success,
-            "failed": failed,
-            "changed_after_insert": changed,
-            "by_match_type": by_match_type,
-            "success_rate": round(success / total, 3) if total else 0.0,
-        }
+            return {
+                "total": total,
+                "success": success,
+                "failed": failed,
+                "changed_after_insert": changed,
+                "by_match_type": by_match_type,
+                "success_rate": round(success / total, 3) if total else 0.0,
+            }
 
     def export_to_excel(
         self,
@@ -315,10 +323,10 @@ class ResultDatabaseManager:
             return output_path
 
         # Обогащаем исходный DataFrame данными из БД
-        # Создаем lookup по (article, name)
-        lookup: Dict[Tuple[str, str], Dict] = {}
+        # Создаем lookup по name
+        lookup: Dict[str, Dict] = {}
         for record in self.get_all_results():
-            key = (str(record.get("article", "")).strip(), str(record.get("name", "")).strip())
+            key = str(record.get("name", "")).strip()
             lookup[key] = record
 
         # Добавляем колонки
@@ -332,14 +340,12 @@ class ResultDatabaseManager:
             df[col] = None
 
         for idx, row in df.iterrows():
-            art = str(row.get(article_col, "")).strip()
             nam = str(row.get(name_col, "")).strip()
-            rec = lookup.get((art, nam))
+            rec = lookup.get(nam)
             if rec:
                 for col in cols:
                     val = rec.get(col)
                     if col in ("coating_substitution", "fuzzy_mismatched_params"):
-                        # Для Excel: сериализуем dict в строку
                         val = _json_dumps(val) if val else None
                     elif col == "success":
                         val = "Да" if val else "Нет"
@@ -360,7 +366,6 @@ class ResultDatabaseManager:
         for field in json_fields:
             if field in row and row[field] is not None:
                 row[field] = _json_loads(row[field])
-        # success как bool
         if "success" in row:
             row["success"] = bool(row["success"])
         return row

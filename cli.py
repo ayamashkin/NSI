@@ -428,7 +428,8 @@ def process_parametric(text, db, ens_index, llm):
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
         use_llm_generation=llm,
-        settings=settings
+        settings=settings,
+        result_db_path='cache/result.db'
     )
 
     result = processor.process(text)
@@ -461,7 +462,7 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 @click.option('--workers', '-w', type=int, default=4, help='Количество параллельных workers (default: 4)')
-@click.option('--result-db', '-r', help='Путь к SQLite БД результатов для кэширования')
+@click.option('--result-db', '-r', default='cache/result.db', help='Путь к SQLite БД результатов для кэширования')
 def batch(input_file, db, ens_index, output, llm, validate, success_only,
           include_details, coating_map, workers, result_db):
     """Пакетная обработка номенклатуры параметрическим методом"""
@@ -551,8 +552,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                     from core.result_database import ResultDatabaseManager
                     manager = ResultDatabaseManager(db_path=result_db)
                     manager.upsert_result(
-                        article=df.iloc[idx].get('Артикул', ''),
                         name=text,
+                        article=str(df.iloc[idx].get('Артикул', '')).strip() or None,
                         item_type=result.item_type,
                         standard=result.standard,
                         ens_code=result.ens_code,
@@ -563,7 +564,13 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                         ens_params=result.ens_params,
                         ens_params_mask=result.ens_params_mask,
                         match_type=result.match_type,
-                        details=result.details
+                        match_type_ru=result.match_type_ru,
+                        coating_substitution=result.coating_substitution,
+                        fuzzy_mismatched_params=result.fuzzy_mismatched_params,
+                        mask_id=result.mask_id,
+                        mask_pattern=result.mask_pattern,
+                        details=result.details,
+                        processing_time_ms=result.processing_time_ms
                     )
                 except Exception as e:
                     logger.debug("Failed to save result to cache: %s", e)
