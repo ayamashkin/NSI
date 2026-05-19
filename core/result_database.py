@@ -122,6 +122,8 @@ class ResultDatabaseManager:
         details: Optional[Dict] = None,
         processing_time_ms: float = 0.0,
     ) -> Tuple[bool, str]:
+        """Upsert результата. Возвращает (changed, reason)."""
+        logger.info("[RESULT_DB] upsert_result: name=%r standard=%r ens_code=%s", name[:60], standard, ens_code)
         """
         Upsert результата. Возвращает (changed, reason).
         changed=True если запись новая или маска изменилась.
@@ -147,6 +149,7 @@ class ResultDatabaseManager:
                         (now, existing_id)
                     )
                     conn.commit()
+                    logger.info("[RESULT_DB] UNCHANGED (mask same) for name=%r", name[:60])
                     return False, "mask_unchanged"
                 else:
                     # Маска изменилась — полное обновление
@@ -175,6 +178,7 @@ class ResultDatabaseManager:
                         )
                     )
                     conn.commit()
+                    logger.info("[RESULT_DB] UPDATED (mask changed) for name=%r", name[:60])
                     return True, "mask_changed"
             else:
                 # Новая запись
@@ -203,8 +207,12 @@ class ResultDatabaseManager:
 
     def get_result(self, name: str, standard: Optional[str] = None) -> Optional[Dict]:
         """Получить одну запись по наименованию (и опционально по стандарту)."""
+        logger.info("[RESULT_DB] get_result: name=%r standard=%r", name[:60], standard)
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
+            # Сначала считаем сколько записей вообще в БД
+            total = conn.execute("SELECT COUNT(*) FROM nomenclature_results").fetchone()[0]
+            logger.info("[RESULT_DB] Total records in DB: %d", total)
             if standard:
                 cursor = conn.execute(
                     "SELECT * FROM nomenclature_results WHERE name = ? AND standard = ? ORDER BY updated_at DESC LIMIT 1",
@@ -217,8 +225,11 @@ class ResultDatabaseManager:
                 )
             row = cursor.fetchone()
             if row:
+                logger.info("[RESULT_DB] FOUND: id=%s ens_code=%s updated_at=%s", row['id'], row['ens_code'], row['updated_at'])
                 return self._deserialize_row(dict(row))
-            return None
+            else:
+                logger.info("[RESULT_DB] NOT FOUND for name=%r standard=%r", name[:60], standard)
+                return None
 
     def get_all_results(
         self,
