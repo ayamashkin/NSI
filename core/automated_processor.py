@@ -41,6 +41,13 @@ def _get_matching_config():
                 v2_exact_threshold = 0.99
                 coating_similarity_threshold = 0.8
                 strict_union_keys = False
+                numeric_field_weight = 5.0
+                text_field_weight = 2.0
+                default_field_weight = 1.0
+                length_tolerance = 1.0
+                numeric_tolerance = 0.01
+                confidence_penalty_per_mismatch = 0.15
+                max_confidence_penalty = 0.5
             _matching_config = _FallbackMatchingConfig()
     return _matching_config
 
@@ -957,7 +964,7 @@ class AutomatedParametricProcessor:
                     if m:
                         fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         if fallback_params:
-                            logger.info("[PARAM_MATCH] Generic extraction: %s", fallback_params)
+                            logger.debug("[PARAM_MATCH] Generic extraction: %s", fallback_params)
                         else:
                             logger.debug("[PARAM_MATCH] Generic pattern did NOT match")
                     else:
@@ -1060,7 +1067,7 @@ class AutomatedParametricProcessor:
                         fuzzy_score = manual_ens.get('_match_score', 0.8)
                         if not match_result.ens_name:
                             match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
-                        logger.info("[PARAM_MATCH] Exact ENS search matched: ens_code=%s, score=%.2f", fuzzy_ens_code, fuzzy_score)
+                        logger.debug("[PARAM_MATCH] Exact ENS search matched: ens_code=%s, score=%.2f", fuzzy_ens_code, fuzzy_score)
 
                 if not fuzzy_ens_code and ens_candidates and search_params:
                     logger.info("[PARAM_MATCH] Trying fuzzy match with params: %s", search_params)
@@ -1078,7 +1085,15 @@ class AutomatedParametricProcessor:
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
-                        logger.info("[PARAM_MATCH] Fuzzy fallback matched: score=%.2f, ens_code=%s", fuzzy_score, fuzzy_ens_code)
+                        # STRICT NUMERIC VALIDATION
+                        numeric_mismatches = self._validate_numeric_params(search_params, fuzzy_match)
+                        if numeric_mismatches:
+                            logger.warning("[PARAM_MATCH] Fuzzy match REJECTED due to numeric mismatches: %s", numeric_mismatches)
+                            fuzzy_mismatched_params = {**dict(best_candidate.get('params_mismatched', {})), **numeric_mismatches}
+                            fuzzy_ens_code = None
+                            fuzzy_score = 0.0
+                        else:
+                            logger.debug("[PARAM_MATCH] Fuzzy fallback matched: score=%.2f, ens_code=%s", fuzzy_score, fuzzy_ens_code)
                     else:
                         logger.warning("[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
 
@@ -1086,7 +1101,7 @@ class AutomatedParametricProcessor:
                         best_candidate = fuzzy_debug[0]
                         if best_candidate.get('params_mismatched'):
                             fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
-                            logger.info("[PARAM_MATCH] Fuzzy mismatched params: %s", fuzzy_mismatched_params)
+                            logger.debug("[PARAM_MATCH] Fuzzy mismatched params: %s", fuzzy_mismatched_params)
                         else:
                             fuzzy_mismatched_params = {}
                 elif not ens_candidates:
@@ -1107,7 +1122,7 @@ class AutomatedParametricProcessor:
                     final_ens_name = ens_item.get('наименование') or ens_item.get('name')
                     if not final_mdm_key:
                         final_mdm_key = ens_item.get('mdm_key')
-                    logger.info("[PARAM_MATCH] ENS name resolved: '%s'", final_ens_name)
+                    logger.debug("[PARAM_MATCH] ENS name resolved: '%s'", final_ens_name)
             except Exception as e:
                 logger.info("[PARAM_MATCH] Failed to resolve ENS name: %s", e)
 
@@ -1121,7 +1136,7 @@ class AutomatedParametricProcessor:
                     if m:
                         generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         generic_params = self._normalize_params(generic_params)
-                        logger.info("[PARAM_MATCH] Params from generic on text: %s", generic_params)
+                        logger.debug("[PARAM_MATCH] Params from generic on text: %s", generic_params)
                         if not final_matched_params:
                             final_matched_params = generic_params
             except Exception as e:
@@ -1137,7 +1152,7 @@ class AutomatedParametricProcessor:
                     ens_item = self._get_ens_by_code(final_ens_code)
                     if ens_item:
                         final_ens_name = ens_item.get('наименование') or ens_item.get('name')
-                        logger.info("[PARAM_MATCH] ENS name resolved (V2): '%s'", final_ens_name)
+                        logger.debug("[PARAM_MATCH] ENS name resolved (V2): '%s'", final_ens_name)
                 except Exception as e:
                     logger.info("[PARAM_MATCH] ENS name resolution failed (V2): %s", e)
             try:
@@ -1159,7 +1174,7 @@ class AutomatedParametricProcessor:
                             required=list(params_for_v2.keys())
                         )
                         v2_computed = True
-                        logger.info("[PARAM_MATCH] V2 score: %s, type: %s", v2_score, v2_match_type)
+                        logger.debug("[PARAM_MATCH] V2 score: %s, type: %s", v2_score, v2_match_type)
                     else:
                         logger.info("[PARAM_MATCH] V2: generic pattern did NOT match ENS name")
                 elif not final_ens_name:
@@ -1178,6 +1193,12 @@ class AutomatedParametricProcessor:
                 final_score = max(match_result.score, fuzzy_score)
         else:
             final_score = max(match_result.score, fuzzy_score)
+
+        # DYNAMIC CONFIDENCE: penalize for mismatched params
+        if fuzzy_mismatched_params:
+            penalty = min(_get_matching_config().max_confidence_penalty, _get_matching_config().confidence_penalty_per_mismatch * len(fuzzy_mismatched_params))
+            final_score = max(0.0, final_score - penalty)
+            logger.info("[PARAM_MATCH] Confidence penalty: -%.2f for %d mismatches, final=%.3f", penalty, len(fuzzy_mismatched_params), final_score)
 
         # Получаем параметры из ENS записи — используем skip_fields из parametric_client
         ens_params_from_index = None

@@ -178,6 +178,34 @@ matching:
   # false = поле не добавляется (экономия размера JSON).
   fuzzy_params_comparison: true
 
+  # --- numeric_field_weight ---
+  # Вес числовых параметров (длина, диаметр, исполнение) при fuzzy matching.
+  numeric_field_weight: 5.0
+
+  # --- text_field_weight ---
+  # Вес текстовых параметров (покрытие, материал).
+  text_field_weight: 2.0
+
+  # --- default_field_weight ---
+  # Вес остальных параметров.
+  default_field_weight: 1.0
+
+  # --- length_tolerance ---
+  # Допуск для длины в мм при post-validation.
+  # Если |extracted - ens| > length_tolerance → reject.
+  length_tolerance: 1.0
+
+  # --- numeric_tolerance ---
+  # Допуск для остальных числовых параметров.
+  numeric_tolerance: 0.01
+
+  # --- confidence_penalty_per_mismatch ---
+  # Штраф к confidence за каждый mismatched параметр.
+  confidence_penalty_per_mismatch: 0.15
+
+  # --- max_confidence_penalty ---
+  # Максимальный суммарный штраф.
+  max_confidence_penalty: 0.5
 # =============================================================================
 # Prompts Configuration
 # Настройки реестра промптов для LLM-генерации масок
