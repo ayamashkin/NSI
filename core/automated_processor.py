@@ -686,7 +686,7 @@ class AutomatedParametricProcessor:
         if match_type == 'name_exact':
             if effective_score >= self.min_v2_threshold:
                 result.success = True
-                result.confidence = effective_score
+                result.confidence = round(effective_score, 3)
                 result.level = 'parametric_match'
             else:
                 result.success = False
@@ -697,7 +697,7 @@ class AutomatedParametricProcessor:
         elif match_type == 'parametric_full':
             if effective_score >= self.min_v2_threshold:
                 result.success = True
-                result.confidence = effective_score
+                result.confidence = round(effective_score, 3)
                 result.level = 'parametric_match'
             else:
                 result.success = False
@@ -707,7 +707,7 @@ class AutomatedParametricProcessor:
         elif match_type == 'parametric_partial':
             if effective_score >= self.min_v2_threshold:
                 result.success = True
-                result.confidence = effective_score
+                result.confidence = round(effective_score, 3)
                 result.level = 'parametric_match'
             else:
                 result.success = False
@@ -725,7 +725,7 @@ class AutomatedParametricProcessor:
                 result.level = 'parametric_match'
             elif effective_score >= self.min_fuzzy_threshold:
                 result.success = True
-                result.confidence = effective_score
+                result.confidence = round(effective_score, 3)
                 result.level = 'parametric_match'
             else:
                 result.success = False
@@ -744,7 +744,7 @@ class AutomatedParametricProcessor:
                 result.level = 'parametric_match'
             elif effective_score >= self.min_v2_threshold:
                 result.success = True
-                result.confidence = min(effective_score, 0.95)
+                result.confidence = round(min(effective_score, 0.95), 3)
                 result.level = 'parametric_match'
             else:
                 result.success = False

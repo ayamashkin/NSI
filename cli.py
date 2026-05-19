@@ -294,6 +294,27 @@ def models(api_name):
 # PARAMETRIC COMMANDS (New)
 # ============================
 
+def _find_name_column(df):
+    """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
+    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        for kw in keywords:
+            if kw in col_lower:
+                return col
+    return None
+
+
+def _truncate_dataframe_cells(df, max_length=1000):
+    """Обрезка длинных строковых значений для предотвращения огромных Excel-файлов."""
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(
+                lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
+            )
+    return df
+
+
 def _init_llm_clients(settings, all_services=False):
     """Инициализация LLM клиентов.
     По умолчанию - только default_service из mask_generation.
@@ -409,27 +430,32 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 @click.option('--workers', '-w', type=int, default=1, help='Количество параллельных workers')
-def batch(input_file, db, ens_index, output, llm, validate, success_only,
-          include_details, coating_map, workers):
+def batch(input_file, db, ens_index, output, llm, validate, success_only,          include_details, coating_map, workers):
     """Пакетная обработка номенклатуры параметрическим методом"""
     import pandas as pd
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
+    from parsers.standard_extractor import StandardExtractor
 
     click.echo(f"📊 Загрузка Excel: {input_file}...")
     df = pd.read_excel(input_file)
+    click.echo(f"   Прочитано {len(df)} строк, {len(df.columns)} колонок")
 
-    # Auto-detect name column
-    name_col = 'Наименование'
-    if name_col not in df.columns:
-        name_cols = [c for c in df.columns if 'наимен' in str(c).lower()]
-        if name_cols:
-            name_col = name_cols[0]
-        else:
-            click.echo("❌ Столбец с наименованием не найден", err=True)
-            return
+    # --- Проверка колонки "Наименование" ---
+    name_col = _find_name_column(df)
+    if name_col is None:
+        click.echo("\n❌ ОШИБКА: В файле отсутствует колонка с наименованием.")
+        click.echo("   Ожидается колонка, содержащая в названии одно из слов:")
+        click.echo("   'Наименование', 'Номенклатура', 'Name', 'Наим.', 'Наименов'")
+        click.echo(f"\n   Доступные колонки в файле:")
+        for i, col in enumerate(df.columns, 1):
+            click.echo(f"      {i}. {col}")
+        click.echo("\n   Переименуйте колонку с наименованием изделий и повторите запуск.")
+        return 1
+
+    click.echo(f"✅ Колонка с наименованием: '{name_col}'")
 
     texts = df[name_col].astype(str).tolist()
     click.echo(f"📋 Загружено {len(texts)} позиций")
@@ -448,32 +474,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         llm_clients = _init_llm_clients(settings, all_services=True)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
-            return
+            return 1
         click.echo("🤖 LLM клиенты инициализированы")
 
     # Mask DB
     mask_db = MaskDatabase(db_path=db)
-
-    # Load results DB path from config.yaml (result_database.path)
-    output_path = Path(output)
-    results_db_path = None
-    has_cache = False
-    results_db = None
-    try:
-        db_cfg = settings.get('result_database', {}) if isinstance(settings, dict) else getattr(settings, 'result_database', {})
-        if hasattr(db_cfg, 'path'):
-            results_db_path = db_cfg.path
-        elif isinstance(db_cfg, dict) and 'path' in db_cfg:
-            results_db_path = db_cfg['path']
-
-        if results_db_path:
-            from core.database import DatabaseManager
-            results_db = DatabaseManager(str(results_db_path))
-            has_cache = True
-            logger.info(f"Results DB loaded from config: {results_db_path}")
-    except Exception as e:
-        logger.debug(f"Results DB not configured or unavailable: {e}")
-        has_cache = False
+    extractor = StandardExtractor()
 
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
@@ -490,31 +496,10 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     results = []
     stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0, 'cached': 0}
 
-    for text in tqdm(texts, desc="Обработка"):
+    for idx, text in enumerate(tqdm(texts, desc="Обработка")):
         stats['total'] += 1
 
-        # Check cache first
-        cached_result = None
-        if has_cache and results_db:
-            try:
-                # Query by text hash or exact text match
-                cached = results_db.get_all_results(limit=1)
-                # Note: real implementation should query by text hash
-                # This is a simplified placeholder
-            except Exception:
-                pass
-
-        if cached_result:
-            result = cached_result
-            stats['cached'] += 1
-        else:
-            result = processor.process(text)
-            # Save to cache
-            if has_cache and results_db:
-                try:
-                    results_db.save_result(text, result.to_dict())
-                except Exception as e:
-                    logger.debug(f"Cache save failed: {e}")
+        result = processor.process(text)
 
         if result.success:
             stats['success'] += 1
@@ -526,146 +511,100 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             stats['filtered'] += 1
             continue
 
-        # Build row with has_mask
+        # Извлечение стандарта и типа для проверки маски
+        standard, item_type = extractor.extract(text)
         has_mask = False
-        if result.standard:
+        mask_pattern = ''
+        if standard and item_type:
             try:
-                # Use get_mask to check existence (returns None if not found)
-                has_mask = mask_db.get_mask(result.standard) is not None
+                mask = mask_db.get_mask(standard, item_type)
+                has_mask = mask is not None
+                if mask:
+                    mask_pattern = getattr(mask, 'pattern', '') or ''
             except Exception:
-                has_mask = False
+                pass
 
-        row = {
-            'text': result.text,
-            'level': result.level,
-            'success': result.success,
-            'params': result.params,
-            'ens_code': result.ens_code,
-            'ens_name': result.ens_name,
-            # CRITICAL FIX: Removed 'ens_params' which contained full ENS dict (hundreds of fields)
-            # causing 8+ GB output files. Use ens_params_mask instead.
-            'ens_params_mask': result.ens_params_mask,
-            'confidence': result.confidence,
-            'processing_time_ms': result.processing_time_ms,
-            'item_type': result.item_type,
-            'standard': result.standard,
-            'has_mask': has_mask,
-            'mask_pattern': result.mask_pattern,
-            'match_type': result.match_type,
-            'match_type_ru': result.match_type_ru,
-            'coating_substitution': result.coating_substitution,
-            'fuzzy_mismatched_params': result.fuzzy_mismatched_params,
-            'fuzzy_params_comparison': result.fuzzy_params_comparison,
-        }
+        # --- Формирование строки результата: сохраняем ВСЕ исходные колонки ---
+        out_row = {}
+        for col in df.columns:
+            out_row[str(col)] = df.iloc[idx][col]
+
+        # Добавляем колонки обогащения
+        out_row['Код ЕНС'] = result.ens_code or ''
+        out_row['Наименование ЕНС'] = result.ens_name or ''
+        out_row['Уровень'] = result.level or ''
+        out_row['Распознано'] = 'Да' if result.success else 'Нет'
+        out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
+        out_row['Тип сопоставления'] = result.match_type_ru or 'Не определено'
+
+        # Подстановка покрытия
+        sub = result.coating_substitution
+        out_row['Подстановка покрытия'] = (
+            json.dumps(sub, ensure_ascii=False) if sub else ''
+        )
+
+        # Несовпавшие параметры
+        mism = result.fuzzy_mismatched_params
+        out_row['Несовпавшие параметры'] = (
+            json.dumps(mism, ensure_ascii=False) if mism else ''
+        )
+
+        # Новые колонки
+        out_row['маска'] = mask_pattern
+        out_row['стандарт'] = standard or ''
+        out_row['тип'] = item_type or ''
+        out_row['маски_в_бд'] = 'Да' if has_mask else 'Нет'
+
         if include_details and result.details:
-            row['details'] = result.details
+            d_str = json.dumps(result.details, ensure_ascii=False, default=str)
+            out_row['details'] = d_str[:2000] if len(d_str) > 2000 else d_str
 
-        results.append(row)
+        results.append(out_row)
 
     # === OUTPUT FORMAT LOGIC ===
-    # Pre-clean results: remove huge fields that cause MemoryError
-    # ens_params_mask contains only matched parameters (small dict)
-    clean_results = []
-    for row in results:
-        clean = {
-            'text': row.get('text'),
-            'level': row.get('level'),
-            'success': row.get('success'),
-            'confidence': row.get('confidence'),
-            'processing_time_ms': row.get('processing_time_ms'),
-            'item_type': row.get('item_type'),
-            'standard': row.get('standard'),
-            'has_mask': row.get('has_mask'),
-            'match_type': row.get('match_type'),
-            'match_type_ru': row.get('match_type_ru'),
-            'ens_code': row.get('ens_code'),
-            'ens_name': row.get('ens_name'),
-            'params': row.get('params'),
-            'ens_params_mask': row.get('ens_params_mask'),
-            'mask_pattern': row.get('mask_pattern'),
-            'mask_id': row.get('mask_id'),
-        }
-        # Include coating substitution if present
-        sub = row.get('coating_substitution')
-        if sub:
-            clean['coating_substitution'] = {
-                'original': sub.get('original'),
-                'corrected': sub.get('corrected'),
-                'material': sub.get('material'),
-                'reason': sub.get('reason'),
-            }
-        # Include fuzzy mismatches if present
-        mism = row.get('fuzzy_mismatched_params')
-        if mism:
-            clean['fuzzy_mismatched_params'] = {k: str(v)[:200] for k, v in mism.items()}
-        comp = row.get('fuzzy_params_comparison')
-        if comp:
-            clean['fuzzy_params_comparison'] = {k: {sk: str(sv)[:100] for sk, sv in v.items()}
-                                                for k, v in comp.items()}
-        clean_results.append(clean)
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if output_path.suffix.lower() == '.json':
-        # Streaming JSON write to avoid MemoryError
+        # Streaming JSON write
         with open(output, 'w', encoding='utf-8') as f:
             f.write('[\n')
-            for i, row in enumerate(clean_results):
+            for i, row in enumerate(results):
                 if i > 0:
                     f.write(',\n')
-                # Use json.dumps per row (small object, safe)
-                try:
-                    line = json.dumps(row, ensure_ascii=False, indent=2, default=str)
-                except Exception:
-                    line = json.dumps(row, ensure_ascii=False, default=lambda x: str(x)[:500])
+                clean_row = {}
+                for k, v in row.items():
+                    if isinstance(v, dict):
+                        clean_row[k] = {sk: str(sv)[:500] for sk, sv in v.items()}
+                    else:
+                        clean_row[k] = v
+                line = json.dumps(clean_row, ensure_ascii=False, indent=2, default=str)
                 f.write(line)
             f.write('\n]\n')
         click.echo(f"\n✅ JSON сохранен: {output}")
 
     elif output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
-        # EXCEL OUTPUT - flat structure, no nested dicts
-        flat_rows = []
-        for row in clean_results:
-            flat = {
-                'text': row.get('text'),
-                'level': row.get('level'),
-                'success': row.get('success'),
-                'confidence': row.get('confidence'),
-                'processing_time_ms': row.get('processing_time_ms'),
-                'item_type': row.get('item_type'),
-                'standard': row.get('standard'),
-                'has_mask': row.get('has_mask'),
-                'match_type': row.get('match_type'),
-                'match_type_ru': row.get('match_type_ru'),
-                'ens_code': row.get('ens_code'),
-                'ens_name': row.get('ens_name'),
-                'mask_id': row.get('mask_id'),
-            }
-            # Flatten params
-            params = row.get('params') or {}
-            for k, v in params.items():
-                if not str(k).startswith('_'):
-                    flat[f'param_{k}'] = v
-            # Flatten ens_params_mask
-            ens_mask = row.get('ens_params_mask') or {}
-            for k, v in ens_mask.items():
-                if v is not None:
-                    flat[f'ens_{k}'] = v
-            # Coating substitution
-            sub = row.get('coating_substitution')
-            if sub:
-                flat['coating_original'] = sub.get('original')
-                flat['coating_corrected'] = sub.get('corrected')
-                flat['coating_reason'] = sub.get('reason')
-            # Fuzzy mismatches
-            mism = row.get('fuzzy_mismatched_params')
-            if mism:
-                flat['mismatched_params'] = ', '.join(str(k) for k in mism.keys())
-            flat_rows.append(flat)
+        df_out = pd.DataFrame(results)
 
-        df_out = pd.DataFrame(flat_rows)
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обрезка огромных ячеек
+        df_out = _truncate_dataframe_cells(df_out, max_length=1000)
+
+        # Уверенность как число
+        if 'Уверенность' in df_out.columns:
+            df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
 
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Main results sheet
             df_out.to_excel(writer, sheet_name='Results', index=False)
+
+            # Форматирование колонки "Уверенность" — 3 знака после запятой
+            if 'Уверенность' in df_out.columns:
+                ws = writer.sheets['Results']
+                for idx_col, col_name in enumerate(df_out.columns):
+                    if col_name == 'Уверенность':
+                        for row_num in range(2, len(df_out) + 2):
+                            cell = ws.cell(row=row_num, column=idx_col + 1)
+                            cell.number_format = '0.000'
+                        break
 
             # Stats sheet
             stats_data = []
@@ -675,29 +614,32 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             pd.DataFrame(stats_data).to_excel(writer, sheet_name='Stats', index=False)
 
             # Mask coverage sheet
-            if 'standard' in df_out.columns and 'has_mask' in df_out.columns:
-                mask_stats = df_out.groupby('standard').agg({
-                    'has_mask': 'first',
-                    'text': 'count'
-                }).rename(columns={'text': 'count'}).reset_index()
+            if 'стандарт' in df_out.columns and 'маски_в_бд' in df_out.columns:
+                mask_stats = df_out.groupby('стандарт').agg({
+                    'маски_в_бд': 'first',
+                    name_col: 'count'
+                }).rename(columns={name_col: 'count'}).reset_index()
                 mask_stats.to_excel(writer, sheet_name='MaskCoverage', index=False)
 
+        file_size = output_path.stat().st_size / 1024
         click.echo(f"\n✅ Excel сохранен: {output}")
+        click.echo(f"   Размер: {file_size:.1f} КБ")
 
     else:
-        # CRITICAL FIX: Use clean_results instead of raw results to avoid huge files
         with open(output, 'w', encoding='utf-8') as f:
-            json.dump(clean_results, f, ensure_ascii=False, indent=2, default=str)
+            json.dump(results, f, ensure_ascii=False, indent=2, default=str)
         click.echo(f"\n✅ JSON сохранен: {output}")
 
     click.echo(f"\n📊 Статистика:")
-    click.echo(f"  Всего: {stats['total']}")
-    click.echo(f"  Успешно: {stats['success']}")
-    click.echo(f"  Ошибки: {stats['failed']}")
-    click.echo(f"  Из кэша: {stats['cached']}")
+    click.echo(f"  Всего обработано: {stats['total']}")
+    click.echo(f"  ✅ Успешно:      {stats['success']}")
+    click.echo(f"  ❌ Ошибки:       {stats['failed']}")
+    click.echo(f"  💾 Из кэша:      {stats['cached']}")
 
     if success_only:
         click.echo(f"  Отфильтровано (неуспешные): {stats['filtered']}")
+
+    return 0
 
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
