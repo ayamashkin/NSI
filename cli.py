@@ -398,17 +398,6 @@ def process_parametric(text, db, ens_index, llm):
         click.echo(f"🔗 ЕНС совпадение:")
         click.echo(f"   Код: {result.ens_match.get('code')}")
 
-@cli.command()
-@click.argument('input_file', type=click.Path(exists=True))
-@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
-@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕНС')
-@click.option('--output', '-o', default='results.json', help='Путь к выходному файлу')
-@click.option('--llm', '-l', is_flag=True, help='Использовать LLM для генерации масок')
-@click.option('--validate/--no-validate', default=True, help='Валидировать результаты')
-@click.option('--success-only', is_flag=True, help='Включать только успешные результаты')
-@click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
-@click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
-@click.option('--workers', '-w', type=int, default=1, help='Количество параллельных workers')
 def _find_name_column(df):
     """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
     keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
@@ -430,6 +419,17 @@ def _truncate_dataframe_cells(df, max_length=1000):
     return df
 
 
+@cli.command()
+@click.argument('input_file', type=click.Path(exists=True))
+@click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
+@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕНС')
+@click.option('--output', '-o', default='results.json', help='Путь к выходному файлу')
+@click.option('--llm', '-l', is_flag=True, help='Использовать LLM для генерации масок')
+@click.option('--validate/--no-validate', default=True, help='Валидировать результаты')
+@click.option('--success-only', is_flag=True, help='Включать только успешные результаты')
+@click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
+@click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
+@click.option('--workers', '-w', type=int, default=1, help='Количество параллельных workers')
 def batch(input_file, db, ens_index, output, llm, validate, success_only,
           include_details, coating_map, workers):
     """Пакетная обработка номенклатуры параметрическим методом"""
@@ -527,7 +527,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         for col in df.columns:
             out_row[str(col)] = df.iloc[idx][col]
 
-        # Добавляем колонки обогащения (структура как в эталоне)
+        # Добавляем колонки обогащения
         out_row['Код ЕНС'] = str(result.ens_code)[:50] if result.ens_code else ''
         out_row['Наименование ЕНС'] = str(result.ens_name)[:500] if result.ens_name else ''
         out_row['Уровень'] = str(result.level) if result.level else ''
@@ -535,7 +535,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
         out_row['Тип сопоставления'] = str(result.match_type_ru) if result.match_type_ru else 'Не определено'
 
-        # Подстановка покрытия (без полного rule, только ключевые поля)
+        # Подстановка покрытия
         sub = result.coating_substitution
         if sub:
             clean_sub = {
