@@ -48,6 +48,24 @@ class ResultDatabaseManager:
     def __init__(self, db_path: str = "result.db"):
         self.db_path = Path(db_path)
         self._init_db()
+        self._cleanup_old_records()
+
+    def _cleanup_old_records(self):
+        """Очистка старых записей с NULL standard или некорректными name (с конечной запятой)."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Удаляем записи с NULL standard (старые, до фикса)
+                c1 = conn.execute("DELETE FROM nomenclature_results WHERE standard IS NULL").rowcount
+                # Удаляем записи с name заканчивающимся на , ; : .
+                c2 = conn.execute(
+                    "DELETE FROM nomenclature_results WHERE name LIKE '%,' OR name LIKE '%;' OR name LIKE '%:' OR name LIKE '%.'"
+                ).rowcount
+                conn.commit()
+                total = c1 + c2
+                if total > 0:
+                    logger.info("[RESULT_DB] Cleaned %d old invalid records (NULL standard or trailing punctuation)", total)
+        except Exception as e:
+            logger.debug("[RESULT_DB] Cleanup error: %s", e)
 
     def _init_db(self):
         """Инициализация таблиц result.db."""
@@ -206,30 +224,48 @@ class ResultDatabaseManager:
                 return True, "new_record"
 
     def get_result(self, name: str, standard: Optional[str] = None) -> Optional[Dict]:
-        """Получить одну запись по наименованию (и опционально по стандарту)."""
+        """Получить одну запись по наименованию (и опционально по стандарту).
+        Fallback: если не нашли по name+standard, ищем только по name."""
         logger.info("[RESULT_DB] get_result: name=%r standard=%r", name[:60], standard)
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            # Сначала считаем сколько записей вообще в БД
             total = conn.execute("SELECT COUNT(*) FROM nomenclature_results").fetchone()[0]
             logger.info("[RESULT_DB] Total records in DB: %d", total)
+
+            # 1. Точный поиск по name + standard
             if standard:
                 cursor = conn.execute(
                     "SELECT * FROM nomenclature_results WHERE name = ? AND standard = ? ORDER BY updated_at DESC LIMIT 1",
                     (name, standard)
                 )
-            else:
-                cursor = conn.execute(
-                    "SELECT * FROM nomenclature_results WHERE name = ? ORDER BY updated_at DESC LIMIT 1",
-                    (name,)
-                )
+                row = cursor.fetchone()
+                if row:
+                    logger.info("[RESULT_DB] FOUND (exact): id=%s ens_code=%s", row['id'], row['ens_code'])
+                    return self._deserialize_row(dict(row))
+
+            # 2. Fallback: поиск только по name (без standard)
+            cursor = conn.execute(
+                "SELECT * FROM nomenclature_results WHERE name = ? ORDER BY updated_at DESC LIMIT 1",
+                (name,)
+            )
             row = cursor.fetchone()
             if row:
-                logger.info("[RESULT_DB] FOUND: id=%s ens_code=%s updated_at=%s", row['id'], row['ens_code'], row['updated_at'])
+                logger.info("[RESULT_DB] FOUND (fallback by name only): id=%s ens_code=%s standard=%s", row['id'], row['ens_code'], row['standard'])
                 return self._deserialize_row(dict(row))
-            else:
-                logger.info("[RESULT_DB] NOT FOUND for name=%r standard=%r", name[:60], standard)
-                return None
+
+            # 3. Fallback: поиск по name с конечной запятой (совместимость со старыми записями)
+            old_name = name + ','
+            cursor = conn.execute(
+                "SELECT * FROM nomenclature_results WHERE name = ? ORDER BY updated_at DESC LIMIT 1",
+                (old_name,)
+            )
+            row = cursor.fetchone()
+            if row:
+                logger.info("[RESULT_DB] FOUND (old format with comma): id=%s", row['id'])
+                return self._deserialize_row(dict(row))
+
+            logger.info("[RESULT_DB] NOT FOUND for name=%r standard=%r", name[:60], standard)
+            return None
 
     def get_all_results(
         self,
