@@ -900,16 +900,16 @@ def diagnose(text, db, ens_index, llm, coating_map):
 @cli.command('generate-masks')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕНС')
-@click.option('--standard', '-s', help='Генерировать маску для конкретного стандарта')
-@click.option('--item-type', '-t', help='Тип изделия')
+@click.option('--standard', '-s', required=True, help='Стандарт для генерации маски')
+@click.option('--item-type', '-t', required=True, help='Тип изделия')
 @click.option('--llm', '-l', is_flag=True, help='Использовать LLM для генерации')
-@click.option('--validate', is_flag=True, help='Валидировать сгенерированные маски')
+@click.option('--validate', is_flag=True, help='Валидировать сгенерированную маску')
 @click.option('--min-score', default=0.85, help='Минимальный score для валидации')
 def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score):
-    """Генерация масок для стандартов"""
+    """Генерация маски для конкретного стандарта и типа изделия через LLM"""
     from core.mask_database import MaskDatabase
     from core.llm_mask_generator import LLMMaskGenerator
-    from core.automated_processor import AutomatedParametricProcessor
+    from core.auto_validator import AutoValidator
     from config.settings import get_settings
 
     settings = get_settings()
@@ -924,28 +924,42 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score)
         click.echo("🤖 LLM клиенты инициализированы")
 
     generator = LLMMaskGenerator(
-        mask_db=mask_db,
-        llm_clients=llm_clients,
-        ens_index_path=ens_index,
-        settings=settings
+        clients=llm_clients,
+        settings=settings,
+        max_retries=3
     )
 
-    if standard and item_type:
-        click.echo(f"🎯 Генерация маски для {standard} / {item_type}...")
-        mask = generator.generate_mask(standard, item_type, validate=validate, min_score=min_score)
-        if mask:
-            click.echo(f"✅ Маска создана: ID={getattr(mask, 'id', 'N/A')}")
-        else:
-            click.echo("❌ Не удалось создать маску")
-    else:
-        click.echo("🎯 Автоматическая генерация масок для всех стандартов...")
-        stats = generator.generate_all_masks(validate=validate, min_score=min_score)
-        click.echo(f"\n📊 Статистика генерации:")
-        click.echo(f"   Всего стандартов: {stats.get('total', 0)}")
-        click.echo(f"   Создано масок: {stats.get('created', 0)}")
-        click.echo(f"   Успешно валидировано: {stats.get('validated', 0)}")
-        click.echo(f"   Ошибки: {stats.get('errors', 0)}")
+    # Получаем примеры из ENS
+    validator = AutoValidator(ens_index_path=ens_index)
+    examples = validator._get_ens_examples(standard, item_type)
+    click.echo(f"📋 Загружено {len(examples)} примеров из ЕНС для {standard} / {item_type}")
 
+    click.echo(f"🎯 Генерация маски для {standard} / {item_type}...")
+    mask, _ = generator.generate_mask(standard, item_type, examples)
+    if mask:
+        click.echo(f"✅ Маска сгенерирована:")
+        click.echo(f"   Паттерн: {mask['pattern'][:80]}...")
+        click.echo(f"   Параметры: {mask['params']}")
+        click.echo(f"   Обязательные: {mask['required']}")
+
+        # Сохраняем в БД
+        from database.mask_database import MaskRecord
+        mask_record = MaskRecord(
+            standard=standard,
+            item_type=item_type,
+            pattern=mask['pattern'],
+            params=mask['params'],
+            required=mask['required'],
+            source='llm',
+            is_active=True
+        )
+        mask_id = mask_db.save_mask(mask_record, auto_activate=True)
+        if mask_id:
+            click.echo(f"✅ Маска сохранена в БД: ID={mask_id}")
+        else:
+            click.echo("⚠️ Не удалось сохранить маску в БД")
+    else:
+        click.echo("❌ Не удалось сгенерировать маску")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db',
