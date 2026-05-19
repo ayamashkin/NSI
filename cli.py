@@ -294,27 +294,6 @@ def models(api_name):
 # PARAMETRIC COMMANDS (New)
 # ============================
 
-def _find_name_column(df):
-    """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
-    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
-    for col in df.columns:
-        col_lower = str(col).lower().strip()
-        for kw in keywords:
-            if kw in col_lower:
-                return col
-    return None
-
-
-def _truncate_dataframe_cells(df, max_length=1000):
-    """Обрезка длинных строковых значений для предотвращения огромных Excel-файлов."""
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].apply(
-                lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
-            )
-    return df
-
-
 def _init_llm_clients(settings, all_services=False):
     """Инициализация LLM клиентов.
     По умолчанию - только default_service из mask_generation.
@@ -430,14 +409,14 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 @click.option('--workers', '-w', type=int, default=1, help='Количество параллельных workers')
-def batch(input_file, db, ens_index, output, llm, validate, success_only,          include_details, coating_map, workers):
+def batch(input_file, db, ens_index, output, llm, validate, success_only,
+          include_details, coating_map, workers):
     """Пакетная обработка номенклатуры параметрическим методом"""
     import pandas as pd
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
-    from parsers.standard_extractor import StandardExtractor
 
     click.echo(f"📊 Загрузка Excel: {input_file}...")
     df = pd.read_excel(input_file)
@@ -479,7 +458,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
 
     # Mask DB
     mask_db = MaskDatabase(db_path=db)
-    extractor = StandardExtractor()
 
     processor = AutomatedParametricProcessor(
         mask_db=mask_db,
@@ -494,7 +472,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
         click.echo("⚡ Режим: только успешные (пропускаем ошибки)")
 
     results = []
-    stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0, 'cached': 0}
+    stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
 
     for idx, text in enumerate(tqdm(texts, desc="Обработка")):
         stats['total'] += 1
@@ -511,14 +489,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
             stats['filtered'] += 1
             continue
 
-        # Используем стандарт и тип из результата процессора
-        standard = result.standard or ''
-        item_type = result.item_type or ''
+        # Проверка наличия маски
         has_mask = False
         mask_pattern = ''
-        if standard and item_type:
+        if result.standard and result.item_type:
             try:
-                mask = mask_db.get_mask(standard, item_type)
+                mask = mask_db.get_mask(result.standard, result.item_type)
                 has_mask = mask is not None
                 if mask:
                     mask_pattern = getattr(mask, 'pattern', '') or ''
@@ -530,19 +506,26 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
         for col in df.columns:
             out_row[str(col)] = df.iloc[idx][col]
 
-        # Добавляем колонки обогащения
-        out_row['Код ЕНС'] = result.ens_code or ''
-        out_row['Наименование ЕНС'] = result.ens_name or ''
-        out_row['Уровень'] = result.level or ''
+        # Добавляем колонки обогащения (структура как в эталоне)
+        out_row['Код ЕНС'] = str(result.ens_code)[:50] if result.ens_code else ''
+        out_row['Наименование ЕНС'] = str(result.ens_name)[:500] if result.ens_name else ''
+        out_row['Уровень'] = str(result.level) if result.level else ''
         out_row['Распознано'] = 'Да' if result.success else 'Нет'
         out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
-        out_row['Тип сопоставления'] = result.match_type_ru or 'Не определено'
+        out_row['Тип сопоставления'] = str(result.match_type_ru) if result.match_type_ru else 'Не определено'
 
-        # Подстановка покрытия
+        # Подстановка покрытия (без полного rule, только ключевые поля)
         sub = result.coating_substitution
-        out_row['Подстановка покрытия'] = (
-            json.dumps(sub, ensure_ascii=False) if sub else ''
-        )
+        if sub:
+            clean_sub = {
+                'original': sub.get('original'),
+                'corrected': sub.get('corrected'),
+                'material': sub.get('material'),
+                'reason': sub.get('reason'),
+            }
+            out_row['Подстановка покрытия'] = json.dumps(clean_sub, ensure_ascii=False)
+        else:
+            out_row['Подстановка покрытия'] = ''
 
         # Несовпавшие параметры
         mism = result.fuzzy_mismatched_params
@@ -551,49 +534,27 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
         )
 
         # Новые колонки
-        out_row['маска'] = mask_pattern
-        out_row['стандарт'] = standard or ''
-        out_row['тип'] = item_type or ''
+        out_row['маска'] = str(mask_pattern)[:1000]
+        out_row['стандарт'] = str(result.standard) if result.standard else ''
+        out_row['тип'] = str(result.item_type) if result.item_type else ''
         out_row['маски_в_бд'] = 'Да' if has_mask else 'Нет'
-
-        if include_details and result.details:
-            d_str = json.dumps(result.details, ensure_ascii=False, default=str)
-            out_row['details'] = d_str[:2000] if len(d_str) > 2000 else d_str
 
         results.append(out_row)
 
-    # === OUTPUT FORMAT LOGIC ===
+    # === OUTPUT ===
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if output_path.suffix.lower() == '.json':
-        # Streaming JSON write
-        with open(output, 'w', encoding='utf-8') as f:
-            f.write('[\n')
-            for i, row in enumerate(results):
-                if i > 0:
-                    f.write(',\n')
-                clean_row = {}
-                for k, v in row.items():
-                    if isinstance(v, dict):
-                        clean_row[k] = {sk: str(sv)[:500] for sk, sv in v.items()}
-                    else:
-                        clean_row[k] = v
-                line = json.dumps(clean_row, ensure_ascii=False, indent=2, default=str)
-                f.write(line)
-            f.write('\n]\n')
-        click.echo(f"\n✅ JSON сохранен: {output}")
+    df_out = pd.DataFrame(results)
 
-    elif output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
-        df_out = pd.DataFrame(results)
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обрезка огромных ячеек
+    df_out = _truncate_dataframe_cells(df_out, max_length=1000)
 
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обрезка огромных ячеек
-        df_out = _truncate_dataframe_cells(df_out, max_length=1000)
+    # Уверенность как число
+    if 'Уверенность' in df_out.columns:
+        df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
 
-        # Уверенность как число
-        if 'Уверенность' in df_out.columns:
-            df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
-
+    if output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_out.to_excel(writer, sheet_name='Results', index=False)
 
@@ -606,21 +567,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
                             cell = ws.cell(row=row_num, column=idx_col + 1)
                             cell.number_format = '0.000'
                         break
-
-            # Stats sheet
-            stats_data = []
-            for k, v in stats.items():
-                pct = f"{v/max(stats['total'],1)*100:.1f}%" if k != 'total' and stats['total'] > 0 else '100%'
-                stats_data.append({'metric': k, 'value': v, 'percentage': pct})
-            pd.DataFrame(stats_data).to_excel(writer, sheet_name='Stats', index=False)
-
-            # Mask coverage sheet
-            if 'стандарт' in df_out.columns and 'маски_в_бд' in df_out.columns:
-                mask_stats = df_out.groupby('стандарт').agg({
-                    'маски_в_бд': 'first',
-                    name_col: 'count'
-                }).rename(columns={name_col: 'count'}).reset_index()
-                mask_stats.to_excel(writer, sheet_name='MaskCoverage', index=False)
 
         file_size = output_path.stat().st_size / 1024
         click.echo(f"\n✅ Excel сохранен: {output}")
@@ -635,8 +581,6 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,       
     click.echo(f"  Всего обработано: {stats['total']}")
     click.echo(f"  ✅ Успешно:      {stats['success']}")
     click.echo(f"  ❌ Ошибки:       {stats['failed']}")
-    click.echo(f"  💾 Из кэша:      {stats['cached']}")
-
     if success_only:
         click.echo(f"  Отфильтровано (неуспешные): {stats['filtered']}")
 
