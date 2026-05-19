@@ -569,26 +569,72 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
 
         results.append(row)
 
-    # === OUTPUT FORMAT LOGIC (FIXED) ===
-    if output_path.suffix.lower() == '.json':
-        def _safe_json(obj):
-            """Safe JSON serializer handling non-serializable objects."""
-            try:
-                return json.dumps(obj, ensure_ascii=False, indent=2, default=str)
-            except (TypeError, ValueError, MemoryError) as e:
-                logger.warning(f"JSON serialization failed: {e}")
-                # Fallback: convert everything to strings
-                return json.dumps(obj, ensure_ascii=False, indent=2, default=lambda x: str(x)[:1000])
+    # === OUTPUT FORMAT LOGIC ===
+    # Pre-clean results: remove huge fields that cause MemoryError
+    # ens_params contains ALL ENS fields (hundreds), we keep only ens_params_mask
+    clean_results = []
+    for row in results:
+        clean = {
+            'text': row.get('text'),
+            'level': row.get('level'),
+            'success': row.get('success'),
+            'confidence': row.get('confidence'),
+            'processing_time_ms': row.get('processing_time_ms'),
+            'item_type': row.get('item_type'),
+            'standard': row.get('standard'),
+            'has_mask': row.get('has_mask'),
+            'match_type': row.get('match_type'),
+            'match_type_ru': row.get('match_type_ru'),
+            'ens_code': row.get('ens_code'),
+            'ens_name': row.get('ens_name'),
+            'params': row.get('params'),
+            'ens_params_mask': row.get('ens_params_mask'),
+            'mask_pattern': row.get('mask_pattern'),
+            'mask_id': row.get('mask_id'),
+        }
+        # Include coating substitution if present
+        sub = row.get('coating_substitution')
+        if sub:
+            clean['coating_substitution'] = {
+                'original': sub.get('original'),
+                'corrected': sub.get('corrected'),
+                'material': sub.get('material'),
+                'reason': sub.get('reason'),
+            }
+        # Include fuzzy mismatches if present
+        mism = row.get('fuzzy_mismatched_params')
+        if mism:
+            clean['fuzzy_mismatched_params'] = {k: str(v)[:200] for k, v in mism.items()}
+        comp = row.get('fuzzy_params_comparison')
+        if comp:
+            clean['fuzzy_params_comparison'] = {k: {sk: str(sv)[:100] for sk, sv in v.items()}
+                                                  for k, v in comp.items()}
+        clean_results.append(clean)
 
+    if output_path.suffix.lower() == '.json':
+        # Streaming JSON write to avoid MemoryError
         with open(output, 'w', encoding='utf-8') as f:
-            f.write(_safe_json(results))
+            f.write('[
+')
+            for i, row in enumerate(clean_results):
+                if i > 0:
+                    f.write(',
+')
+                # Use json.dumps per row (small object, safe)
+                try:
+                    line = json.dumps(row, ensure_ascii=False, indent=2, default=str)
+                except Exception:
+                    line = json.dumps(row, ensure_ascii=False, default=lambda x: str(x)[:500])
+                f.write(line)
+            f.write('
+]
+')
         click.echo(f"\n✅ JSON сохранен: {output}")
 
     elif output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
-        # EXCEL OUTPUT - NOT JSON!
-        # Build flat DataFrame to avoid MemoryError from serializing huge nested dicts
+        # EXCEL OUTPUT - flat structure, no nested dicts
         flat_rows = []
-        for row in results:
+        for row in clean_results:
             flat = {
                 'text': row.get('text'),
                 'level': row.get('level'),
@@ -602,27 +648,28 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 'match_type_ru': row.get('match_type_ru'),
                 'ens_code': row.get('ens_code'),
                 'ens_name': row.get('ens_name'),
+                'mask_id': row.get('mask_id'),
             }
-            # Flatten params into prefixed columns (param_xxx)
+            # Flatten params
             params = row.get('params') or {}
             for k, v in params.items():
-                if not k.startswith('_'):
+                if not str(k).startswith('_'):
                     flat[f'param_{k}'] = v
-            # Flatten ens_params_mask into prefixed columns (ens_xxx)
+            # Flatten ens_params_mask
             ens_mask = row.get('ens_params_mask') or {}
             for k, v in ens_mask.items():
                 if v is not None:
                     flat[f'ens_{k}'] = v
-            # Coating substitution summary
+            # Coating substitution
             sub = row.get('coating_substitution')
             if sub:
                 flat['coating_original'] = sub.get('original')
                 flat['coating_corrected'] = sub.get('corrected')
                 flat['coating_reason'] = sub.get('reason')
-            # Fuzzy mismatches summary
+            # Fuzzy mismatches
             mism = row.get('fuzzy_mismatched_params')
             if mism:
-                flat['mismatched_params'] = ', '.join(mism.keys())
+                flat['mismatched_params'] = ', '.join(str(k) for k in mism.keys())
             flat_rows.append(flat)
 
         df_out = pd.DataFrame(flat_rows)
