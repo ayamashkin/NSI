@@ -908,7 +908,7 @@ def diagnose(text, db, ens_index, llm, coating_map):
 def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score):
     """Генерация масок для стандартов"""
     from core.mask_database import MaskDatabase
-    from generators.llm_mask_generator import LLMMaskGenerator
+    from core.llm_mask_generator import LLMMaskGenerator
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
 
