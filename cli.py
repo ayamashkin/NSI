@@ -4,12 +4,13 @@ Nomenclature Processor CLI
 Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 
 FIXES (2026-05-19):
-1. CRITICAL: Fixed JSON output to properly handle NaN/None values.
-2. JSON export now produces clean serializable records (no "nan" strings).
-3. Fixed automated_processor integration for proper ENS matching.
-4. batch() preserves original Excel columns in output for traceability.
+1. CRITICAL: JSON output now uses full ProcessingResult.to_dict() structure
+   (matches "results — копия.json" format with technical details).
+2. CRITICAL: Excel output uses human-readable Russian columns + original data.
+3. CRITICAL: Fixed NaN/None serialization in JSON.
+4. Restored ParametricENSClient delegation for matching.
 
-LAST_FIX: 2026-05-19 16:45 UTC+3
+LAST_FIX: 2026-05-19 19:11 UTC+3
 """
 
 import click
@@ -25,6 +26,43 @@ from datetime import datetime
 from config.settings import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_json(obj):
+    """Рекурсивная очистка объекта от NaN/Infinity для JSON-сериализации."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    elif isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+
+def _find_name_column(df):
+    """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
+    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        for kw in keywords:
+            if kw in col_lower:
+                return col
+    return None
+
+
+def _truncate_dataframe_cells(df, max_length=1000):
+    """Обрезка длинных строковых значений для предотвращения огромных Excel-файлов."""
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(
+                lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
+            )
+    return df
 
 
 @click.group()
@@ -398,46 +436,9 @@ def process_parametric(text, db, ens_index, llm):
             if not key.startswith('_'):
                 click.echo(f"   {key}: {value}")
 
-    if result.ens_match:
+    if result.ens_code:
         click.echo(f"🔗 ЕНС совпадение:")
-        click.echo(f"   Код: {result.ens_match.get('code')}")
-
-
-def _find_name_column(df):
-    """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
-    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
-    for col in df.columns:
-        col_lower = str(col).lower().strip()
-        for kw in keywords:
-            if kw in col_lower:
-                return col
-    return None
-
-
-def _truncate_dataframe_cells(df, max_length=1000):
-    """Обрезка длинных строковых значений для предотвращения огромных Excel-файлов."""
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].apply(
-                lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
-            )
-    return df
-
-
-def _sanitize_for_json(obj):
-    """Рекурсивная очистка объекта от NaN/Infinity для JSON-сериализации."""
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    elif isinstance(obj, float):
-        if np.isnan(obj) or np.isinf(obj):
-            return None
-        return obj
-    elif pd.isna(obj):
-        return None
-    else:
-        return obj
+        click.echo(f"   Код: {result.ens_code}")
 
 
 @cli.command()
@@ -531,86 +532,78 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             stats['filtered'] += 1
             continue
 
-        # Проверка наличия маски
-        has_mask = False
-        mask_pattern = ''
-        if result.standard and result.item_type:
-            try:
-                mask = mask_db.get_mask(result.standard, result.item_type)
-                has_mask = mask is not None
-                if mask:
-                    mask_pattern = getattr(mask, 'pattern', '') or ''
-            except Exception:
-                pass
-
-        # --- Формирование строки результата: сохраняем ВСЕ исходные колонки ---
-        out_row = {}
-        for col in df.columns:
-            val = df.iloc[idx][col]
-            # Convert NaN to None for clean serialization
-            if pd.isna(val):
-                out_row[str(col)] = None
-            else:
-                out_row[str(col)] = val
-
-        # Добавляем колонки обогащения
-        out_row['Код ЕНС'] = str(result.ens_code)[:50] if result.ens_code else ''
-        out_row['Наименование ЕНС'] = str(result.ens_name)[:500] if result.ens_name else ''
-        out_row['Уровень'] = str(result.level) if result.level else ''
-        out_row['Распознано'] = 'Да' if result.success else 'Нет'
-        out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
-        out_row['Тип сопоставления'] = str(result.match_type_ru) if result.match_type_ru else 'Не определено'
-
-        # Подстановка покрытия
-        sub = result.coating_substitution
-        if sub:
-            clean_sub = {
-                'original': sub.get('original'),
-                'corrected': sub.get('corrected'),
-                'material': sub.get('material'),
-                'reason': sub.get('reason'),
-            }
-            out_row['Подстановка покрытия'] = json.dumps(clean_sub, ensure_ascii=False)
-        else:
-            out_row['Подстановка покрытия'] = None
-
-        # Несовпавшие параметры
-        mism = result.fuzzy_mismatched_params
-        out_row['Несовпавшие параметры'] = (
-            json.dumps(mism, ensure_ascii=False) if mism else None
-        )
-
-        # Новые колонки
-        out_row['маска'] = str(mask_pattern)[:1000]
-        out_row['стандарт'] = str(result.standard) if result.standard else ''
-        out_row['тип'] = str(result.item_type) if result.item_type else ''
-        out_row['маски_в_бд'] = 'Да' if has_mask else 'Нет'
-
-        # Детали (опционально)
-        if include_details and result.details:
-            out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
-
-        results.append(out_row)
+        results.append(result)
 
     # === OUTPUT ===
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df_out = pd.DataFrame(results)
-
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: обрезка огромных ячеек (только для Excel)
     if output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
+        # --- EXCEL OUTPUT: human-readable columns + original data ---
+        excel_rows = []
+        for idx, result in enumerate(results):
+            out_row = {}
+            # Сохраняем ВСЕ исходные колонки
+            for col in df.columns:
+                val = df.iloc[idx][col]
+                if pd.isna(val):
+                    out_row[str(col)] = None
+                else:
+                    out_row[str(col)] = val
+
+            # Добавляем обогащение
+            out_row['Код ЕНС'] = str(result.ens_code)[:50] if result.ens_code else ''
+            out_row['Наименование ЕНС'] = str(result.ens_name)[:500] if result.ens_name else ''
+            out_row['Уровень'] = str(result.level) if result.level else ''
+            out_row['Распознано'] = 'Да' if result.success else 'Нет'
+            out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
+            out_row['Тип сопоставления'] = str(result.match_type_ru) if result.match_type_ru else 'Не определено'
+
+            sub = result.coating_substitution
+            if sub:
+                clean_sub = {
+                    'original': sub.get('original'),
+                    'corrected': sub.get('corrected'),
+                    'material': sub.get('material'),
+                    'reason': sub.get('reason'),
+                }
+                out_row['Подстановка покрытия'] = json.dumps(clean_sub, ensure_ascii=False)
+            else:
+                out_row['Подстановка покрытия'] = None
+
+            mism = result.fuzzy_mismatched_params
+            out_row['Несовпавшие параметры'] = (
+                json.dumps(mism, ensure_ascii=False) if mism else None
+            )
+
+            out_row['маска'] = str(result.mask_pattern)[:1000] if result.mask_pattern else ''
+            out_row['стандарт'] = str(result.standard) if result.standard else ''
+            out_row['тип'] = str(result.item_type) if result.item_type else ''
+
+            # Проверка наличия маски
+            has_mask = False
+            if result.standard and result.item_type:
+                try:
+                    m = mask_db.get_mask(result.standard, result.item_type)
+                    has_mask = m is not None
+                except Exception:
+                    pass
+            out_row['маски_в_бд'] = 'Да' if has_mask else 'Нет'
+
+            if include_details and result.details:
+                out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
+
+            excel_rows.append(out_row)
+
+        df_out = pd.DataFrame(excel_rows)
         df_out = _truncate_dataframe_cells(df_out, max_length=1000)
 
-    # Уверенность как число
-    if 'Уверенность' in df_out.columns:
-        df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
+        if 'Уверенность' in df_out.columns:
+            df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
 
-    if output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_out.to_excel(writer, sheet_name='Results', index=False)
 
-            # Форматирование колонки "Уверенность" — 3 знака после запятой
             if 'Уверенность' in df_out.columns:
                 ws = writer.sheets['Results']
                 for idx_col, col_name in enumerate(df_out.columns):
@@ -625,8 +618,15 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         click.echo(f"   Размер: {file_size:.1f} КБ")
 
     else:
-        # JSON output: clean serialization with NaN handling
-        clean_results = _sanitize_for_json(results)
+        # --- JSON OUTPUT: full technical structure (ProcessingResult.to_dict) ---
+        json_results = []
+        for result in results:
+            d = result.to_dict()
+            if not include_details:
+                d.pop('details', None)
+            json_results.append(d)
+
+        clean_results = _sanitize_for_json(json_results)
         with open(output, 'w', encoding='utf-8') as f:
             json.dump(clean_results, f, ensure_ascii=False, indent=2, default=str)
         click.echo(f"\n✅ JSON сохранен: {output}")
@@ -796,7 +796,6 @@ def diagnose(text, db, ens_index, llm, coating_map):
             click.echo(f"   groups: {match.groupdict()}")
         else:
             click.echo(f"   ❌ NO MATCH")
-            # Find longest prefix
             for i in range(len(text), 0, -1):
                 if compiled.search(text[:i]):
                     click.echo(f"   longest matching prefix: '{text[:i]}'")
