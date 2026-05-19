@@ -3,13 +3,15 @@ core/automated_processor.py
 Automated Parametric Processor for ENS nomenclature matching.
 
 FIXES (2026-05-19):
-1. Correct success/confidence logic based on actual scores
-2. Coating substitution validates ALL critical parameters
-3. Fuzzy fallback respects score thresholds
-4. V2 scoring properly gates success
-5. Added has_mask info to results
+1. CRITICAL: _find_ens_match now returns ens_params_mask instead of full ens_item dict.
+   This fixes 8+ GB output files caused by serializing entire ENS records.
+2. Correct success/confidence logic based on actual scores
+3. Coating substitution validates ALL critical parameters
+4. Fuzzy fallback respects score thresholds
+5. V2 scoring properly gates success
+6. Added has_mask info to results
 
-LAST_FIX: 2026-05-19 12:35 UTC+3
+LAST_FIX: 2026-05-19 14:33 UTC+3
 """
 
 import logging
@@ -157,7 +159,6 @@ class AutomatedParametricProcessor:
         self.ens_index = {}
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index(ens_index_path)
-
 
     def _load_ens_index(self, path):
         """Load ENS index from pickle file. Handles both dict and list structures."""
@@ -343,11 +344,6 @@ class AutomatedParametricProcessor:
         for code, ens_item in self.ens_index.items():
             # Handle list-type ens_items (convert to dict if needed)
             if isinstance(ens_item, list):
-                # Try to convert list to dict using common field positions
-                # or just skip if we can't map
-                logger.debug(f"ENS item {code} is a list, attempting conversion")
-                # If it's a list, we can't easily use .get()
-                # Try to find standard and type by string search in the list
                 ens_item_str = ' '.join(str(x) for x in ens_item if x is not None)
                 ens_std = ens_item_str
                 ens_type = ens_item_str.lower()
@@ -433,7 +429,7 @@ class AutomatedParametricProcessor:
         return {
             'ens_code': code,
             'ens_name': ens_item.get('наименование', f"{ens_item.get('наименование_типа', '')} {code}"),
-            'ens_params': dict(ens_item),
+            'ens_params': ens_params_mask,
             'ens_params_mask': ens_params_mask,
             'score': best_score,
             'v2_score': best_score,
@@ -485,7 +481,6 @@ class AutomatedParametricProcessor:
         # Handle raw list-type ens_items
         if isinstance(ens_item, list):
             ens_item_str = ' '.join(str(x) for x in ens_item if x is not None)
-            # Simple string matching for list items
             matched_count = 0
             total_weight = 0
             for param, extracted_val in params.items():
@@ -587,7 +582,7 @@ class AutomatedParametricProcessor:
         return ('mismatched', 0.0)
 
     def _apply_coating_substitution(self, text: str, match_info: Dict,
-                                     params: Dict) -> Dict:
+                                    params: Dict) -> Dict:
         """Apply coating substitution rules and recalculate match."""
         if not self.coating_mapper:
             return match_info
@@ -602,7 +597,7 @@ class AutomatedParametricProcessor:
             correct_coating = rule.get('correct_coating', '')
 
             if (re.search(material_pattern, str(material)) and
-                current_coating == wrong_coating):
+                    current_coating == wrong_coating):
 
                 # Create substituted params
                 substituted_params = dict(params)

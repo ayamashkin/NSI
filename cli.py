@@ -4,13 +4,16 @@ Nomenclature Processor CLI
 Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 
 FIXES (2026-05-19):
-1. batch() now supports .xlsx output (not just JSON)
-2. batch() adds has_mask column to output
-3. batch() uses results.db for caching between runs
-4. batch() properly handles --workers parameter
-5. Fixed success/confidence display
+1. CRITICAL: Removed ens_params (full ENS dict) from batch() output row.
+   This fixes 8+ GB output files and MemoryError on Excel export.
+2. Fixed fallback JSON output to use clean_results instead of raw results.
+3. batch() now supports .xlsx output (not just JSON)
+4. batch() adds has_mask column to output
+5. batch() uses results.db for caching between runs
+6. batch() properly handles --workers parameter
+7. Fixed success/confidence display
 
-LAST_FIX: 2026-05-19 12:35 UTC+3
+LAST_FIX: 2026-05-19 14:33 UTC+3
 """
 
 import click
@@ -25,7 +28,6 @@ from datetime import datetime
 from config.settings import setup_logging
 
 logger = logging.getLogger(__name__)
-
 
 @click.group()
 @click.option('--config', '-c', default='config/config.yaml', help='Путь к конфигурации')
@@ -46,7 +48,6 @@ def cli(ctx, config):
     except Exception as e:
         logger.warning(f"Failed to setup logging from config: {e}")
 
-
 # ============================
 # LEGACY COMMANDS (LLM Mode)
 # ============================
@@ -65,7 +66,6 @@ def prompts():
         click.echo(f"   Сервис: {cfg.resolve_service(settings)}")
         click.echo(f"   Модель: {cfg.resolve_model(settings)}")
         click.echo(f"   Ключевые слова: {', '.join(cfg.keywords[:5])}...")
-
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -110,7 +110,6 @@ def process(ctx, input_file, prompt, auto, workers, force):
     stats = db.get_statistics()
     click.echo(f"📊 Всего в БД: {stats.get('total', 0)}")
 
-
 @cli.command()
 @click.option('--output', '-o', default='results.json', help='Путь к выходному файлу')
 @click.option('--structure', type=click.Choice(['flat', 'by_code', 'by_category', 'by_prompt']),
@@ -137,7 +136,7 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
     )
 
     if not results:
-        click.echo("⚠️  Нет данных для экспорта")
+        click.echo("⚠️ Нет данных для экспорта")
         return
 
     export_data = db.export_filtered_to_json(
@@ -149,7 +148,6 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
     )
 
     click.echo(f"✅ Экспортировано: {len(results)} записей → {output}")
-
 
 @cli.command()
 def stats():
@@ -163,17 +161,16 @@ def stats():
     stats = db.get_statistics()
 
     click.echo("📊 Статистика обработки:")
-    click.echo(f"   Всего записей: {stats.get('total', 0)}")
-    click.echo(f"   По статусам:")
+    click.echo(f"  Всего записей: {stats.get('total', 0)}")
+    click.echo(f"  По статусам:")
     for status, count in stats.get('by_status', {}).items():
-        click.echo(f"     {status}: {count}")
-    click.echo(f"   По категориям:")
+        click.echo(f"    {status}: {count}")
+    click.echo(f"  По категориям:")
     for cat, count in stats.get('by_category', {}).items():
-        click.echo(f"     {cat}: {count}")
-    click.echo(f"   По API:")
+        click.echo(f"    {cat}: {count}")
+    click.echo(f"  По API:")
     for api, count in stats.get('by_api', {}).items():
-        click.echo(f"     {api}: {count}")
-
+        click.echo(f"    {api}: {count}")
 
 @cli.command()
 @click.option('--limit', '-l', default=10, help='Количество записей')
@@ -199,7 +196,6 @@ def errors(limit, prompt):
         click.echo(f"   Промпт: {result.get('prompt_id', 'N/A')}")
         click.echo(f"   Ошибка: {result.get('error_message', 'N/A')[:100]}...")
         click.echo()
-
 
 @cli.command()
 @click.argument('text')
@@ -231,7 +227,6 @@ def detect(text):
             return
 
     click.echo("❌ Категория не определена")
-
 
 @cli.command()
 @click.option('--api', 'api_name', help='Название API (openwebui, mws, gigachat)')
@@ -286,15 +281,14 @@ def models(api_name):
             if model_list:
                 click.echo(f"   Модели ({len(model_list)}):")
                 for m in model_list[:10]:
-                    click.echo(f"      - {m}")
+                    click.echo(f"     - {m}")
                 if len(model_list) > 10:
-                    click.echo(f"      ... и еще {len(model_list) - 10}")
+                    click.echo(f"     ... и еще {len(model_list) - 10}")
             else:
-                click.echo("   ⚠️  Не удалось получить список моделей")
+                click.echo("   ⚠️ Не удалось получить список моделей")
 
         except Exception as e:
             click.echo(f"   ❌ Ошибка: {e}")
-
 
 # ============================
 # PARAMETRIC COMMANDS (New)
@@ -357,7 +351,6 @@ def _init_llm_clients(settings, all_services=False):
             logger.warning(f"Failed to init {service_name}: {e}")
     return llm_clients
 
-
 @cli.command()
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -390,10 +383,10 @@ def process_parametric(text, db, ens_index, llm):
     result = processor.process(text)
 
     click.echo(f"📄 Текст: {result.text}")
-    click.echo(f"🏷️  Уровень: {result.level}")
+    click.echo(f"🏷️ Уровень: {result.level}")
     click.echo(f"✅ Успех: {result.success}")
     click.echo(f"🎯 Confidence: {result.confidence:.2f}")
-    click.echo(f"⏱️  Время: {result.processing_time_ms:.2f} мс")
+    click.echo(f"⏱️ Время: {result.processing_time_ms:.2f} мс")
 
     if result.params:
         click.echo(f"📋 Параметры:")
@@ -404,7 +397,6 @@ def process_parametric(text, db, ens_index, llm):
     if result.ens_match:
         click.echo(f"🔗 ЕНС совпадение:")
         click.echo(f"   Код: {result.ens_match.get('code')}")
-
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -550,7 +542,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             'params': result.params,
             'ens_code': result.ens_code,
             'ens_name': result.ens_name,
-            'ens_params': result.ens_params,
+            # CRITICAL FIX: Removed 'ens_params' which contained full ENS dict (hundreds of fields)
+            # causing 8+ GB output files. Use ens_params_mask instead.
             'ens_params_mask': result.ens_params_mask,
             'confidence': result.confidence,
             'processing_time_ms': result.processing_time_ms,
@@ -571,7 +564,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
 
     # === OUTPUT FORMAT LOGIC ===
     # Pre-clean results: remove huge fields that cause MemoryError
-    # ens_params contains ALL ENS fields (hundreds), we keep only ens_params_mask
+    # ens_params_mask contains only matched parameters (small dict)
     clean_results = []
     for row in results:
         clean = {
@@ -608,7 +601,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         comp = row.get('fuzzy_params_comparison')
         if comp:
             clean['fuzzy_params_comparison'] = {k: {sk: str(sv)[:100] for sk, sv in v.items()}
-                                                  for k, v in comp.items()}
+                                                for k, v in comp.items()}
         clean_results.append(clean)
 
     if output_path.suffix.lower() == '.json':
@@ -692,20 +685,19 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         click.echo(f"\n✅ Excel сохранен: {output}")
 
     else:
-        # Default to JSON for unknown extensions
+        # CRITICAL FIX: Use clean_results instead of raw results to avoid huge files
         with open(output, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            json.dump(clean_results, f, ensure_ascii=False, indent=2, default=str)
         click.echo(f"\n✅ JSON сохранен: {output}")
 
     click.echo(f"\n📊 Статистика:")
-    click.echo(f"   Всего: {stats['total']}")
-    click.echo(f"   Успешно: {stats['success']}")
-    click.echo(f"   Ошибки: {stats['failed']}")
-    click.echo(f"   Из кэша: {stats['cached']}")
+    click.echo(f"  Всего: {stats['total']}")
+    click.echo(f"  Успешно: {stats['success']}")
+    click.echo(f"  Ошибки: {stats['failed']}")
+    click.echo(f"  Из кэша: {stats['cached']}")
 
     if success_only:
-        click.echo(f"   Отфильтровано (неуспешные): {stats['filtered']}")
-
+        click.echo(f"  Отфильтровано (неуспешные): {stats['filtered']}")
 
 @cli.command('analyze-quality')
 @click.argument('input_file', type=click.Path(exists=True))
@@ -762,11 +754,10 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
         analyzer.save_json(stats, json_output)
         click.echo(f"\n✅ JSON отчет сохранен: {json_output}")
 
-
 @cli.command()
 @click.argument('text')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
-@click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕНС')
+@click.option('--ens-index', '-i', required=True, help='Пути к индексу ЕНС')
 @click.option('--llm', '-l', is_flag=True, help='Использовать LLM')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 def diagnose(text, db, ens_index, llm, coating_map):
@@ -838,27 +829,55 @@ def diagnose(text, db, ens_index, llm, coating_map):
     click.echo(f"   mask.standard: {getattr(mask, 'standard', 'N/A')}")
     click.echo(f"   mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
     click.echo(f"   mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
+    click.echo(f"   mask.pattern (первые 120 симв):")
+    click.echo(f"      {getattr(mask, 'pattern', 'N/A')[:120]}")
 
-    # Step 2: Param extraction
-    click.echo(f"\n📋 Извлечение параметров (Level 2):")
+    # Step 2: Pattern relaxation
+    effective_standard = getattr(mask, 'standard', None) or standard
+    client = ParametricENSClient.__new__(ParametricENSClient)
+    relaxed = client._relax_pattern(mask.pattern, standard=effective_standard)
+    click.echo(f"\n📋 Relax pattern:")
+    click.echo(f"   standard заменен: '{effective_standard}'")
+    click.echo(f"   relaxed (первые 200 симв):")
+    click.echo(f"      {relaxed[:200]}")
+    if len(relaxed) > 200:
+        click.echo(f"      ... ({len(relaxed)} символов всего)")
+
+    # Step 3: Regex match
     try:
-        params = processor._extract_params_with_mask(text, mask)
-        click.echo(f"   Параметры: {params}")
-    except Exception as e:
-        click.echo(f"   ❌ Ошибка: {e}")
-        params = {}
+        compiled = re.compile(relaxed, re.IGNORECASE)
+        match = compiled.search(text)
+        click.echo(f"\n📋 Regex match:")
+        if match:
+            click.echo(f"   ✅ MATCH")
+            click.echo(f"   groups: {match.groupdict()}")
+        else:
+            click.echo(f"   ❌ NO MATCH")
+            # Find longest prefix
+            for i in range(len(text), 0, -1):
+                if compiled.search(text[:i]):
+                    click.echo(f"   longest matching prefix: '{text[:i]}'")
+                    break
+            else:
+                click.echo(f"   no prefix matches at all")
+    except re.error as e:
+        click.echo(f"\n📋 Regex match:")
+        click.echo(f"   ❌ INVALID REGEX: {e}")
 
-    # Step 3: ENS match
-    click.echo(f"\n🔗 Поиск в ЕНС (Level 3):")
-    match_info = processor._find_ens_match(text, standard, item_type, params, mask)
-    if match_info:
-        click.echo(f"   ЕНС код: {match_info.get('ens_code')}")
-        click.echo(f"   ЕНС наименование: {match_info.get('ens_name')}")
-        click.echo(f"   Score: {match_info.get('score', 0):.3f}")
-        click.echo(f"   Match type: {match_info.get('match_type')}")
-    else:
-        click.echo(f"   ❌ Совпадение не найдено")
+    # Step 4: Full processor result
+    click.echo(f"\n📋 Full processor result:")
+    result = processor.process(text)
+    click.echo(f"   level: {result.level}")
+    click.echo(f"   success: {result.success}")
+    click.echo(f"   params: {result.params}")
+    click.echo(f"   ens_code: {result.ens_match.get('code') if result.ens_match else None}")
+    click.echo(f"   ens_params: {result.ens_params}")
+    click.echo(f"   confidence: {result.confidence:.3f}")
+    click.echo(f"   processing_time_ms: {result.processing_time_ms:.1f}")
+    if result.details:
+        click.echo(f"   details: {result.details}")
 
+    click.echo(f"\n{'='*60}")
 
 @cli.command('generate-masks')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -904,10 +923,24 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score)
         click.echo("🎯 Автоматическая генерация масок для всех стандартов...")
         stats = generator.generate_all_masks(validate=validate, min_score=min_score)
         click.echo(f"\n📊 Статистика генерации:")
-        click.echo(f"   Всего стандартов: {stats.get('total', 0)}")
-        click.echo(f"   Создано масок: {stats.get('created', 0)}")
-        click.echo(f"   Успешно валидировано: {stats.get('validated', 0)}")
-        click.echo(f"   Ошибки: {stats.get('errors', 0)}")
+        click.echo(f"  Всего стандартов: {stats.get('total', 0)}")
+        click.echo(f"  Создано масок: {stats.get('created', 0)}")
+        click.echo(f"  Успешно валидировано: {stats.get('validated', 0)}")
+        click.echo(f"  Ошибки: {stats.get('errors', 0)}")
+
+
+@cli.command()
+@click.option('--db', '-d', default='cache/masks.db',
+              help='Путь к БД масок')
+@click.option('--threshold', '-t', default=0.5,
+              help='Минимальный score для удаления')
+def cleanup(db, threshold):
+    """Очистка неактивных масок с низким score"""
+    from core.mask_database import MaskDatabase
+
+    mask_db = MaskDatabase(db_path=db)
+    deleted = mask_db.cleanup_low_score_masks(threshold)
+    click.echo(f"🗑️ Удалено {deleted} масок с score < {threshold}")
 
 
 if __name__ == '__main__':
