@@ -614,21 +614,17 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     if output_path.suffix.lower() == '.json':
         # Streaming JSON write to avoid MemoryError
         with open(output, 'w', encoding='utf-8') as f:
-            f.write('[
-')
+            f.write('[\n')
             for i, row in enumerate(clean_results):
                 if i > 0:
-                    f.write(',
-')
+                    f.write(',\n')
                 # Use json.dumps per row (small object, safe)
                 try:
                     line = json.dumps(row, ensure_ascii=False, indent=2, default=str)
                 except Exception:
                     line = json.dumps(row, ensure_ascii=False, default=lambda x: str(x)[:500])
                 f.write(line)
-            f.write('
-]
-')
+            f.write('\n]\n')
         click.echo(f"\n✅ JSON сохранен: {output}")
 
     elif output_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm'):
