@@ -156,12 +156,75 @@ class AutomatedParametricProcessor:
         # Load ENS index
         self.ens_index = {}
         if ens_index_path and Path(ens_index_path).exists():
-            try:
-                with open(ens_index_path, 'rb') as f:
-                    self.ens_index = pickle.load(f)
-                logger.info(f"ENS index loaded: {len(self.ens_index)} items")
-            except Exception as e:
-                logger.warning(f"Failed to load ENS index: {e}")
+            self._load_ens_index(ens_index_path)
+
+
+    def _load_ens_index(self, path):
+        """Load ENS index from pickle file. Handles both dict and list structures."""
+        import pickle
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+
+            # Handle different structures:
+            # 1. Dict {code: dict} — standard
+            # 2. Dict {code: list} — values are lists
+            # 3. List of dicts
+            # 4. List of lists/records
+
+            if isinstance(data, dict):
+                # Check if values are lists and convert if needed
+                converted = {}
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        # Convert list to pseudo-dict for uniform access
+                        value_str = ' '.join(str(x) for x in value if x is not None)
+                        converted[key] = {
+                            '_raw_list': value,
+                            '_str': value_str,
+                            'нтд_1': value_str,
+                            'наименование_типа': value_str,
+                            'наименование': value_str
+                        }
+                    elif isinstance(value, dict):
+                        converted[key] = value
+                    else:
+                        converted[key] = {'_raw': value, 'нтд_1': str(value)}
+                self.ens_index = converted
+                logger.info(f"ENS index loaded (dict): {len(self.ens_index)} items")
+            elif isinstance(data, list):
+                if data and len(data) > 0:
+                    if isinstance(data[0], dict):
+                        # List of dicts — convert to dict by code
+                        if 'код' in data[0]:
+                            self.ens_index = {str(item['код']): item for item in data}
+                        elif 'ens_code' in data[0]:
+                            self.ens_index = {str(item['ens_code']): item for item in data}
+                        else:
+                            self.ens_index = {str(i): item for i, item in enumerate(data)}
+                    elif isinstance(data[0], (list, tuple)):
+                        # List of lists — wrap each in pseudo-dict
+                        self.ens_index = {}
+                        for i, item in enumerate(data):
+                            item_str = ' '.join(str(x) for x in item if x is not None)
+                            self.ens_index[str(i)] = {
+                                '_raw_list': item,
+                                '_str': item_str,
+                                'нтд_1': item_str,
+                                'наименование_типа': item_str,
+                                'наименование': item_str
+                            }
+                    else:
+                        self.ens_index = {str(i): item for i, item in enumerate(data)}
+                else:
+                    self.ens_index = {}
+                logger.info(f"ENS index loaded (list): {len(self.ens_index)} items")
+            else:
+                self.ens_index = {}
+                logger.warning(f"Unknown ENS index structure: {type(data)}")
+        except Exception as e:
+            logger.warning(f"Failed to load ENS index: {e}")
+            self.ens_index = {}
 
         # Standard extractor
         self.standard_extractor = StandardExtractor()
@@ -270,6 +333,7 @@ class AutomatedParametricProcessor:
         """
         Find best ENS match for extracted parameters.
         Returns match_info dict with scores and candidate data.
+        Handles both dict and list structures for ens_items.
         """
         if not self.ens_index:
             return None
@@ -277,6 +341,32 @@ class AutomatedParametricProcessor:
         # Filter ENS items by standard and type
         candidates = []
         for code, ens_item in self.ens_index.items():
+            # Handle list-type ens_items (convert to dict if needed)
+            if isinstance(ens_item, list):
+                # Try to convert list to dict using common field positions
+                # or just skip if we can't map
+                logger.debug(f"ENS item {code} is a list, attempting conversion")
+                # If it's a list, we can't easily use .get()
+                # Try to find standard and type by string search in the list
+                ens_item_str = ' '.join(str(x) for x in ens_item if x is not None)
+                ens_std = ens_item_str
+                ens_type = ens_item_str.lower()
+
+                if standard not in ens_std and ens_std not in standard:
+                    continue
+                if item_type not in ens_type and ens_type not in item_type:
+                    continue
+
+                # Wrap list in a pseudo-dict for uniform access
+                ens_item = {'_raw_list': ens_item, '_str': ens_item_str}
+                candidates.append((code, ens_item))
+                continue
+
+            # Normal dict-type ens_item
+            if not isinstance(ens_item, dict):
+                logger.debug(f"ENS item {code} has unexpected type: {type(ens_item)}")
+                continue
+
             ens_std = str(ens_item.get('нтд_1', '')).strip()
             ens_type = str(ens_item.get('наименование_типа', '')).strip().lower()
 
@@ -357,15 +447,66 @@ class AutomatedParametricProcessor:
             'debug_candidates': []
         }
 
-    def _calculate_match_score(self, params: Dict, ens_item: Dict, text: str) -> Tuple[float, Dict, Dict]:
+    def _calculate_match_score(self, params: Dict, ens_item, text: str) -> Tuple[float, Dict, Dict]:
         """
         Calculate match score between extracted params and ENS item.
+        Handles both dict and list structures for ens_item.
         Returns (score, comparison_dict, mismatched_dict).
         """
         comparison = {}
         mismatched = {}
 
         if not params:
+            return 0.0, {}, {}
+
+        # Handle pseudo-dict from list conversion (_raw_list key)
+        if isinstance(ens_item, dict) and '_raw_list' in ens_item:
+            ens_item_str = ens_item.get('_str', '')
+            matched_count = 0
+            total_weight = 0
+            for param, extracted_val in params.items():
+                if param.startswith('_'):
+                    continue
+                weight = 2.0
+                total_weight += weight
+                if str(extracted_val) in ens_item_str:
+                    matched_count += weight
+                    comparison[param] = {
+                        'status': 'exact',
+                        'extracted': str(extracted_val),
+                        'ens_value': 'found in list',
+                        'similarity': 1.0
+                    }
+                else:
+                    mismatched[param] = f"{extracted_val} not found in list"
+            score = matched_count / total_weight if total_weight > 0 else 0.0
+            return score, comparison, mismatched
+
+        # Handle raw list-type ens_items
+        if isinstance(ens_item, list):
+            ens_item_str = ' '.join(str(x) for x in ens_item if x is not None)
+            # Simple string matching for list items
+            matched_count = 0
+            total_weight = 0
+            for param, extracted_val in params.items():
+                if param.startswith('_'):
+                    continue
+                weight = 2.0
+                total_weight += weight
+                if str(extracted_val) in ens_item_str:
+                    matched_count += weight
+                    comparison[param] = {
+                        'status': 'exact',
+                        'extracted': str(extracted_val),
+                        'ens_value': 'found in list',
+                        'similarity': 1.0
+                    }
+                else:
+                    mismatched[param] = f"{extracted_val} not found in list"
+            score = matched_count / total_weight if total_weight > 0 else 0.0
+            return score, comparison, mismatched
+
+        if not isinstance(ens_item, dict):
             return 0.0, {}, {}
 
         matched_count = 0
