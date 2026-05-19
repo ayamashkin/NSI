@@ -552,7 +552,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                     from core.result_database import ResultDatabaseManager
                     manager = ResultDatabaseManager(db_path=result_db)
                     manager.upsert_result(
-                        name=text,
+                        name=result.text,
                         article=str(df.iloc[idx].get('Артикул', '')).strip() or None,
                         item_type=result.item_type,
                         standard=result.standard,
@@ -699,6 +699,16 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     click.echo(f"   ❌ Ошибки: {stats['failed']}")
     if success_only:
         click.echo(f"   Отфильтровано (неуспешные): {stats['filtered']}")
+
+    # Cache stats
+    if hasattr(processor, '_cache_stats'):
+        cs = processor._cache_stats
+        click.echo(f"\n💾 Кэш:")
+        click.echo(f"   Попаданий (HIT): {cs.get('hits', 0)}")
+        click.echo(f"   Промахов (MISS): {cs.get('misses', 0)}")
+        total_cache = cs.get('hits', 0) + cs.get('misses', 0)
+        if total_cache > 0:
+            click.echo(f"   Эффективность: {cs['hits']/total_cache*100:.1f}%")
 
     return 0
 

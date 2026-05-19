@@ -186,6 +186,12 @@ class AutomatedParametricProcessor:
         self.result_db_path = result_db_path
         self.cache_ttl_days = cache_ttl_days
         self._cache_stats = {'hits': 0, 'misses': 0}
+        if result_db_path:
+            db_file = Path(result_db_path)
+            if not db_file.exists():
+                logger.info("[CACHE] result.db will be created at: %s", result_db_path)
+            else:
+                logger.info("[CACHE] Using existing result.db: %s", result_db_path)
 
         # === ПРОИЗВОДИТЕЛЬНОСТЬ: кэши ===
         self._coating_rules_cache: Optional[Dict] = None
@@ -328,16 +334,28 @@ class AutomatedParametricProcessor:
         import time
         start_time = time.time()
 
-        # === CACHE CHECK ===
-        logger.debug("[CACHE] process() called: article=%r text=%s result_db_path=%s", article, text[:50], self.result_db_path)
+        # === LEVEL 0: Standard extraction (needed for cache key) ===
+        clean_text = text.strip().rstrip(',.;: ')
+        if clean_text != text.strip():
+            logger.debug("Cleaned trailing punctuation: '%s' -> '%s'", text, clean_text)
+
+        extracted = self.standard_extractor.extract_all(clean_text)
+        standard_info = extracted.get('standard_info')
+        item_type = extracted.get('item_type')
+        extracted_standard = standard_info.normalized if standard_info else None
+
+        # === CACHE CHECK (after extraction, so we have standard for the key) ===
+        logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
+                     clean_text[:50], extracted_standard, self.result_db_path)
         if not force and self.result_db_path:
-            cached = self._check_cache(article, text)
+            cached = self._check_cache(clean_text, extracted_standard)
             if cached:
-                logger.info("[CACHE] HIT for '%s' (code=%s, mask=%s)",
-                            text[:50], cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
+                logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
+                            clean_text[:50], extracted_standard,
+                            cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
                 return self._result_from_cache(cached)
             else:
-                logger.debug("[CACHE] MISS for article=%r text=%s", article, text[:50])
+                logger.info("[CACHE] MISS for '%s' / %s", clean_text[:50], extracted_standard)
         else:
             if force:
                 logger.debug("[CACHE] skipped (force=True)")
@@ -345,14 +363,9 @@ class AutomatedParametricProcessor:
                 logger.debug("[CACHE] skipped (result_db_path not set)")
         self._cache_stats['misses'] += 1
 
-        clean_text = text.strip().rstrip(',.;: ')
-        if clean_text != text.strip():
-            logger.debug("Cleaned trailing punctuation: '%s' -> '%s'", text, clean_text)
+        logger.info("Processing: %s...", clean_text[:50])
 
-        logger.info("Processing: %s...", text[:50])
-
-        # Level 0: Извлечение стандарта
-        extracted = self.standard_extractor.extract_all(clean_text)
+        # standard_info и item_type уже извлечены выше для кэша
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
 
