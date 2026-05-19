@@ -521,7 +521,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         settings=settings,
         result_db_path=result_db
     )
-    logger.info("[CLI] result_db_path set to: %s", result_db)
+    logger.debug("[CLI] result_db_path set to: %s", result_db)
 
     click.echo("🔍 Обработка...")
     click.echo(f"   Workers: {workers}")
@@ -549,7 +549,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
 
             # Сохраняем в result.db если указан путь
             if result_db:
-                logger.info("[CLI_CACHE] Saving result to %s for '%s' (code=%s)", result_db, result.text[:50], result.ens_code)
+                logger.debug("[CLI_CACHE] Saving result to %s for '%s' (code=%s)", result_db, result.text[:50], result.ens_code)
                 try:
                     from core.result_database import ResultDatabaseManager
                     manager = ResultDatabaseManager(db_path=result_db)
@@ -574,9 +574,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                         details=result.details,
                         processing_time_ms=result.processing_time_ms
                     )
-                    logger.info("[CLI_CACHE] Saved: changed=%s reason=%s", changed, reason)
+                    logger.debug("[CLI_CACHE] Saved: changed=%s reason=%s", changed, reason)
                 except Exception as e:
-                    logger.error("[CLI_CACHE] FAILED to save result: %s", e, exc_info=True)
+                    logger.warning("[CLI_CACHE] Failed to save result: %s", e)
 
             return idx, result
         except Exception as e:
