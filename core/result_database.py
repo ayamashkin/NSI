@@ -68,9 +68,62 @@ class ResultDatabaseManager:
             logger.debug("[RESULT_DB] Cleanup error: %s", e)
 
     def _init_db(self):
-        """Инициализация таблиц result.db."""
+        """Инициализация таблиц result.db. Пересоздаёт таблицу если article имеет NOT NULL."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
+            # Проверяем существующую схему
+            cursor = conn.execute("PRAGMA table_info(nomenclature_results)")
+            cols = {row[1]: row for row in cursor.fetchall()}
+
+            # Если article существует и имеет NOT NULL — пересоздаём таблицу
+            if 'article' in cols and cols['article'][3] == 1:  # notnull=1
+                logger.warning("[RESULT_DB] Recreating table: article has NOT NULL constraint")
+                conn.execute("ALTER TABLE nomenclature_results RENAME TO nomenclature_results_old")
+                conn.execute("""
+                    CREATE TABLE nomenclature_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        article TEXT,
+                        name TEXT NOT NULL,
+                        standard TEXT,
+                        item_type TEXT,
+                        level TEXT,
+                        success INTEGER NOT NULL DEFAULT 0,
+                        params TEXT,
+                        ens_code TEXT,
+                        ens_name TEXT,
+                        ens_params TEXT,
+                        ens_params_mask TEXT,
+                        confidence REAL,
+                        match_type TEXT,
+                        match_type_ru TEXT,
+                        coating_substitution TEXT,
+                        fuzzy_mismatched_params TEXT,
+                        mask_id INTEGER,
+                        mask_pattern TEXT,
+                        mask_pattern_hash TEXT,
+                        details TEXT,
+                        processing_time_ms REAL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(name, standard)
+                    )
+                """)
+                # Копируем данные (article -> пустая строка если NULL)
+                conn.execute("""
+                    INSERT INTO nomenclature_results 
+                    SELECT id, COALESCE(article, ''), name, standard, item_type, level, success,
+                           params, ens_code, ens_name, ens_params, ens_params_mask, confidence,
+                           match_type, match_type_ru, coating_substitution, fuzzy_mismatched_params,
+                           mask_id, mask_pattern, mask_pattern_hash, details, processing_time_ms,
+                           created_at, updated_at
+                    FROM nomenclature_results_old
+                """)
+                conn.execute("DROP TABLE nomenclature_results_old")
+                conn.commit()
+                logger.info("[RESULT_DB] Table recreated successfully")
+                return
+
+            # Обычное создание если таблицы нет
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS nomenclature_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
