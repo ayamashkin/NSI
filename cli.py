@@ -4,23 +4,24 @@ Nomenclature Processor CLI
 Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 
 FIXES (2026-05-19):
-1. CRITICAL: JSON output now uses full ProcessingResult.to_dict() structure
-   (matches "results — копия.json" format with technical details).
-2. CRITICAL: Excel output uses human-readable Russian columns + original data.
-3. CRITICAL: Fixed NaN/None serialization in JSON.
-4. Restored ParametricENSClient delegation for matching.
+1. RESTORED from b5ae1c32: ThreadPoolExecutor, result.db cache, ens commands.
+2. CRITICAL: JSON output now uses full ProcessingResult.to_dict() structure.
+3. CRITICAL: Excel output uses human-readable Russian columns + original data.
+4. CRITICAL: Fixed NaN/None serialization in JSON.
+5. Auto-detect name column (_find_name_column).
 
-LAST_FIX: 2026-05-19 19:11 UTC+3
+LAST_FIX: 2026-05-19 21:45 UTC+3
 """
 
 import click
 import logging
+import threading
 import yaml
 import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 
 from config.settings import setup_logging
@@ -46,7 +47,7 @@ def _sanitize_for_json(obj):
 
 def _find_name_column(df):
     """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
-    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
+    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.', 'краткое наименование']
     for col in df.columns:
         col_lower = str(col).lower().strip()
         for kw in keywords:
@@ -342,13 +343,15 @@ def _init_llm_clients(settings, all_services=False):
     llm_clients = {}
 
     if all_services:
-        services = ['mws', 'mts_ai', 'gigachat', 'openwebui']
+        services = list(settings.api.keys())
+        logger.info("LLM: initializing all configured services: %s", services)
     else:
         services = [settings.mask_generation.default_service]
         logger.info(f"LLM: using default_service='{services[0]}'")
 
     for service_name in services:
         if service_name not in settings.api:
+            logger.warning("Service '%s' not found in settings.api, skipping", service_name)
             continue
         try:
             cfg = settings.api[service_name]
@@ -387,6 +390,12 @@ def _init_llm_clients(settings, all_services=False):
                 llm_clients[service_name] = MTSAIClient(
                     base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout
                 )
+            else:
+                if not getattr(cfg, 'api_key', None):
+                    logger.debug(f"Skipping {service_name}: no api_key")
+                    continue
+                logger.warning("Unknown service '%s', skipping", service_name)
+                continue
             logger.info(f"LLM client initialized: {service_name}")
         except Exception as e:
             logger.warning(f"Failed to init {service_name}: {e}")
@@ -425,7 +434,7 @@ def process_parametric(text, db, ens_index, llm):
     result = processor.process(text)
 
     click.echo(f"📄 Текст: {result.text}")
-    click.echo(f"🏷️ Уровень: {result.level}")
+    click.echo(f"🏷️ Уровень: {result.level.value}")
     click.echo(f"✅ Успех: {result.success}")
     click.echo(f"🎯 Confidence: {result.confidence:.2f}")
     click.echo(f"⏱️ Время: {result.processing_time_ms:.2f} мс")
@@ -451,9 +460,10 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--success-only', is_flag=True, help='Включать только успешные результаты')
 @click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
-@click.option('--workers', '-w', type=int, default=1, help='Количество параллельных workers')
+@click.option('--workers', '-w', type=int, default=4, help='Количество параллельных workers (default: 4)')
+@click.option('--result-db', '-r', help='Путь к SQLite БД результатов для кэширования')
 def batch(input_file, db, ens_index, output, llm, validate, success_only,
-          include_details, coating_map, workers):
+          include_details, coating_map, workers, result_db):
     """Пакетная обработка номенклатуры параметрическим методом"""
     import pandas as pd
     from tqdm import tqdm
@@ -507,32 +517,75 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index,
         use_llm_generation=llm,
-        settings=settings
+        settings=settings,
+        result_db_path=result_db
     )
 
     click.echo("🔍 Обработка...")
+    click.echo(f"   Workers: {workers}")
     if success_only:
         click.echo("⚡ Режим: только успешные (пропускаем ошибки)")
 
-    results = []
+    results = [None] * len(texts)
     stats = {'total': 0, 'success': 0, 'failed': 0, 'filtered': 0}
+    stats_lock = threading.Lock()
 
-    for idx, text in enumerate(tqdm(texts, desc="Обработка")):
-        stats['total'] += 1
+    def _process_one(idx_text):
+        idx, text = idx_text
+        try:
+            result = processor.process(text)
+            with stats_lock:
+                nonlocal stats
+                stats['total'] += 1
+                if result.success:
+                    stats['success'] += 1
+                else:
+                    stats['failed'] += 1
+                if success_only and not result.success:
+                    stats['filtered'] += 1
+                    return idx, None
 
-        result = processor.process(text)
+            # Сохраняем в result.db если указан путь
+            if result_db:
+                try:
+                    from core.result_database import ResultDatabaseManager
+                    manager = ResultDatabaseManager(db_path=result_db)
+                    manager.upsert_result(
+                        article=df.iloc[idx].get('Артикул', ''),
+                        name=text,
+                        item_type=result.item_type,
+                        standard=result.standard,
+                        ens_code=result.ens_code,
+                        ens_name=result.ens_name,
+                        success=result.success,
+                        confidence=result.confidence,
+                        params=result.params,
+                        ens_params=result.ens_params,
+                        ens_params_mask=result.ens_params_mask,
+                        match_type=result.match_type,
+                        details=result.details
+                    )
+                except Exception as e:
+                    logger.debug("Failed to save result to cache: %s", e)
 
-        if result.success:
-            stats['success'] += 1
-        else:
-            stats['failed'] += 1
+            return idx, result
+        except Exception as e:
+            logger.error("Error processing item %d: %s", idx, e)
+            with stats_lock:
+                stats['total'] += 1
+                stats['failed'] += 1
+            return idx, None
 
-        # Filter if success_only
-        if success_only and not result.success:
-            stats['filtered'] += 1
-            continue
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_one, (i, t)): i for i, t in enumerate(texts)}
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(texts), desc="Обработка"):
+            idx, result = future.result()
+            if result is not None:
+                results[idx] = result
 
-        results.append(result)
+    # Filter out None entries (filtered or failed)
+    valid_results = [r for r in results if r is not None]
 
     # === OUTPUT ===
     output_path = Path(output)
@@ -542,6 +595,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         # --- EXCEL OUTPUT: human-readable columns + original data ---
         excel_rows = []
         for idx, result in enumerate(results):
+            if result is None:
+                continue
             out_row = {}
             # Сохраняем ВСЕ исходные колонки
             for col in df.columns:
@@ -554,7 +609,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             # Добавляем обогащение
             out_row['Код ЕНС'] = str(result.ens_code)[:50] if result.ens_code else ''
             out_row['Наименование ЕНС'] = str(result.ens_name)[:500] if result.ens_name else ''
-            out_row['Уровень'] = str(result.level) if result.level else ''
+            out_row['Уровень'] = str(result.level.value if hasattr(result.level, 'value') else result.level) if result.level else ''
             out_row['Распознано'] = 'Да' if result.success else 'Нет'
             out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
             out_row['Тип сопоставления'] = str(result.match_type_ru) if result.match_type_ru else 'Не определено'
@@ -620,7 +675,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     else:
         # --- JSON OUTPUT: full technical structure (ProcessingResult.to_dict) ---
         json_results = []
-        for result in results:
+        for result in valid_results:
             d = result.to_dict()
             if not include_details:
                 d.pop('details', None)
@@ -809,7 +864,7 @@ def diagnose(text, db, ens_index, llm, coating_map):
     # Step 4: Full processor result
     click.echo(f"\n📋 Full processor result:")
     result = processor.process(text)
-    click.echo(f"   level: {result.level}")
+    click.echo(f"   level: {result.level.value if hasattr(result.level, 'value') else result.level}")
     click.echo(f"   success: {result.success}")
     click.echo(f"   params: {result.params}")
     click.echo(f"   ens_code: {result.ens_code}")
@@ -833,7 +888,7 @@ def diagnose(text, db, ens_index, llm, coating_map):
 def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score):
     """Генерация масок для стандартов"""
     from core.mask_database import MaskDatabase
-    from core.llm_mask_generator import LLMMaskGenerator
+    from generators.llm_mask_generator import LLMMaskGenerator
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
 
@@ -884,6 +939,86 @@ def cleanup(db, threshold):
     mask_db = MaskDatabase(db_path=db)
     deleted = mask_db.cleanup_low_score_masks(threshold)
     click.echo(f"🗑️ Удалено {deleted} масок с score < {threshold}")
+
+
+# ============================
+# ENS COMMANDS (Restored)
+# ============================
+
+@cli.group()
+def ens():
+    """ENS index operations"""
+    pass
+
+
+@ens.command('auto-mapping')
+@click.argument('excel_file', type=click.Path(exists=True))
+@click.option('--output', '-o', required=True, help='Output YAML path')
+@click.option('--append', is_flag=True, help='Append to existing YAML')
+def auto_mapping(excel_file, output, append):
+    """Generate ens_column_mapping.yaml from Excel"""
+    from auto_mapping import generate_mapping
+    import yaml
+    click.echo(f"Generating mapping from {excel_file}...")
+    mapping = generate_mapping(excel_file, append=append, existing_yaml=output if append else None)
+    with open(output, 'w', encoding='utf-8') as f:
+        yaml.dump(mapping, f, allow_unicode=True, sort_keys=False)
+    total = sum(len(v) for v in mapping.get('category_mapping', {}).values())
+    click.echo(f"Mapped {total} columns: {output}")
+
+
+@ens.command()
+@click.argument('excel_file', type=click.Path(exists=True))
+@click.option('--output', '-o', required=True, help='Output .pkl path')
+@click.option('--category', '-c', type=click.Choice(['hardware', 'washer', 'rolledmetal']))
+def build_index(excel_file, output, category):
+    """Build ENS index from Excel"""
+    from core.integration import build_ens_index
+    click.echo(f"Building index from {excel_file}...")
+    result_path = build_ens_index(excel_file, output, category)
+    click.echo(f"Index saved: {result_path}")
+    meta_path = Path(result_path).with_suffix('.meta.json')
+    if meta_path.exists():
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+        click.echo(f"Items: {meta.get('item_count', 0)}")
+        click.echo(f"Category: {meta.get('category', 'unknown')}")
+
+
+@ens.command()
+@click.argument('query')
+@click.option('--index', '-i', required=True, help='Index path')
+@click.option('--top-k', '-k', default=5, help='Number of results')
+def search(query, index, top_k):
+    """Search ENS index"""
+    from ens.indexer import ENSIndex
+    if not Path(index).exists():
+        click.echo(f"Index not found: {index}", err=True)
+        return
+    ens_index = ENSIndex.load(index)
+    results = ens_index.search(query, k=top_k)
+    for i, item in enumerate(results, 1):
+        score = item.get('_similarity_score', 0)
+        name = item.get('name') or item.get('name', 'N/A')
+        click.echo(f"{i}. [{score:.2f}] {name[:60]}...")
+
+
+@ens.command()
+@click.argument('excel_file', type=click.Path(exists=True))
+@click.option('--index', '-i', required=True, help='Index path')
+@click.option('--sample', '-s', default=100, help='Sample size')
+def analyze(excel_file, index, sample):
+    """Analyze nomenclature quality"""
+    from core.integration import analyze_nomenclature
+    stats = analyze_nomenclature(excel_file, index, sample_size=sample)
+    click.echo(f"Analysis (sample {sample}):")
+    click.echo(f" Regex parsed: {stats.get('regex_parsed', 0)} ({stats.get('regex_parsed', 0) / sample * 100:.1f}%)")
+    click.echo(f" Failed (need LLM): {stats.get('failed', 0)} ({stats.get('failed', 0) / sample * 100:.1f}%)")
+    if 'estimated_regex_parsed' in stats:
+        total = stats.get('total', 0)
+        click.echo("")
+        click.echo(f"Estimated for all {total} items:")
+        click.echo(f" Regex: {stats['estimated_regex_parsed']}")
 
 
 if __name__ == '__main__':
