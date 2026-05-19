@@ -1,8 +1,11 @@
+#!/usr/bin/env python3
 """
 Configuration Module
 Единый источник настроек с загрузкой API ключей из внешних файлов.
 
-VERSION: 2026-05-07 14:15 UTC+3 — APIConfig.__post_init__: strip base_url/api_key_file; PromptConfig optional service/model
+VERSION: 2026-05-19 22:35 UTC+3
+  + MatchingConfig: numeric_field_weight, text_field_weight, default_field_weight,
+    length_tolerance, numeric_tolerance, confidence_penalty_per_mismatch, max_confidence_penalty
 """
 
 import yaml
@@ -13,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
-
 
 DEFAULT_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
@@ -43,9 +45,9 @@ class APIConfig:
     base_url: str
     api_key_file: Optional[str] = None
     api_key: Optional[str] = None
-    username: Optional[str] = None  # ← ДОБАВЛЕНО! Для JWT аутентификации OpenWebUI
-    password: Optional[str] = None  # Для JWT аутентификации OpenWebUI
-    password_file: Optional[str] = None  # Файл с паролем
+    username: Optional[str] = None
+    password: Optional[str] = None
+    password_file: Optional[str] = None
     auth_url: Optional[str] = None
     scope: Optional[str] = None
     timeout: int = 120
@@ -62,7 +64,6 @@ class APIConfig:
 
     def load_credentials(self) -> None:
         """Загружает ключи, пароли и учетные данные из указанных файлов."""
-        # Дополнительная нормализация (на случай если __post_init__ не сработал)
         if self.base_url:
             self.base_url = self.base_url.strip()
         if self.api_key_file:
@@ -71,11 +72,10 @@ class APIConfig:
             self.password_file = self.password_file.strip()
 
         logger.debug(f"Loading credentials for {self.base_url}")
-        logger.debug(f"  username: {self.username}")
-        logger.debug(f"  api_key_file: {self.api_key_file}")
-        logger.debug(f"  password_file: {self.password_file}")
+        logger.debug(f" username: {self.username}")
+        logger.debug(f" api_key_file: {self.api_key_file}")
+        logger.debug(f" password_file: {self.password_file}")
 
-        # Загружаем API key из файла
         if self.api_key_file:
             key_path = Path(self.api_key_file)
             if key_path.exists():
@@ -87,7 +87,6 @@ class APIConfig:
             else:
                 logger.warning(f"Key file not found: {self.api_key_file}")
 
-        # Загружаем пароль из файла (для JWT аутентификации OpenWebUI)
         if self.password_file:
             pwd_path = Path(self.password_file)
             if pwd_path.exists():
@@ -101,7 +100,6 @@ class APIConfig:
 
         logger.debug(f"After loading - api_key present: {bool(self.api_key)}, password present: {bool(self.password)}")
 
-    # Обратная совместимость - старый метод load_key
     def load_key(self) -> Optional[str]:
         """Загружает ключ/логин из указанного файла и пароль если есть."""
         self.load_credentials()
@@ -132,13 +130,23 @@ class ProcessingConfig:
 @dataclass
 class MatchingConfig:
     """Конфигурация порогов сопоставления."""
-    success_threshold: float = 0.7           # Порог для считать match успешным
-    fuzzy_threshold: float = 0.6             # Порог fuzzy matching кандидатов
-    v2_exact_threshold: float = 0.99         # Порог V2 exact match
-    coating_similarity_threshold: float = 0.8 # Порог similarity покрытия
-    strict_union_keys: bool = False          # Union keys comparison mode
-    debug_per_parameter: bool = True         # Детальный debug per-parameter в лог
-    fuzzy_params_comparison: bool = False    # Выводить fuzzy_params_comparison в JSON
+    success_threshold: float = 0.7
+    fuzzy_threshold: float = 0.6
+    v2_exact_threshold: float = 0.99
+    coating_similarity_threshold: float = 0.8
+    strict_union_keys: bool = False
+    debug_per_parameter: bool = True
+    fuzzy_params_comparison: bool = False
+    # NEW (2026-05-19) — веса параметров при fuzzy matching
+    numeric_field_weight: float = 5.0
+    text_field_weight: float = 2.0
+    default_field_weight: float = 1.0
+    # NEW — tolerance для post-validation
+    length_tolerance: float = 1.0
+    numeric_tolerance: float = 0.01
+    # NEW — штрафы к confidence
+    confidence_penalty_per_mismatch: float = 0.15
+    max_confidence_penalty: float = 0.5
 
 
 @dataclass
@@ -146,21 +154,19 @@ class PromptConfig:
     """Конфигурация промпта."""
     id: str
     name: str
-    file: str  # Путь к файлу промпта (как в YAML)
+    file: str
     category: str
     keywords: List[str]
-    service: Optional[str] = None  # Если не указано — берется из mask_generation.default_service
-    model: Optional[str] = None      # Если не указано — берется из mask_generation.default_model
+    service: Optional[str] = None
+    model: Optional[str] = None
     temperature: float = 0.1
-    system_prompt: Optional[str] = None  # Системный промпт для модели
+    system_prompt: Optional[str] = None
 
     @property
     def file_path(self) -> str:
-        """Свойство для совместимости (возвращает self.file)."""
         return self.file
 
     def resolve_service(self, settings: 'Settings') -> str:
-        """Возвращает service: из промпта или из mask_generation.default_service."""
         if self.service:
             return self.service
         mg = settings.mask_generation
@@ -169,7 +175,6 @@ class PromptConfig:
         raise ValueError(f"Service not specified for prompt '{self.id}' and no mask_generation.default_service")
 
     def resolve_model(self, settings: 'Settings') -> str:
-        """Возвращает model: из промпта → APIConfig.default_model → mask_generation.default_model."""
         if self.model:
             return self.model
         service = self.resolve_service(settings)
@@ -182,15 +187,13 @@ class PromptConfig:
         raise ValueError(f"Model not specified for prompt '{self.id}' and no defaults configured")
 
     def get_api_config(self, settings: 'Settings') -> 'APIConfig':
-        """Получает конфиг API для этого промпта (с учетом resolve_service)."""
         service = self.resolve_service(settings)
         return settings.api[service]
 
 
-
 @dataclass
 class MaskGenerationConfig:
-    """Конфигурация генерации масок (fallback при отсутствии prompts.yaml)."""
+    """Конфигурация генерации масок."""
     default_service: str = "mws"
     default_model: str = "qwen2.5-72b-instruct"
     default_temperature: float = 0.1
@@ -198,13 +201,14 @@ class MaskGenerationConfig:
     prompt_template: str = "prompts/templates/mask_generation.txt"
     save_debug_prompts: bool = True
     debug_prompts_dir: str = "prompts/debug"
-    deduplicate_by_standard_type: bool = False       # Не создавать дубликаты масок
+    deduplicate_by_standard_type: bool = False
+
 
 @dataclass
 class OutputConfig:
     """Конфигурация вывода результатов."""
-    include_mask_pattern: bool = False               # Добавлять regex в результат
-    include_ens_details: bool = True                 # Добавлять ENS имя, fuzzy score
+    include_mask_pattern: bool = False
+    include_ens_details: bool = True
     ens_params_skip_fields: List[str] = field(default_factory=lambda: [
         '_id', '_index', '_source', 'id', 'created_at', 'updated_at', 'hash', 'pattern_hash'
     ])
@@ -230,41 +234,22 @@ class Settings:
     @classmethod
     def load(cls, config_path: str = "config/config.yaml",
              prompts_path: str = "config/prompts.yaml") -> 'Settings':
-        """
-        Загрузка настроек из YAML файлов.
-
-        Args:
-            config_path: Путь к основному конфигу
-            prompts_path: Путь к реестру промптов
-
-        Returns:
-            Объект Settings с загруженными значениями
-        """
-        # Загрузка основного конфига
         config_data = cls._load_yaml(config_path)
         logger.debug(f"Loaded config data: {config_data}")
 
-        # Загрузка реестра промптов
         prompts_data = cls._load_yaml(prompts_path)
 
-        # Парсинг API конфигураций
         api_configs = {}
         for name, cfg in config_data.get('api', {}).items():
             logger.info(f"Parsing API config for: {name}")
             logger.debug(f"Raw config: {cfg}")
-
-            # Создаем APIConfig из YAML
             api_cfg = APIConfig(**cfg)
             logger.debug(f"APIConfig created - username: {api_cfg.username}, has api_key: {bool(api_cfg.api_key)}")
-
-            # Загружаем ключи из файлов
             api_cfg.load_credentials()
-
             api_configs[name] = api_cfg
             auth_type = 'api_key' if api_cfg.api_key else 'jwt' if (api_cfg.username and api_cfg.password) else 'none'
             logger.info(f"API config loaded for {name} - auth: {auth_type}")
 
-        # Парсинг промптов
         prompt_configs = {}
         for pid, pdata in prompts_data.get('prompts', {}).items():
             pdata['id'] = pid
@@ -296,39 +281,32 @@ class Settings:
             return data
 
     def get_api_key(self, service_name: str) -> Optional[str]:
-        """Получает ключ API по имени сервиса."""
         if service_name in self.api:
             return self.api[service_name].api_key
         return None
 
     def get_api_password(self, service_name: str) -> Optional[str]:
-        """Получает пароль API по имени сервиса."""
         if service_name in self.api:
             return self.api[service_name].password
         return None
 
     def get_api_username(self, service_name: str) -> Optional[str]:
-        """Получает username API по имени сервиса."""
         if service_name in self.api:
             return self.api[service_name].username
         return None
 
     def get_api_scope(self, service_name: str) -> Optional[str]:
-        """Получает OAuth scope по имени сервиса (для GigaChat)."""
         if service_name in self.api:
             return self.api[service_name].scope
         return None
 
     def get_prompt(self, prompt_id: str) -> Optional[PromptConfig]:
-        """Получает конфигурацию промпта по ID."""
         return self.prompts.get(prompt_id)
 
     def list_prompts(self) -> List[PromptConfig]:
-        """Возвращает список всех промптов."""
         return list(self.prompts.values())
 
     def reload_keys(self):
-        """Перезагрузка API ключей из файлов."""
         for config in self.api.values():
             config.load_credentials()
         logger.info("API keys and credentials reloaded")
@@ -337,7 +315,6 @@ class Settings:
 def setup_logging(config_path: str = "config/config.yaml") -> None:
     """
     Настройка логирования из конфигурационного файла.
-    Создает консольный и файловый handler с ротацией.
     """
     config_data = Settings._load_yaml(config_path)
     logging_cfg = LoggingConfig(**config_data.get('logging', {}))
