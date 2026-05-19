@@ -409,6 +409,27 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--include-details', is_flag=True, help='Включать debug-информацию (details) в вывод')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 @click.option('--workers', '-w', type=int, default=1, help='Количество параллельных workers')
+def _find_name_column(df):
+    """Поиск колонки с наименованием (case-insensitive, частичное совпадение)."""
+    keywords = ['наименование', 'номенклатура', 'name', 'наименов', 'наим.']
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        for kw in keywords:
+            if kw in col_lower:
+                return col
+    return None
+
+
+def _truncate_dataframe_cells(df, max_length=1000):
+    """Обрезка длинных строковых значений для предотвращения огромных Excel-файлов."""
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(
+                lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
+            )
+    return df
+
+
 def batch(input_file, db, ens_index, output, llm, validate, success_only,
           include_details, coating_map, workers):
     """Пакетная обработка номенклатуры параметрическим методом"""
