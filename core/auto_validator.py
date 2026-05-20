@@ -3,11 +3,12 @@ AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
 
 LAST_FIXES:
- 2026-05-20 2026-05-20 13:21 UTC+3 UTC+3 — _test_pattern: добавлена нормализация исполнения
-   (очистка скобок/дефисов → float). Исправлен else-блок для числовых/строковых параметров.
- 2026-05-20 2026-05-20 13:21 UTC+3 UTC+3 — _match_param_keys: F1-like score, threshold 0.20.
- 2026-05-20 2026-05-20 13:21 UTC+3 UTC+3 — coating comparison: threshold 0.50 + subset logic.
- 2026-05-20 2026-05-20 13:21 UTC+3 UTC+3 — skip_params: убраны нтд_1 и standard.
+ 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _is_empty_equivalent: empty_values загружаются из config.settings
+   (validation.empty_values), fallback на дефолтный список. Убран хардкод.
+ 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _load_ens_index: class-level cache для индекса ENS.
+ 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _test_pattern: нормализация исполнения.
+ 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _match_param_keys: F1-like score, threshold 0.20.
+ 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — coating comparison: threshold 0.50 + subset logic.
  2026-05-20 12:52 UTC+3 — _test_pattern: полное переключение на V2 fuzzy-сравнение.
 """
 import re
@@ -18,20 +19,35 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-try:
-    from core.parametric_client import _is_empty_equivalent, _text_similarity
-except ImportError:
-    def _is_empty_equivalent(field: str, value: Any) -> bool:
-        if value is None:
-            return True
-        val_str = str(value).strip()
-        if not val_str:
-            return True
+
+def _is_empty_equivalent(field: str, value: Any) -> bool:
+    """Проверка эквивалентности пустого значения с загрузкой из конфига."""
+    if value is None:
+        return True
+    val_str = str(value).strip()
+    if not val_str:
+        return True
+    # Загружаем empty_values из конфига
+    empty_vals = {}
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        empty_vals = getattr(settings, "empty_values", {})
+        if not empty_vals and hasattr(settings, "validation"):
+            empty_vals = getattr(settings.validation, "empty_values", {})
+    except Exception:
+        pass
+    # Fallback defaults
+    if not empty_vals:
         empty_vals = {
             'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
         }
-        return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
+    return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
 
+
+try:
+    from core.parametric_client import _text_similarity
+except ImportError:
     def _text_similarity(a: str, b: str) -> float:
         if not a or not b:
             return 0.0
@@ -74,7 +90,6 @@ class ValidationResult:
 
 
 class AutoValidator:
-    # Class-level cache для ENS индекса (избегаем повторной загрузки)
     _ens_cache: Dict[str, Any] = {}
 
     def __init__(
@@ -139,11 +154,9 @@ class AutoValidator:
         return None
 
     def _load_ens_index(self):
-        """Загрузка индекса ЕСН с кэшированием (singleton per path)."""
         if not self.ens_index_path:
             return
         cache_key = str(self.ens_index_path)
-        # Проверяем кэш
         if cache_key in AutoValidator._ens_cache:
             self._ens_items = AutoValidator._ens_cache[cache_key]
             logger.info(f"[AutoValidator] ENS index from cache: {len(self._ens_items)} items")
@@ -155,14 +168,6 @@ class AutoValidator:
             self._ens_items = data.get('items', [])
             AutoValidator._ens_cache[cache_key] = self._ens_items
             logger.info(f"[AutoValidator] Loaded {len(self._ens_items)} ENS items for validation")
-        except Exception as e:
-            logger.warning(f"Failed to load ENS index: {e}")
-        try:
-            import pickle
-            with open(self.ens_index_path, 'rb') as f:
-                data = pickle.load(f)
-            self._ens_items = data.get('items', [])
-            logger.info(f"Loaded {len(self._ens_items)} ENS items for validation")
         except Exception as e:
             logger.warning(f"Failed to load ENS index: {e}")
 

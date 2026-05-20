@@ -416,7 +416,7 @@ def process_parametric(text, db, ens_index, llm):
     llm_clients = {}
     settings = get_settings()
     if llm:
-        llm_clients = _init_llm_clients(settings, all_services=True)
+        llm_clients = _init_llm_clients(settings, all_services=False)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return
@@ -503,7 +503,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     # LLM clients
     llm_clients = {}
     if llm:
-        llm_clients = _init_llm_clients(settings, all_services=True)
+        llm_clients = _init_llm_clients(settings, all_services=False)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return 1
@@ -732,7 +732,7 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
     settings = get_settings()
     llm_clients = {}
     if llm:
-        llm_clients = _init_llm_clients(settings, all_services=True)
+        llm_clients = _init_llm_clients(settings, all_services=False)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return
@@ -786,7 +786,7 @@ def diagnose(text, db, ens_index, llm, coating_map):
     settings = get_settings()
     llm_clients = {}
     if llm:
-        llm_clients = _init_llm_clients(settings, all_services=True)
+        llm_clients = _init_llm_clients(settings, all_services=False)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return
@@ -929,7 +929,13 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
     # LLM clients
     llm_clients = {}
     if llm:
-        llm_clients = _init_llm_clients(settings, all_services=True)
+        llm_clients = {}
+        if llm:
+            llm_clients = _init_llm_clients(settings, all_services=False)
+            if not llm_clients:
+                click.echo("❌ LLM requested but no clients available", err=True)
+                return
+            click.echo("🤖 LLM клиенты инициализированы")
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return
