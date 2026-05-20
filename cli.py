@@ -900,21 +900,35 @@ def diagnose(text, db, ens_index, llm, coating_map):
 @cli.command('generate-masks')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
 @click.option('--ens-index', '-i', required=True, help='Путь к индексу ЕНС')
-@click.option('--standard', '-s', required=True, help='Стандарт для генерации маски')
-@click.option('--item-type', '-t', required=True, help='Тип изделия')
+@click.option('--standard', '-s', help='Стандарт для генерации маски (опционально; если не указан — генерируются все)')
+@click.option('--item-type', '-t', help='Тип изделия (опционально; обязателен только при --standard)')
 @click.option('--llm', '-l', is_flag=True, help='Использовать LLM для генерации')
 @click.option('--validate', is_flag=True, help='Валидировать сгенерированную маску')
 @click.option('--min-score', default=0.85, help='Минимальный score для валидации')
-def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score):
-    """Генерация маски для конкретного стандарта и типа изделия через LLM"""
-    from core.mask_database import MaskDatabase
+@click.option('--limit', '-n', default=0, help='Ограничить число стандартов (0 = все, для отладки)')
+def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit):
+    """Генерация масок для стандартов из индекса ЕНС.
+
+    Режимы:
+    1. Без --standard: массовая генерация для всех пар (стандарт, тип) из индекса
+    2. С --standard и --item-type: одиночная генерация для конкретной пары
+    3. С --standard (без --item-type): фильтрация массовой генерации по стандарту
+    """
+    from core.mask_database import MaskDatabase, MaskRecord
     from core.llm_mask_generator import LLMMaskGenerator
     from core.auto_validator import AutoValidator
     from config.settings import get_settings
+    from pathlib import Path
+    import pickle
+
+    if not Path(ens_index).exists():
+        click.echo("❌ Индекс не найден", err=True)
+        return
 
     settings = get_settings()
     mask_db = MaskDatabase(db_path=db)
 
+    # LLM clients
     llm_clients = {}
     if llm:
         llm_clients = _init_llm_clients(settings, all_services=True)
@@ -922,44 +936,140 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score)
             click.echo("❌ LLM requested but no clients available", err=True)
             return
         click.echo("🤖 LLM клиенты инициализированы")
-
-    generator = LLMMaskGenerator(
-        clients=llm_clients,
-        settings=settings,
-        max_retries=3
-    )
-
-    # Получаем примеры из ENS
-    validator = AutoValidator(ens_index_path=ens_index)
-    examples = validator._get_ens_examples(standard, item_type)
-    click.echo(f"📋 Загружено {len(examples)} примеров из ЕНС для {standard} / {item_type}")
-
-    click.echo(f"🎯 Генерация маски для {standard} / {item_type}...")
-    mask, _ = generator.generate_mask(standard, item_type, examples)
-    if mask:
-        click.echo(f"✅ Маска сгенерирована:")
-        click.echo(f"   Паттерн: {mask['pattern'][:80]}...")
-        click.echo(f"   Параметры: {mask['params']}")
-        click.echo(f"   Обязательные: {mask['required']}")
-
-        # Сохраняем в БД
-        from database.mask_database import MaskRecord
-        mask_record = MaskRecord(
-            standard=standard,
-            item_type=item_type,
-            pattern=mask['pattern'],
-            params=mask['params'],
-            required=mask['required'],
-            source='llm',
-            is_active=True
-        )
-        mask_id = mask_db.save_mask(mask_record, auto_activate=True)
-        if mask_id:
-            click.echo(f"✅ Маска сохранена в БД: ID={mask_id}")
-        else:
-            click.echo("⚠️ Не удалось сохранить маску в БД")
+        generator = LLMMaskGenerator(clients=llm_clients, settings=settings, max_retries=3)
     else:
-        click.echo("❌ Не удалось сгенерировать маску")
+        generator = None
+        click.echo("⚠️ Режим без LLM — только просмотр/валидация существующих")
+
+    # === РЕЖИМ 1: Одиночная генерация для конкретного стандарта + типа ===
+    if standard and item_type:
+        validator = AutoValidator(ens_index_path=ens_index)
+        examples = validator._get_ens_examples(standard, item_type)
+        click.echo(f"📋 Загружено {len(examples)} примеров из ЕНС для {standard} / {item_type}")
+
+        if not examples:
+            click.echo("❌ Нет примеров для генерации")
+            return
+
+        if not generator:
+            click.echo("❌ Для генерации маски укажите --llm")
+            return
+
+        click.echo(f"🎯 Генерация маски для {standard} / {item_type}...")
+        mask, _ = generator.generate_mask(standard, item_type, examples)
+        if mask:
+            click.echo(f"✅ Маска сгенерирована:")
+            click.echo(f" Паттерн: {mask['pattern'][:80]}...")
+            click.echo(f" Параметры: {mask['params']}")
+            click.echo(f" Обязательные: {mask['required']}")
+
+            # Валидация если запрошена
+            if validate:
+                click.echo("🔍 Валидация маски...")
+                validation = validator.validate_mask(
+                    mask['pattern'], mask['params'], mask['required'],
+                    standard, item_type, ens_examples=examples
+                )
+                click.echo(f" Score: {validation.score:.2f}, Passed: {validation.passed}")
+                auto_score = validation.score
+            else:
+                auto_score = 0.0
+
+            # Сохраняем в БД
+            mask_record = MaskRecord(
+                standard=standard,
+                item_type=item_type.upper(),
+                pattern=mask['pattern'],
+                params=mask['params'],
+                required=mask['required'],
+                source='llm',
+                auto_score=auto_score,
+                is_active=True if auto_score >= min_score else (auto_score == 0.0)
+            )
+            mask_id = mask_db.save_mask(mask_record, auto_activate=True, replace_existing=True)
+            if mask_id:
+                click.echo(f"✅ Маска сохранена в БД: ID={mask_id}")
+            else:
+                click.echo("⚠️ Не удалось сохранить маску в БД")
+        else:
+            click.echo("❌ Не удалось сгенерировать маску")
+        return
+
+    # === РЕЖИМ 2: Массовая генерация из индекса (как в эталонном коммите 9b083803) ===
+    with open(ens_index, 'rb') as f:
+        data = pickle.load(f)
+    items = data.get('items', [])
+
+    # Группировка по стандартам (тип из ЕНС: 'тип_изделия' = 'Наименование типа')
+    standards = {}
+    for item in items:
+        std = item.get('стандарт') or item.get('нтд') or 'UNKNOWN'
+        itype = item.get('тип_изделия') or item.get('наименование_типа') or item.get('тип') or 'unknown'
+        key = (std, itype)
+        if key not in standards:
+            standards[key] = []
+        standards[key].append(item)
+
+    # Фильтр: минимум 10 примеров
+    standards = {k: v for k, v in standards.items() if len(v) >= 10}
+
+    # === ФИЛЬТР ПО СТАНДАРТУ (если указан только --standard без --item-type) ===
+    if standard:
+        standard_normalized = standard.lower().replace(' ', '')
+        matched = {}
+        for (std, itype), examples in standards.items():
+            std_str = str(std or '').lower().replace(' ', '')
+            if standard_normalized in std_str or std_str in standard_normalized:
+                matched[(std, itype)] = examples
+        standards = matched
+        click.echo(f"🔍 Фильтр по стандарту '{standard}': найдено {len(standards)} пар")
+        if not standards:
+            click.echo("❌ Ничего не найдено")
+            return
+
+    # Ограничение для отладки
+    all_items = list(standards.items())
+    click.echo(f"🔍 Найдено {len(all_items)} уникальных пар (тип + стандарт) с >=10 примерами")
+    if limit and limit > 0:
+        standards = dict(all_items[:limit])
+        click.echo(f"🔧 Отладочный режим: обрабатываем {len(standards)} пар:")
+        for (std, itype), ex_list in all_items[:limit]:
+            real_type = ex_list[0].get('тип_изделия') or ex_list[0].get('тип', itype)
+            click.echo(f" - {real_type} / {std} ({len(ex_list)} примеров)")
+
+    stats = {'existing': 0, 'generated': 0, 'activated': 0}
+
+    with click.progressbar(standards.items(), label='Генерация') as bar:
+        for (std, itype), examples in bar:
+            existing = mask_db.get_mask(std, itype)
+            if existing and existing.is_active:
+                stats['existing'] += 1
+                continue
+
+            if generator:
+                # === ИЗВЛЕКАЕМ ТОЛЬКО НАИМЕНОВАНИЯ (строки), не полные словари ЕНС ===
+                limited_examples = examples[:20]
+                mask, _ = generator.generate_mask(std, itype, limited_examples)
+
+                if mask:
+                    # Нормализуем item_type в uppercase (стандарты: БОЛТ, ВИНТ, ШАЙБА)
+                    item_type_normalized = itype.upper()
+                    temp_mask = MaskRecord(
+                        standard=std, item_type=item_type_normalized,
+                        pattern=mask['pattern'], params=mask['params'],
+                        required=mask['required'], auto_score=0.0,
+                        is_active=True, source='llm'  # Активируем сразу
+                    )
+                    mask_db.save_mask(temp_mask, auto_activate=True, replace_existing=True)
+                    stats['generated'] += 1
+                    if temp_mask.auto_score >= min_score:
+                        stats['activated'] += 1
+
+    click.echo(f"\n📊 Результат:")
+    click.echo(f" Уже активных: {stats['existing']}")
+    click.echo(f" Сгенерировано: {stats['generated']}")
+    click.echo(f" Активировано: {stats['activated']}")
+
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db',
