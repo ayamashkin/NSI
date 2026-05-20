@@ -531,6 +531,7 @@ class ParametricENSClient:
                         ens_name=None,
                         mdm_key=None,
                         matched_params=extracted_params,
+                        ens_params_mask=extracted_params,
                         score=0.0,
                         match_type='regex_only',
                         confidence=regex_confidence,

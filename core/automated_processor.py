@@ -1017,6 +1017,9 @@ class AutomatedParametricProcessor:
             logger.debug("[PARAM_MATCH] Remapped params: %s", final_matched_params)
 
         raw_params = fallback_params if fallback_params else match_result.matched_params
+        substituted_params = dict(raw_params) if raw_params else {}
+        substitution_info = None
+
         logger.debug("[PARAM_MATCH] Coating substitution check: raw_params=%s", raw_params)
         if raw_params and raw_params.get('покрытие'):
             logger.debug("[PARAM_MATCH] Coating substitution: has покрытие='%s', calling _apply_coating_substitution", raw_params.get('покрытие'))
@@ -1024,9 +1027,10 @@ class AutomatedParametricProcessor:
                 ens_candidates_sub = self._get_cached_ens_candidates(effective_standard, mask.item_type)
                 logger.debug("[PARAM_MATCH] Coating substitution: got %d candidates", len(ens_candidates_sub))
                 if ens_candidates_sub:
-                    _, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
+                    substituted_params, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
                     if substitution_info:
-                        logger.info("[PARAM_MATCH] Coating substitution result: %s", substitution_info)
+                        logger.info("[PARAM_MATCH] Coating substitution applied: %s -> %s",
+                                   substitution_info['original'], substitution_info['corrected'])
                     else:
                         logger.debug("[PARAM_MATCH] Coating substitution: no substitution applied")
                 else:
@@ -1044,10 +1048,8 @@ class AutomatedParametricProcessor:
                 logger.info("[PARAM_MATCH] ENS candidates: count=%d, standard=%s, item_type=%s",
                             len(ens_candidates), effective_standard, mask.item_type)
 
-                search_params = final_matched_params
-                if substitution_info and ens_candidates:
-                    search_params = dict(final_matched_params)
-                    search_params['покрытие'] = substitution_info['corrected']
+                search_params = substituted_params if substituted_params else final_matched_params
+                if substitution_info and ens_candidates and 'покрытие' in search_params:
                     logger.info("[PARAM_MATCH] Using substituted params for search: %s", search_params)
 
                 if search_params:
@@ -1237,6 +1239,9 @@ class AutomatedParametricProcessor:
             logger.debug("[PARAM_MATCH] Normalized ens_params: %s", ens_params_from_index)
 
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
+        # Если parametric_client вернул regex_only — ens_params_mask уже заполнен extracted_params
+        if not ens_params_mask and fallback_params:
+            ens_params_mask = fallback_params
         if not ens_params_mask and final_ens_name:
             if mask and mask.pattern:
                 try:
@@ -1271,6 +1276,10 @@ class AutomatedParametricProcessor:
         if substitution_info and final_ens_code:
             match_type_out = 'coating_substituted'
             match_type_ru = 'Совпадение после подбора правильного покрытия'
+            # Coating substitution привела к fuzzy match — считаем success
+            if final_score < _get_matching_config().success_threshold:
+                final_score = _get_matching_config().success_threshold
+                logger.info("[PARAM_MATCH] Coating_substituted match: forcing success threshold score=%.2f", final_score)
         elif is_name_exact and final_ens_code:
             match_type_out = 'name_exact'
             match_type_ru = 'Совпадение по наименованию'
@@ -1338,8 +1347,8 @@ class AutomatedParametricProcessor:
                 'debug_candidates': debug_candidates[:15] if debug_candidates else [],
                 'fuzzy_score': round(fuzzy_score, 3) if fuzzy_score else 0,
                 'match_result_score': round(match_result.score, 3) if match_result else 0,
-                'v2_score': round(v2_score, 3) if 'v2_score' in locals() else None,
-                'v2_computed': v2_computed if 'v2_computed' in locals() else False,
+                'v2_score': round(self.details.get('v2_score', 0), 3) if self.details and 'v2_score' in self.details else None,
+                'v2_computed': self.details.get('v2_computed', False) if self.details else False,
                 'coating_substitution': substitution_info,
                 'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
                 **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().debug_per_parameter and fuzzy_debug else {}),

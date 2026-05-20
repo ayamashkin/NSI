@@ -61,7 +61,7 @@ api:
     # MTS AI API (cotype) — OpenAI-compatible
     # Документация: https://demo6-fundres.dev.mts.ai/
     # Веб-интерфейс: https://cotype6.dev.mts.ai/
-    base_url: "https://demo6-fundres.dev.mts.ai/"
+    base_url: "https://demo3-fundres.dev.mts.ai/"
 
     # API ключ (Authorization: Bearer {API_KEY})
     # В веб-интерфейсе https://cotype6.dev.mts.ai/ ключ вводится в поле OpenAI API-ключ
@@ -72,7 +72,7 @@ api:
 
     # Модель по умолчанию
     # Доступные: cotype_pro_2.5
-    default_model: "cotype_pro_2.5"
+    default_model: "cotype_pro_2.6"
 
 # =============================================================================
 # Database Configuration
@@ -245,7 +245,7 @@ mask_generation:
   #default_service: "openwebui"
 
   # Модель для генерации масок
-  default_model: "cotype_pro_2.5"
+  default_model: "cotype_pro_2.6"
   #default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
 
   # Температура для LLM (0.0 = детерминированный, 1.0 = креативный)
