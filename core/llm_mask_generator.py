@@ -1,12 +1,12 @@
 """
 LLM Mask Generator
-Генерация regex-маски через LLM с fallback на другие провайдеры.
+Генерация regex-маски через LLM. Только default_service — никакого fallback на других провайдеров.
 
 LAST_FIXES:
- 2026-05-20 08:47 UTC+3 — generate_mask: fallback на всех провайдеров при transient
- ошибках (503/502/504/timeout/connection). Exponential backoff между attempt.
- 2026-05-18 21:45 UTC+3 — _build_provider_priority: только указанный в конфиге default_service,
- без fallback на всех клиентов. Если сервис не указан — ошибка.
+ 2026-05-20 09:23 UTC+3 — generate_mask: строго только provider_priority (default_service),
+ без fallback на других клиентов. Transient ошибки (503/timeout) → retry с exponential backoff
+ на ТОМ ЖЕ сервисе. Non-transient (400/auth) → abort без retry.
+ 2026-05-18 21:45 UTC+3 — _build_provider_priority: только указанный в конфиге default_service.
 """
 
 import json
@@ -81,7 +81,7 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
 
 
 class LLMMaskGenerator:
-    """Генерация regex-маски через LLM с fallback на другие провайдеры."""
+    """Генерация regex-маски через LLM. Строго один провайдер — default_service из конфига."""
 
     def __init__(self, clients: Dict[str, BaseLLMClient], settings=None, max_retries: int = 3):
         self.clients = clients
@@ -99,26 +99,26 @@ class LLMMaskGenerator:
 
     @staticmethod
     def _is_transient_error(error_msg: str) -> bool:
-        """Определить, является ли ошибка временной (retry/fallback-worthy)."""
+        """Определить, является ли ошибка временной (retry-worthy)."""
         if not error_msg:
             return False
         lower = error_msg.lower()
         transient_keywords = [
             '503', '502', '504', 'timeout', 'connection',
             'temporary', 'unavailable', 'service unavailable',
-            'too many requests', '429', 'rate limit', 'internal server error', '500'
+            'too many requests', '429', 'rate limit',
+            'internal server error', '500', 'read timed out',
+            'connecttimeout', 'connection aborted'
         ]
         return any(kw in lower for kw in transient_keywords)
 
     # --------------------------------------------------------------------------
-    # PROVIDER PRIORITY
+    # PROVIDER PRIORITY — строго только default_service
     # --------------------------------------------------------------------------
 
     def _build_provider_priority(self) -> List[str]:
-        """Построить приоритет провайдеров: только default_service из конфига.
-        Если default_service не указан — ошибка.
-        Если default_service указан, но отсутствует в clients — ошибка.
-        НЕ добавляем остальных клиентов как fallback."""
+        """Построить приоритет провайдеров: ТОЛЬКО default_service из конфига.
+        Никакого fallback на других клиентов."""
         priority = []
         default_service = None
 
@@ -153,11 +153,12 @@ class LLMMaskGenerator:
                 "or service in prompts.yaml"
             )
 
-        logger.info("[LLM] Final provider_priority (strict, no fallback): %s", priority)
+        # Fallback на других клиентов УДАЛЁН — только default_service
+        logger.info("[LLM] Final provider_priority (strict, single): %s", priority)
         return priority
 
     # --------------------------------------------------------------------------
-    # MASK GENERATION
+    # MASK GENERATION — строго provider_priority, retry с backoff на том же сервисе
     # --------------------------------------------------------------------------
 
     def generate_mask(
@@ -167,33 +168,39 @@ class LLMMaskGenerator:
         examples: List[Dict[str, Any]],
         context: Optional[Dict] = None
     ) -> tuple[Optional[Dict[str, Any]], None]:
-        """Генерация regex-маски через LLM с fallback на другие провайдеры при transient ошибках."""
+        """Генерация regex-маски через LLM.
+
+        - Только default_service из конфига (provider_priority)
+        - Transient ошибки (503/timeout) → retry с exponential backoff на ТОМ ЖЕ сервисе
+        - Non-transient ошибки (400/auth) → abort, retry бессмысленен
+        """
         prompt = self._build_prompt(standard, item_type, examples, context)
         self._save_debug_prompt(standard, item_type, prompt)
 
-        # Все доступные провайдеры: primary first, затем fallback
-        all_providers = list(dict.fromkeys(
-            self.provider_priority + list(self.clients.keys())
-        ))
-        logger.info("[LLM] Provider pool for this request: %s", all_providers)
-
         for attempt in range(1, self.max_retries + 1):
-            transient_happened = False
-            for provider in all_providers:
+            transient_occurred = False
+
+            for provider in self.provider_priority:
                 logger.info("Attempt %d/%d via %s", attempt, self.max_retries, provider)
                 result = self._call_llm(provider, prompt, attempt)
 
                 if result is None:
-                    # Не-transient ошибка (например, 400 Bad Request) — пропускаем этого провайдера
-                    continue
+                    # Non-transient error (400 Bad Request, auth failure, invalid model и т.д.)
+                    # Retry бессмысленен — та же ошибка повторится
+                    logger.warning(
+                        "Non-transient failure from %s (attempt %d), aborting retries",
+                        provider, attempt
+                    )
+                    return None, None
 
                 if result.get('_transient_error'):
-                    transient_happened = True
+                    # Transient error — worth retry с backoff
                     logger.warning(
                         "Transient error from %s (attempt %d): %s",
                         provider, attempt, result.get('error')
                     )
-                    continue  # Пробуем следующего провайдера
+                    transient_occurred = True
+                    continue  # к следующему provider (обычно их 1)
 
                 # Успешный ответ от LLM
                 response = result['content']
@@ -209,32 +216,39 @@ class LLMMaskGenerator:
                     return mask, None
                 else:
                     logger.warning(
-                        "Failed to parse valid mask from %s (attempt %d)",
+                        "Failed to parse valid mask from %s (attempt %d), retrying",
                         provider, attempt
                     )
-                    # Ответ получен, но парсинг не удался — это не transient,
-                    # можно retry на любом провайдере
+                    # Парсинг не удался — не transient, но retry с более высокой temperature
+                    continue
 
-            if transient_happened and attempt < self.max_retries:
-                # Exponential backoff перед следующей попыткой
+            # Если была transient ошибка и ещё есть попытки — backoff
+            if transient_occurred and attempt < self.max_retries:
                 sleep_time = min(2 ** attempt, 30)
-                logger.info("Transient errors encountered. Sleeping %ds before attempt %d...", sleep_time, attempt + 1)
+                logger.info(
+                    "Transient errors on %s. Sleeping %ds before attempt %d...",
+                    self.provider_priority, sleep_time, attempt + 1
+                )
                 time.sleep(sleep_time)
 
-        logger.error("Failed to generate mask after %d attempts across %d providers", self.max_retries, len(all_providers))
+        logger.error(
+            "Failed to generate mask after %d attempts via %s",
+            self.max_retries, self.provider_priority
+        )
         return None, None
 
     # --------------------------------------------------------------------------
-    # LLM CALL — возвращает Dict с metadata или {_transient_error: True}
+    # LLM CALL — transient vs non-transient
     # --------------------------------------------------------------------------
 
     def _call_llm(self, provider: str, prompt: str, attempt: int) -> Optional[Dict[str, Any]]:
         """
         Вызов LLM через конкретного провайдера.
-        Возвращает:
+
+        Returns:
           - dict с content/provider/model/temperature при успехе
           - dict с _transient_error=True при transient ошибке (503, timeout и т.д.)
-          - None при не-transient ошибке (400, auth error и т.д.)
+          - None при non-transient ошибке (400, auth error и т.д.) — retry бессмысленен
         """
         client = self.clients.get(provider)
         if not client:
