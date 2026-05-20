@@ -3,13 +3,13 @@ AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
 
 LAST_FIXES:
- 2026-05-20 2026-05-20 11:49 UTC+3 — _match_param_keys: F1-like score (2*matched/(len_a+len_b)),
+ 2026-05-20 2026-05-20 12:09 UTC+3 — _match_param_keys: F1-like score (2*matched/(len_a+len_b)),
    threshold снижен до 0.20. Ранее score=matched/max(len_a,len_b) давал 1/9=0.11
-   для номинальный_диаметр_резьбы ↔ наружный_диаметр_вписанного_круга_… → match не
+   для номинальный_диаметр_резьбы vs наружный_диаметр_вписанного_круга_… → match не
    срабатывал, все тесты падали с missing → score=0.00.
- 2026-05-20 2026-05-20 11:49 UTC+3 — coating comparison: threshold 0.50 (было 0.80) + subset logic
-   (tokens_a ⊆ tokens_b → sim=1.0). Ранее "Кд" vs "Кд3.хр" давал sim=0.50 < 0.80 → mismatch.
- 2026-05-20 2026-05-20 11:49 UTC+3 — skip_params: убраны нтд_1 и standard (они валидные regex-параметры).
+ 2026-05-20 2026-05-20 12:09 UTC+3 — coating comparison: threshold 0.50 (было 0.80) + subset logic
+   (tokens_a subseteq tokens_b → sim=1.0). Ранее "Кд" vs "Кд3.хр" давал sim=0.50 < 0.80 → mismatch.
+ 2026-05-20 2026-05-20 12:09 UTC+3 — skip_params: убраны нтд_1 и standard (они валидные regex-параметры).
  2026-05-20 12:52 UTC+3 — _test_pattern: полное переключение на V2 fuzzy-сравнение.
 """
 import re
@@ -376,7 +376,8 @@ class AutoValidator:
             checked += 1
 
             # Сравниваем значения
-            is_coating = (ext_key == 'покрытие') or (exp_key and 'покрытие' in exp_key) or                          (ext_key == 'технические_характеристики') or (exp_key and 'технические_характеристики' in exp_key)
+            is_coating = (ext_key == 'покрытие') or (exp_key and 'покрытие' in exp_key) or \
+                         (ext_key == 'технические_характеристики') or (exp_key and 'технические_характеристики' in exp_key)
 
             if is_coating:
                 norm_a = self._normalize_coating(ext_str)

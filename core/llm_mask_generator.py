@@ -3,15 +3,15 @@ LLM Mask Generator
 Генерация regex-маски через LLM. Только default_service — никакого fallback на других провайдеров.
 
 LAST_FIXES:
- 2026-05-20 2026-05-20 11:51 UTC+3 — _parse_response: добавлен _fix_json_escapes для обработки LLM-ответов
-   с невалидными JSON escape-последовательностями (\s, \d, \w, \., \- и т.д.).
-   Ранее json.loads падал с Invalid \escape при наличии \s внутри pattern-строки,
+ 2026-05-20 2026-05-20 12:07 UTC+3 — _parse_response: добавлен _fix_json_escapes для обработки LLM-ответов
+   с невалидными JSON escape-последовательностями (backslash-s, backslash-d, backslash-w и т.д.).
+   Ранее json.loads падал с Invalid backslash-escape при наличии backslash-s внутри pattern-строки,
    что приводило к retry и потере tokens на повторные запросы.
- 2026-05-20 2026-05-20 11:51 UTC+3 — generate_mask: возвращает metadata (provider, model, temperature,
+ 2026-05-20 2026-05-20 12:07 UTC+3 — generate_mask: возвращает metadata (provider, model, temperature,
    tokens_prompt, tokens_completion, warnings).
- 2026-05-20 2026-05-20 11:51 UTC+3 — _build_prompt: optional_params переведены на русские имена.
- 2026-05-20 2026-05-20 11:51 UTC+3 — _build_prompt: visible_fields detection теперь требует standalone
-   токен для чисто числовых значений (r'(?<!\d)8(?!\d)').
+ 2026-05-20 2026-05-20 12:07 UTC+3 — _build_prompt: optional_params переведены на русские имена.
+ 2026-05-20 2026-05-20 12:07 UTC+3 — _build_prompt: visible_fields detection теперь требует standalone
+   токен для чисто числовых значений (r"(?<!\d)8(?!\d)").
  2026-05-20 09:23 UTC+3 — generate_mask: строго только provider_priority (default_service).
  2026-05-18 21:45 UTC+3 — _build_provider_priority: только указанный в конфиге default_service.
 """
@@ -87,30 +87,20 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
 def _fix_json_escapes(text: str) -> str:
     """
     Исправить невалидные JSON escape-последовательности, которые LLM генерирует
-    внутри regex pattern (например: \s, \d, \w, \., \-, \( и т.д.).
+    внутри regex pattern (например: backslash-s, backslash-d, backslash-w, backslash-dot, backslash-minus).
 
-    В JSON валидные escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX.
-    Всё остальное (\s, \d и т.д.) — невалидно и вызывает JSONDecodeError.
+    В JSON валидные escapes: backslash-quote, backslash-backslash, slash, b, f, n, r, t, uXXXX.
+    Все остальное (backslash-s, backslash-d и т.д.) — невалидно и вызывает JSONDecodeError.
 
     Стратегия: заменяем одиночный backslash перед невалидным символом на двойной.
     """
     valid_escapes = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'}
 
-    def repl(m):
-        # m.group(0) — backslash + следующий символ
-        char = m.group(1)
-        if char in valid_escapes:
-            return m.group(0)  # оставляем как есть
-        # Удваиваем backslash: \s -> \\s
-        return '\\\\' + char
-
-    # Находим backslash + любой символ (кроме уже удвоенного backslash)
-    # Используем negative lookbehind чтобы не трогать \
     result = []
     i = 0
     while i < len(text):
         if text[i] == '\\' and i + 1 < len(text):
-            # Проверяем, не является ли это уже \
+            # Проверяем, не является ли это уже двойным backslash
             if i > 0 and text[i-1] == '\\':
                 result.append(text[i])
                 i += 1
@@ -411,7 +401,7 @@ class LLMMaskGenerator:
     def _parse_response(self, response: str, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
         """Извлечь и валидировать JSON из LLM ответа.
 
-        FIX: при JSONDecodeError из-за невалидных escape (\s, \d и т.д. внутри pattern)
+        FIX: при JSONDecodeError из-за невалидных escape (backslash-s, backslash-d и т.д. внутри pattern)
         пробуем _fix_json_escapes перед повторным парсингом.
         """
         if not response:
@@ -835,7 +825,7 @@ class LLMMaskGenerator:
     # --------------------------------------------------------------------------
 
     def _sanitize_filename(self, text: str) -> str:
-        sanitized = re.sub(r'[\\/:\*?"<>|]', '_', str(text))
+        sanitized = re.sub(r'[\\/:\\*?"<>|]', '_', str(text))
         sanitized = re.sub(r'_+', '_', sanitized)
         return sanitized.strip('_')[:80]
 
