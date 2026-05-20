@@ -3,14 +3,17 @@ LLM Mask Generator
 Генерация regex-маски через LLM с fallback на другие провайдеры.
 
 LAST_FIXES:
+ 2026-05-20 08:47 UTC+3 — generate_mask: fallback на всех провайдеров при transient
+ ошибках (503/502/504/timeout/connection). Exponential backoff между attempt.
  2026-05-18 21:45 UTC+3 — _build_provider_priority: только указанный в конфиге default_service,
-   без fallback на всех клиентов. Если сервис не указан — ошибка.
+ без fallback на всех клиентов. Если сервис не указан — ошибка.
 """
 
 import json
 import logging
 import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -19,6 +22,7 @@ from api_clients.base import BaseLLMClient
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
 
 def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -75,6 +79,7 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+
 class LLMMaskGenerator:
     """Генерация regex-маски через LLM с fallback на другие провайдеры."""
 
@@ -87,6 +92,23 @@ class LLMMaskGenerator:
             "LLMMaskGenerator initialized with %d clients, priority: %s",
             len(clients), self.provider_priority
         )
+
+    # --------------------------------------------------------------------------
+    # TRANSIENT ERROR DETECTION
+    # --------------------------------------------------------------------------
+
+    @staticmethod
+    def _is_transient_error(error_msg: str) -> bool:
+        """Определить, является ли ошибка временной (retry/fallback-worthy)."""
+        if not error_msg:
+            return False
+        lower = error_msg.lower()
+        transient_keywords = [
+            '503', '502', '504', 'timeout', 'connection',
+            'temporary', 'unavailable', 'service unavailable',
+            'too many requests', '429', 'rate limit', 'internal server error', '500'
+        ]
+        return any(kw in lower for kw in transient_keywords)
 
     # --------------------------------------------------------------------------
     # PROVIDER PRIORITY
@@ -131,11 +153,6 @@ class LLMMaskGenerator:
                 "or service in prompts.yaml"
             )
 
-        # УДАЛЕНО: цикл добавления всех остальных клиентов как fallback
-        # for provider in self.clients.keys():
-        #     if provider not in priority:
-        #         priority.append(provider)
-
         logger.info("[LLM] Final provider_priority (strict, no fallback): %s", priority)
         return priority
 
@@ -150,46 +167,74 @@ class LLMMaskGenerator:
         examples: List[Dict[str, Any]],
         context: Optional[Dict] = None
     ) -> tuple[Optional[Dict[str, Any]], None]:
-        """Генерация regex-маски через LLM с fallback на другие провайдеры."""
+        """Генерация regex-маски через LLM с fallback на другие провайдеры при transient ошибках."""
         prompt = self._build_prompt(standard, item_type, examples, context)
         self._save_debug_prompt(standard, item_type, prompt)
 
-        for attempt in range(1, self.max_retries + 1):
-            for provider in self.provider_priority:
-                logger.info("Attempt %d/%d via %s", attempt, self.max_retries, provider)
-                response_data = self._call_llm(provider, prompt, attempt)
-                if response_data:
-                    response = response_data['content']
-                    self._save_debug_response(
-                        standard, item_type, attempt, response,
-                        provider=response_data['provider'],
-                        model=response_data['model'],
-                        temperature=response_data['temperature']
-                    )
-                    mask = self._parse_response(response, standard, item_type)
-                    if mask:
-                        logger.info("Generated mask via %s (attempt %d)", provider, attempt)
-                        return mask, None
-                    else:
-                        logger.warning(
-                            "Failed to parse response from %s (attempt %d)",
-                            provider, attempt
-                        )
-                else:
-                    logger.warning("No response from %s (attempt %d)", provider, attempt)
+        # Все доступные провайдеры: primary first, затем fallback
+        all_providers = list(dict.fromkeys(
+            self.provider_priority + list(self.clients.keys())
+        ))
+        logger.info("[LLM] Provider pool for this request: %s", all_providers)
 
-        logger.error("Failed to generate mask after %d attempts", self.max_retries)
+        for attempt in range(1, self.max_retries + 1):
+            transient_happened = False
+            for provider in all_providers:
+                logger.info("Attempt %d/%d via %s", attempt, self.max_retries, provider)
+                result = self._call_llm(provider, prompt, attempt)
+
+                if result is None:
+                    # Не-transient ошибка (например, 400 Bad Request) — пропускаем этого провайдера
+                    continue
+
+                if result.get('_transient_error'):
+                    transient_happened = True
+                    logger.warning(
+                        "Transient error from %s (attempt %d): %s",
+                        provider, attempt, result.get('error')
+                    )
+                    continue  # Пробуем следующего провайдера
+
+                # Успешный ответ от LLM
+                response = result['content']
+                self._save_debug_response(
+                    standard, item_type, attempt, response,
+                    provider=result['provider'],
+                    model=result['model'],
+                    temperature=result['temperature']
+                )
+                mask = self._parse_response(response, standard, item_type)
+                if mask:
+                    logger.info("Generated mask via %s (attempt %d)", provider, attempt)
+                    return mask, None
+                else:
+                    logger.warning(
+                        "Failed to parse valid mask from %s (attempt %d)",
+                        provider, attempt
+                    )
+                    # Ответ получен, но парсинг не удался — это не transient,
+                    # можно retry на любом провайдере
+
+            if transient_happened and attempt < self.max_retries:
+                # Exponential backoff перед следующей попыткой
+                sleep_time = min(2 ** attempt, 30)
+                logger.info("Transient errors encountered. Sleeping %ds before attempt %d...", sleep_time, attempt + 1)
+                time.sleep(sleep_time)
+
+        logger.error("Failed to generate mask after %d attempts across %d providers", self.max_retries, len(all_providers))
         return None, None
 
     # --------------------------------------------------------------------------
-    # LLM CALL — возвращает Dict с metadata
+    # LLM CALL — возвращает Dict с metadata или {_transient_error: True}
     # --------------------------------------------------------------------------
 
     def _call_llm(self, provider: str, prompt: str, attempt: int) -> Optional[Dict[str, Any]]:
         """
         Вызов LLM через конкретного провайдера.
-        Возвращает dict: {content: str, provider: str, model: str, temperature: float}
-        или None при ошибке.
+        Возвращает:
+          - dict с content/provider/model/temperature при успехе
+          - dict с _transient_error=True при transient ошибке (503, timeout и т.д.)
+          - None при не-transient ошибке (400, auth error и т.д.)
         """
         client = self.clients.get(provider)
         if not client:
@@ -221,7 +266,6 @@ class LLMMaskGenerator:
 
             # response — dict с success, content, raw, error, model
             if response and response.get('success'):
-                # Если content уже dict (пред-парсинг), сериализуем в JSON для единообразия
                 content = response.get('content')
                 if isinstance(content, dict):
                     logger.debug(
@@ -234,7 +278,6 @@ class LLMMaskGenerator:
                         'model': model,
                         'temperature': temperature
                     }
-                # Если есть raw — берем raw
                 raw = response.get('raw', '')
                 if raw:
                     return {
@@ -243,7 +286,6 @@ class LLMMaskGenerator:
                         'model': model,
                         'temperature': temperature
                     }
-                # Если raw нет, но content есть (не dict) — берем content
                 if content and not isinstance(content, dict):
                     return {
                         'content': str(content),
@@ -258,11 +300,18 @@ class LLMMaskGenerator:
                 return None
             else:
                 error_msg = response.get('error', 'Unknown error') if response else 'No response'
-                logger.warning("LLM call failed: %s", error_msg)
+                if self._is_transient_error(error_msg):
+                    logger.warning("[LLM] Transient error from %s: %s", provider, error_msg)
+                    return {'_transient_error': True, 'error': error_msg}
+                logger.warning("LLM call failed (non-transient): %s", error_msg)
                 return None
 
         except Exception as e:
-            logger.warning("LLM call failed: %s", e)
+            error_msg = str(e)
+            if self._is_transient_error(error_msg):
+                logger.warning("[LLM] Transient exception from %s: %s", provider, error_msg)
+                return {'_transient_error': True, 'error': error_msg}
+            logger.warning("LLM call failed (non-transient exception): %s", error_msg)
             return None
 
     # --------------------------------------------------------------------------
@@ -389,7 +438,7 @@ class LLMMaskGenerator:
         return (
             "Ты — эксперт по регулярным выражениям. Создай Python-совместимую regex-маску "
             "для извлечения параметров из наименований изделий.\n\n"
-            "Используй named groups (?P<name>...) для захвата значений.\n\n"
+            "Используй named groups (?P...) для захвата значений.\n\n"
             "### ВХОДНЫЕ ДАННЫЕ\n"
             "Тип изделия: {item_type}\n"
             "Стандарт: {standard}\n"
@@ -398,9 +447,9 @@ class LLMMaskGenerator:
             "### ТРЕБУЕМЫЙ ВЫВОД\n"
             "```json\n"
             "{{\n"
-            "  \"pattern\": \"...\",\n"
-            "  \"params\": {params_list},\n"
-            "  \"required\": {required_list}\n"
+            " \"pattern\": \"...\",\n"
+            " \"params\": {params_list},\n"
+            " \"required\": {required_list}\n"
             "}}\n"
             "```\n"
         )
@@ -455,8 +504,8 @@ class LLMMaskGenerator:
                         selected.append(ex)
                         seen_patterns.add(pattern_key)
                         break
-            if len(selected) >= n // 2:
-                break
+                if len(selected) >= n // 2:
+                    break
 
         random.seed(42)
         remaining = [ex for ex in examples if ex not in selected]
@@ -553,8 +602,8 @@ class LLMMaskGenerator:
         # standard должен быть первым
         if 'standard' not in visible_field_names and 'standard' in field_name_map:
             visible_field_names.insert(0, 'standard')
-        if field_name_map['standard'] not in regex_fields:
-            regex_fields.insert(0, field_name_map['standard'])
+            if field_name_map['standard'] not in regex_fields:
+                regex_fields.insert(0, field_name_map['standard'])
 
         display_fields = [f for f in relevant_fields if f not in skip_fields][:15]
 
@@ -565,15 +614,15 @@ class LLMMaskGenerator:
             if not name:
                 continue
 
-            filled_fields = [f"  Наименование: {name}"]
+            filled_fields = [f" Наименование: {name}"]
             for field in display_fields:
                 val = ex.get(field)
                 if val is not None and str(val).strip():
-                    filled_fields.append(f"  {field}: {val}")
+                    filled_fields.append(f" {field}: {val}")
 
             missing_fields = [f for f in display_fields if not ex.get(f) or not str(ex.get(f)).strip()]
             if missing_fields:
-                filled_fields.append(f"  [Отсутствуют: {', '.join(missing_fields)}]")
+                filled_fields.append(f" [Отсутствуют: {', '.join(missing_fields)}]")
 
             visible_parts = []
             for field in visible_field_names:
@@ -590,14 +639,14 @@ class LLMMaskGenerator:
 
             structure_lines = []
             if visible_parts:
-                structure_lines.append("  Видимые: " + ' '.join(visible_parts))
+                structure_lines.append(" Видимые: " + ' '.join(visible_parts))
             if invisible_parts:
-                structure_lines.append("  Скрытые: " + ', '.join(invisible_parts))
+                structure_lines.append(" Скрытые: " + ', '.join(invisible_parts))
 
             examples_lines.append(
                 f"{i}. Исходное: \"{name}\"\n" +
                 "\n".join(structure_lines) + "\n" +
-                "  Параметры:\n" +
+                " Параметры:\n" +
                 "\n".join(filled_fields)
             )
 
@@ -607,13 +656,13 @@ class LLMMaskGenerator:
         stats_lines = []
         for k in visible_field_names:
             if k in field_name_map:
-                stats_lines.append(f"  {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
+                stats_lines.append(f" {field_name_map[k]}: {field_stats.get(k, total)} из {total}")
         if invisible_field_names:
-            stats_lines.append("  --- Скрытые (не в regex): ---")
+            stats_lines.append(" --- Скрытые (не в regex): ---")
             for k in invisible_field_names:
                 if k in field_name_map:
                     stats_lines.append(
-                        f"  {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в статистике, не в шаблоне]"
+                        f" {field_name_map[k]}: {field_stats.get(k, total)} из {total} [в статистике, не в шаблоне]"
                     )
         stats_text = "\n".join(stats_lines) if stats_lines else "Нет статистики"
 
@@ -655,7 +704,7 @@ class LLMMaskGenerator:
     # --------------------------------------------------------------------------
 
     def _sanitize_filename(self, text: str) -> str:
-        sanitized = re.sub(r'[\\/:*?"<>|]', '_', str(text))
+        sanitized = re.sub(r'[\\\/:\*?"<>|]', '_', str(text))
         sanitized = re.sub(r'_+', '_', sanitized)
         return sanitized.strip('_')[:80]
 
