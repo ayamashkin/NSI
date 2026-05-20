@@ -2,8 +2,11 @@
 OpenWebUI API Client Module
 Клиент для работы с локальным OpenWebUI API.
 Поддерживает аутентификацию через API key или JWT token (login/password).
-"""
 
+LAST_FIXES:
+  2026-05-20 2026-05-20 12:48 UTC+3 UTC+3 — complete(): возвращает tokens_prompt/tokens_completion
+    из data["usage"] для совместимости с LLMMaskGenerator._call_llm.
+"""
 import requests
 import json
 import logging
@@ -163,7 +166,9 @@ class OpenWebUIClient(BaseLLMClient):
                 "content": None,
                 "raw": None,
                 "error": "Authentication failed - check credentials",
-                "model": model
+                "model": model,
+                "tokens_prompt": None,
+                "tokens_completion": None,
             }
 
         # Проверяем доступность модели
@@ -181,7 +186,9 @@ class OpenWebUIClient(BaseLLMClient):
                     "content": None,
                     "raw": None,
                     "error": f"Model '{model}' not found. No models available.",
-                    "model": model
+                    "model": model,
+                    "tokens_prompt": None,
+                    "tokens_completion": None,
                 }
         else:
             logger.info(f"[OpenWebUI] Модель '{model}' найдена в списке доступных")
@@ -247,7 +254,9 @@ class OpenWebUIClient(BaseLLMClient):
                     "content": None,
                     "raw": response.text,
                     "error": f"400 Bad Request - Model '{model}' not found or invalid parameters",
-                    "model": model
+                    "model": model,
+                    "tokens_prompt": None,
+                    "tokens_completion": None,
                 }
 
             response.raise_for_status()
@@ -256,12 +265,19 @@ class OpenWebUIClient(BaseLLMClient):
             content = data['choices'][0]['message']['content']
             parsed = self._extract_json_from_response(content)
 
+            # FIX: извлекаем usage/tokens если API их возвращает
+            usage = data.get("usage", {})
+            tokens_prompt = usage.get("prompt_tokens")
+            tokens_completion = usage.get("completion_tokens")
+
             return {
                 "success": parsed is not None,
                 "content": parsed,
                 "raw": content,
                 "model": model,
-                "error": None if parsed else "JSON parse error"
+                "error": None if parsed else "JSON parse error",
+                "tokens_prompt": tokens_prompt,
+                "tokens_completion": tokens_completion,
             }
 
         except requests.exceptions.RequestException as e:
@@ -271,7 +287,9 @@ class OpenWebUIClient(BaseLLMClient):
                 "content": None,
                 "raw": None,
                 "error": str(e),
-                "model": model
+                "model": model,
+                "tokens_prompt": None,
+                "tokens_completion": None,
             }
 
     def health_check(self) -> bool:

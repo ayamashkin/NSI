@@ -7,12 +7,14 @@ Auth: API_KEY в заголовке Authorization: Bearer {API_KEY}
 Docs: https://demo6-fundres.dev.mts.ai/
 
 LAST_FIXES:
+  2026-05-20 2026-05-20 12:47 UTC+3 UTC+3 — chat_completion: возвращает tokens_prompt/tokens_completion
+    из data["usage"] (prompt_tokens/completion_tokens) для совместимости с
+    LLMMaskGenerator._call_llm и Excel-статистики.
   2026-05-18 11:16 UTC+3 — _extract_json_from_text: поддержка markdown ```python + balanced braces
   2026-05-18 10:35 UTC+3 — complete()/chat_completion() возвращают Dict[str, Any]
                            (success, content, raw, error, model) для совместимости с LLMMaskGenerator
   2026-05-07 13:30 UTC+3 — создание клиента по аналогии с mws_gpt
 """
-
 import json
 import logging
 import re
@@ -126,7 +128,7 @@ class MTSAIClient(BaseLLMClient):
     def complete(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """
         Реализация abstract method из BaseLLMClient.
-        Возвращает Dict с полями: success, content, raw, error, model
+        Возвращает Dict с полями: success, content, raw, error, model, tokens_prompt, tokens_completion
         (совместимо с LLMMaskGenerator._call_llm).
         """
         messages = [{"role": "user", "content": prompt}]
@@ -149,7 +151,9 @@ class MTSAIClient(BaseLLMClient):
                 "content": Any | None,   # распарсенный JSON (если есть)
                 "raw": str | None,       # сырой текст ответа
                 "error": str | None,
-                "model": str
+                "model": str,
+                "tokens_prompt": int | None,
+                "tokens_completion": int | None
             }
         """
         model = model or self.default_model
@@ -180,9 +184,11 @@ class MTSAIClient(BaseLLMClient):
 
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             usage = data.get("usage", {})
+            tokens_prompt = usage.get("prompt_tokens")
+            tokens_completion = usage.get("completion_tokens")
             logger.info(
-                f"[MTSAI] Response: tokens_prompt={usage.get('prompt_tokens')}, "
-                f"tokens_completion={usage.get('completion_tokens')}, "
+                f"[MTSAI] Response: tokens_prompt={tokens_prompt}, "
+                f"tokens_completion={tokens_completion}, "
                 f"content_length={len(content)}"
             )
 
@@ -199,7 +205,9 @@ class MTSAIClient(BaseLLMClient):
                 "content": parsed,
                 "raw": content,
                 "error": None,
-                "model": model
+                "model": model,
+                "tokens_prompt": tokens_prompt,
+                "tokens_completion": tokens_completion,
             }
 
         except requests.exceptions.Timeout:
@@ -209,7 +217,9 @@ class MTSAIClient(BaseLLMClient):
                 "content": None,
                 "raw": None,
                 "error": f"Timeout after {self.timeout}s",
-                "model": model
+                "model": model,
+                "tokens_prompt": None,
+                "tokens_completion": None,
             }
         except requests.exceptions.HTTPError as e:
             logger.error(f"[MTSAI] HTTP error: {e.response.status_code} - {e.response.text[:200]}")
@@ -218,7 +228,9 @@ class MTSAIClient(BaseLLMClient):
                 "content": None,
                 "raw": None,
                 "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}",
-                "model": model
+                "model": model,
+                "tokens_prompt": None,
+                "tokens_completion": None,
             }
         except requests.exceptions.RequestException as e:
             logger.error(f"[MTSAI] Request error: {e}")
@@ -227,7 +239,9 @@ class MTSAIClient(BaseLLMClient):
                 "content": None,
                 "raw": None,
                 "error": str(e),
-                "model": model
+                "model": model,
+                "tokens_prompt": None,
+                "tokens_completion": None,
             }
         except Exception as e:
             logger.error(f"[MTSAI] Unexpected error: {e}")
@@ -236,7 +250,9 @@ class MTSAIClient(BaseLLMClient):
                 "content": None,
                 "raw": None,
                 "error": str(e),
-                "model": model
+                "model": model,
+                "tokens_prompt": None,
+                "tokens_completion": None,
             }
 
     def get_models(self) -> List[str]:

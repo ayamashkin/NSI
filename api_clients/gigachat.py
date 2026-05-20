@@ -1,8 +1,12 @@
 """
 GigaChat API Client Module
 Клиент для работы с GigaChat API через официальную библиотеку Сбера.
-"""
 
+LAST_FIXES:
+  2026-05-20 2026-05-20 12:49 UTC+3 UTC+3 — complete(): возвращает tokens_prompt/tokens_completion
+    на верхнем уровне dict (ранее были только вложены в usage) для совместимости
+    с LLMMaskGenerator._call_llm.
+"""
 import logging
 import base64
 from typing import Dict, Any, Optional, List
@@ -108,17 +112,19 @@ class GigaChatClient(BaseLLMClient):
                 content = response.choices[0].message.content
                 parsed = self._extract_json_from_response(content)
 
+                # FIX: выносим tokens на верхний уровень для единообразия
+                usage = response.usage if response.usage else None
+                tokens_prompt = usage.prompt_tokens if usage else None
+                tokens_completion = usage.completion_tokens if usage else None
+
                 return {
                     "success": parsed is not None,
                     "content": parsed,
                     "raw": content,
                     "model": model,
                     "error": None if parsed else "JSON parse error",
-                    "usage": {
-                        "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                        "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                        "total_tokens": response.usage.total_tokens if response.usage else 0
-                    }
+                    "tokens_prompt": tokens_prompt,
+                    "tokens_completion": tokens_completion,
                 }
 
             except ResponseError as e:
@@ -135,7 +141,9 @@ class GigaChatClient(BaseLLMClient):
                         "content": None,
                         "raw": None,
                         "error": f"API error: {e}",
-                        "model": model
+                        "model": model,
+                        "tokens_prompt": None,
+                        "tokens_completion": None,
                     }
             except Exception as e:
                 logger.error(f"GigaChat request failed: {e}")
@@ -144,7 +152,9 @@ class GigaChatClient(BaseLLMClient):
                     "content": None,
                     "raw": None,
                     "error": str(e),
-                    "model": model
+                    "model": model,
+                    "tokens_prompt": None,
+                    "tokens_completion": None,
                 }
 
     def health_check(self) -> bool:
