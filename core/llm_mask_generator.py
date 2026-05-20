@@ -3,10 +3,14 @@ LLM Mask Generator
 Генерация regex-маски через LLM. Только default_service — никакого fallback на других провайдеров.
 
 LAST_FIXES:
- 2026-05-20 2026-05-20 09:13 UTC+3 — _build_prompt: optional_params переведены на русские имена
+ 2026-05-20 2026-05-20 10:09 UTC+3 — generate_mask: возвращает metadata (provider, model, temperature,
+   tokens_prompt, tokens_completion, warnings). _call_llm: пробрасывает tokens из ответа API.
+   Позволяет cli.py собирать статистику генерации масок в Excel.
+ 2026-05-20 2026-05-20 10:09 UTC+3 — _build_prompt: optional_params переведены на русские имена
    (покрытие, марка_материала, исполнение, шаг_резьбы, технические_характеристики).
-   Ранее английские ключи (coating, material, execution) не совпадали с именами
-   полей ENS → все параметры попадали в required, маска не проходила валидацию.
+ 2026-05-20 2026-05-20 10:09 UTC+3 — _build_prompt: visible_fields detection теперь требует standalone
+   токен для чисто числовых значений (r'(?<!\d)8(?!\d)'), чтобы избежать ложного
+   совпадения "8" внутри "80" / "31133-80".
  2026-05-20 09:23 UTC+3 — generate_mask: строго только provider_priority (default_service),
    без fallback на других клиентов. Transient ошибки (503/timeout) → retry с exponential backoff
    на ТОМ ЖЕ сервисе. Non-transient (400/auth) → abort без retry.
@@ -19,7 +23,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from api_clients.base import BaseLLMClient
 from config.settings import get_settings
@@ -168,15 +172,27 @@ class LLMMaskGenerator:
         item_type: str,
         examples: List[Dict[str, Any]],
         context: Optional[Dict] = None
-    ) -> tuple[Optional[Dict[str, Any]], None]:
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Генерация regex-маски через LLM.
 
-        - Только default_service из конфига (provider_priority)
-        - Transient ошибки (503/timeout) → retry с exponential backoff на ТОМ ЖЕ сервисе
-        - Non-transient ошибки (400/auth) → abort, retry бессмысленен
+        Returns:
+            (mask_dict, meta_dict) где meta_dict содержит:
+            - provider, model, temperature
+            - tokens_prompt, tokens_completion
+            - warnings: список warning-сообщений (например, failed parse на attempt 1)
         """
         prompt = self._build_prompt(standard, item_type, examples, context)
         self._save_debug_prompt(standard, item_type, prompt)
+
+        warnings_list: List[str] = []
+        meta: Dict[str, Any] = {
+            'provider': None,
+            'model': None,
+            'temperature': None,
+            'tokens_prompt': None,
+            'tokens_completion': None,
+            'warnings': warnings_list,
+        }
 
         for attempt in range(1, self.max_retries + 1):
             transient_occurred = False
@@ -188,18 +204,19 @@ class LLMMaskGenerator:
                 if result is None:
                     # Non-transient error (400 Bad Request, auth failure, invalid model и т.д.)
                     # Retry бессмысленен — та же ошибка повторится
-                    logger.warning(
-                        "Non-transient failure from %s (attempt %d), aborting retries",
-                        provider, attempt
-                    )
-                    return None, None
+                    msg = f"Non-transient failure from {provider} (attempt {attempt})"
+                    warnings_list.append(msg)
+                    logger.warning(msg + ", aborting retries")
+                    return None, meta
 
                 if result.get('_transient_error'):
                     # Transient error — worth retry с backoff
-                    logger.warning(
-                        "Transient error from %s (attempt %d): %s",
-                        provider, attempt, result.get('error')
+                    msg = (
+                        f"Transient error from {provider} (attempt {attempt}): "
+                        f"{result.get('error')}"
                     )
+                    warnings_list.append(msg)
+                    logger.warning(msg)
                     transient_occurred = True
                     continue  # к следующему provider (обычно их 1)
 
@@ -213,13 +230,20 @@ class LLMMaskGenerator:
                 )
                 mask = self._parse_response(response, standard, item_type)
                 if mask:
+                    meta.update({
+                        'provider': result.get('provider'),
+                        'model': result.get('model'),
+                        'temperature': result.get('temperature'),
+                        'tokens_prompt': result.get('tokens_prompt'),
+                        'tokens_completion': result.get('tokens_completion'),
+                        'warnings': list(warnings_list),
+                    })
                     logger.info("Generated mask via %s (attempt %d)", provider, attempt)
-                    return mask, None
+                    return mask, meta
                 else:
-                    logger.warning(
-                        "Failed to parse valid mask from %s (attempt %d), retrying",
-                        provider, attempt
-                    )
+                    msg = f"Failed to parse valid mask from {provider} (attempt {attempt})"
+                    warnings_list.append(msg)
+                    logger.warning(msg + ", retrying")
                     # Парсинг не удался — не transient, но retry с более высокой temperature
                     continue
 
@@ -232,11 +256,10 @@ class LLMMaskGenerator:
                 )
                 time.sleep(sleep_time)
 
-        logger.error(
-            "Failed to generate mask after %d attempts via %s",
-            self.max_retries, self.provider_priority
-        )
-        return None, None
+        msg = f"Failed to generate mask after {self.max_retries} attempts via {self.provider_priority}"
+        warnings_list.append(msg)
+        logger.error(msg)
+        return None, meta
 
     # --------------------------------------------------------------------------
     # LLM CALL — transient vs non-transient
@@ -247,7 +270,7 @@ class LLMMaskGenerator:
         Вызов LLM через конкретного провайдера.
 
         Returns:
-        - dict с content/provider/model/temperature при успехе
+        - dict с content/provider/model/temperature/tokens_prompt/tokens_completion при успехе
         - dict с _transient_error=True при transient ошибке (503, timeout и т.д.)
         - None при non-transient ошибке (400, auth error и т.д.) — retry бессмысленен
         """
@@ -279,7 +302,7 @@ class LLMMaskGenerator:
                 temperature=temperature
             )
 
-            # response — dict с success, content, raw, error, model
+            # response — dict с success, content, raw, error, model, tokens_prompt, tokens_completion
             if response and response.get('success'):
                 content = response.get('content')
                 if isinstance(content, dict):
@@ -291,7 +314,9 @@ class LLMMaskGenerator:
                         'content': json.dumps(content, ensure_ascii=False),
                         'provider': provider,
                         'model': model,
-                        'temperature': temperature
+                        'temperature': temperature,
+                        'tokens_prompt': response.get('tokens_prompt'),
+                        'tokens_completion': response.get('tokens_completion'),
                     }
                 raw = response.get('raw', '')
                 if raw:
@@ -299,14 +324,18 @@ class LLMMaskGenerator:
                         'content': raw,
                         'provider': provider,
                         'model': model,
-                        'temperature': temperature
+                        'temperature': temperature,
+                        'tokens_prompt': response.get('tokens_prompt'),
+                        'tokens_completion': response.get('tokens_completion'),
                     }
                 if content and not isinstance(content, dict):
                     return {
                         'content': str(content),
                         'provider': provider,
                         'model': model,
-                        'temperature': temperature
+                        'temperature': temperature,
+                        'tokens_prompt': response.get('tokens_prompt'),
+                        'tokens_completion': response.get('tokens_completion'),
                     }
                 logger.warning(
                     "[LLM] Provider %s returned success=True but no raw/content",
@@ -604,9 +633,20 @@ class LLMMaskGenerator:
                 val_str = str(val).strip()
                 if not val_str:
                     continue
-                val_norm = val_str.lower().replace('.', '').replace(' ', '').replace(',', '')
+                val_lower = val_str.lower()
+
+                # FIX: для чисто числовых значений требуем standalone токен
+                # (граница по не-цифре), чтобы избежать ложного совпадения
+                # "8" внутри "80" или "31133-80"
+                if val_lower.isdigit():
+                    pattern = r'(?<!\d)' + re.escape(val_lower) + r'(?!\d)'
+                    if re.search(pattern, name_lower):
+                        visible_fields.add(field)
+                    continue
+
+                val_norm = val_lower.replace('.', '').replace(' ', '').replace(',', '')
                 name_norm = name_lower.replace('.', '').replace(' ', '').replace(',', '')
-                if val_str.lower() in name_lower or val_norm in name_norm:
+                if val_lower in name_lower or val_norm in name_norm:
                     visible_fields.add(field)
 
         visible_field_names = [f for f in relevant_fields if f in visible_fields and f not in skip_fields]
