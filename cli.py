@@ -1042,7 +1042,8 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
 
     with click.progressbar(standards.items(), label='Генерация') as bar:
         for (std, itype), examples in bar:
-            old_mask = mask_db.get_mask(std, itype)
+            item_type_normalized = itype.upper()
+            old_mask = mask_db.get_mask(std, item_type_normalized)
             old_pattern = old_mask.pattern if old_mask else None
             old_score = old_mask.auto_score if old_mask else None
             old_is_active = old_mask.is_active if old_mask else None
@@ -1060,6 +1061,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                     'служба': 'skipped',
                     'модель': None,
                     'температура': None,
+                'old_mask_id': old_mask.id if old_mask else None,
                     'warning': 'Already active, skipped (use --force to regenerate)',
                     'tokens_prompt': None,
                     'tokens_completion': None,
@@ -1112,6 +1114,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                         'служба': meta.get('provider') if meta else None,
                         'модель': meta.get('model') if meta else None,
                         'температура': meta.get('temperature') if meta else None,
+                'old_mask_id': old_mask.id if old_mask else None,
                         'warning': '; '.join(meta.get('warnings', [])) if meta and meta.get('warnings') else None,
                         'tokens_prompt': meta.get('tokens_prompt') if meta else None,
                         'tokens_completion': meta.get('tokens_completion') if meta else None,
@@ -1128,6 +1131,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                         'служба': meta.get('provider') if meta else None,
                         'модель': meta.get('model') if meta else None,
                         'температура': meta.get('temperature') if meta else None,
+                'old_mask_id': old_mask.id if old_mask else None,
                         'warning': '; '.join(meta.get('warnings', [])) if meta and meta.get('warnings') else 'Failed to generate mask',
                         'tokens_prompt': meta.get('tokens_prompt') if meta else None,
                         'tokens_completion': meta.get('tokens_completion') if meta else None,
@@ -1140,6 +1144,8 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
 
     if stats_output and stats_rows:
         df_stats = pd.DataFrame(stats_rows)
+        if 'old_mask_id' not in df_stats.columns:
+            df_stats['old_mask_id'] = None
         df_stats.to_excel(stats_output, index=False)
         click.echo(f"📊 Статистика сохранена: {stats_output}")
 
