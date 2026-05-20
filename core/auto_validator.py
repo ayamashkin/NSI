@@ -393,12 +393,13 @@ class AutoValidator:
                     mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (coating sim={sim:.2f})")
                 else:
                     matched += 1
-            else:
+            elif ext_key == 'исполнение' or exp_key == 'исполнение':
+                # FIX: нормализация исполнения — '(2)-' → '2', '2.0' → '2'
+                clean_ext = re.sub(r'[^\d.,]', '', ext_str).replace(',', '.').strip('.')
+                clean_exp = re.sub(r'[^\d.,]', '', exp_str).replace(',', '.').strip('.')
                 try:
-                    num_a = float(ext_str.replace(',', '.'))
-                    num_b = float(exp_str.replace(',', '.'))
-                    if num_a != num_b:
-                        mismatches.append(f"{ext_key}: {ext_val} vs {exp_val}")
+                    if float(clean_ext) != float(clean_exp):
+                        mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (exec norm)")
                     else:
                         matched += 1
                 except ValueError:
@@ -406,61 +407,4 @@ class AutoValidator:
                         mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}'")
                     else:
                         matched += 1
-
         success = len(missing) == 0 and len(mismatches) == 0
-
-        return {
-            'text': text[:100],
-            'success': success,
-            'missing_params': missing,
-            'mismatches': mismatches,
-            'extracted': extracted,
-            'expected': {k: v for k, v in expected.items() if k in required}
-        }
-
-    def validate_with_db(
-        self,
-        mask_id: int,
-        mask_db,
-        ens_examples: Optional[List[Dict]] = None
-    ) -> ValidationResult:
-        """
-        Валидация маски из базы данных.
-        """
-        from database.mask_database import MaskRecord
-
-        mask = mask_db.get_mask_by_id(mask_id)
-        if not mask:
-            return ValidationResult(
-                mask_id=mask_id,
-                test_count=0,
-                success_count=0,
-                score=0.0,
-                passed=False,
-                details=[],
-                error_message=f"Mask {mask_id} not found"
-            )
-
-        return self.validate_mask(
-            pattern=mask.pattern,
-            params=mask.params,
-            required=mask.required,
-            standard=mask.standard,
-            item_type=mask.item_type,
-            ens_examples=ens_examples
-        )
-
-    def get_validation_report(self, mask_id: int, mask_db) -> Dict[str, Any]:
-        """Получение детального отчета о валидации."""
-        result = self.validate_with_db(mask_id, mask_db)
-
-        return {
-            'mask_id': mask_id,
-            'score': result.score,
-            'passed': result.passed,
-            'threshold': self.activation_threshold,
-            'test_count': result.test_count,
-            'success_count': result.success_count,
-            'success_rate': result.success_rate,
-            'details': result.details
-        }
