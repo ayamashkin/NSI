@@ -488,7 +488,7 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ha
 # Генерация масок для тестового индекса
 python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm
 # Генерация масок для тестового индекса (принудительная перегенерация)
-python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm -- force
+python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm --force
 
 # Batch-обработка (Excel → Excel + result.db)
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/nomenclature.xlsx
