@@ -1051,23 +1051,37 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             if existing and existing.is_active and force:
                 click.echo(f"  🔄 Force: перегенерация маски {std}/{itype} (ID={existing.id})")
 
+            # === ИЗВЛЕКАЕМ ТОЛЬКО НАИМЕНОВАНИЯ (строки), не полные словари ЕНС ===
             if generator:
-                # === ИЗВЛЕКАЕМ ТОЛЬКО НАИМЕНОВАНИЯ (строки), не полные словари ЕНС ===
                 limited_examples = examples[:20]
                 mask, _ = generator.generate_mask(std, itype, limited_examples)
 
                 if mask:
-                    # Нормализуем item_type в uppercase (стандарты: БОЛТ, ВИНТ, ШАЙБА)
                     item_type_normalized = itype.upper()
+
+                    # Валидация если запрошена (--validate)
+                    auto_score = 0.0
+                    is_active = True
+                    if validate:
+                        from core.auto_validator import AutoValidator
+                        validator = AutoValidator(ens_index_path=ens_index)
+                        validation = validator.validate_mask(
+                            mask['pattern'], mask['params'], mask['required'],
+                            std, itype, ens_examples=limited_examples
+                        )
+                        auto_score = validation.score
+                        is_active = auto_score >= min_score
+                        click.echo(f"  🔍 Маска {std}/{itype}: score={auto_score:.2f}, active={is_active}")
+
                     temp_mask = MaskRecord(
                         standard=std, item_type=item_type_normalized,
                         pattern=mask['pattern'], params=mask['params'],
-                        required=mask['required'], auto_score=0.0,
-                        is_active=True, source='llm'  # Активируем сразу
+                        required=mask['required'], auto_score=auto_score,
+                        is_active=is_active, source='llm'
                     )
                     mask_db.save_mask(temp_mask, auto_activate=True, replace_existing=True)
                     stats['generated'] += 1
-                    if temp_mask.auto_score >= min_score:
+                    if is_active:
                         stats['activated'] += 1
 
     click.echo(f"\n📊 Результат:")
