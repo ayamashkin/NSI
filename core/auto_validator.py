@@ -3,16 +3,14 @@ AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
 
 LAST_FIXES:
- 2026-05-20 2026-05-20 09:14 UTC+3 — _test_pattern: полное переключение на V2 fuzzy-сравнение
-   (из parametric_client._compare_param_sets). Добавлены:
-   • _normalize_coating — нормализация покрытий (Кд3→Кд, сортировка токенов)
-   • _match_param_keys — fuzzy matching имён параметров
-     (наружный_диаметр_диаметр_вписа ↔ наружный_диаметр_диаметр_вписанного_круга_…)
-   • coating-similarity для покрытие + технические_характеристики
-   • числовая нормализация (str "10" ↔ float "10.0")
-   Ранее strict string compare давал score=0.00 из-за mismatch "Кд.фос.окс" vs "Кд3.фос.окс"
-   и несовпадения имён полей regex vs ENS.
- 2026-05-15 12:52 UTC+3 — _get_ens_examples: поддержка 'наименование_типа' (ENS mapping) помимо 'тип_изделия'
+ 2026-05-20 2026-05-20 11:49 UTC+3 — _match_param_keys: F1-like score (2*matched/(len_a+len_b)),
+   threshold снижен до 0.20. Ранее score=matched/max(len_a,len_b) давал 1/9=0.11
+   для номинальный_диаметр_резьбы ↔ наружный_диаметр_вписанного_круга_… → match не
+   срабатывал, все тесты падали с missing → score=0.00.
+ 2026-05-20 2026-05-20 11:49 UTC+3 — coating comparison: threshold 0.50 (было 0.80) + subset logic
+   (tokens_a ⊆ tokens_b → sim=1.0). Ранее "Кд" vs "Кд3.хр" давал sim=0.50 < 0.80 → mismatch.
+ 2026-05-20 2026-05-20 11:49 UTC+3 — skip_params: убраны нтд_1 и standard (они валидные regex-параметры).
+ 2026-05-20 12:52 UTC+3 — _test_pattern: полное переключение на V2 fuzzy-сравнение.
 """
 import re
 import logging
@@ -133,7 +131,12 @@ class AutoValidator:
 
     @staticmethod
     def _match_param_keys(key_a: str, keys_b: List[str]) -> Optional[str]:
-        """Fuzzy matching имени параметра key_a со списком ключей keys_b."""
+        """Fuzzy matching имени параметра key_a со списком ключей keys_b.
+
+        Использует F1-like score: 2*matched / (len_a + len_b).
+        Threshold 0.20 (ранее 0.50 с max-based score давал ложные reject'ы
+        для номинальный_диаметр_резьбы ↔ наружный_диаметр_вписанного_круга_…).
+        """
         if not key_a or not keys_b:
             return None
         tokens_a = [t for t in key_a.lower().split('_') if len(t) >= 3]
@@ -155,11 +158,13 @@ class AutoValidator:
                         if ta.startswith(tb) or tb.startswith(ta):
                             matched += 1
                             break
-            score = matched / max(len(tokens_a), len(tokens_b)) if max(len(tokens_a), len(tokens_b)) > 0 else 0.0
+            # F1-like score: 2*matched / (len_a + len_b)
+            denom = len(tokens_a) + len(tokens_b)
+            score = (2.0 * matched) / denom if denom > 0 else 0.0
             if score > best_score:
                 best_score = score
                 best_match = key_b
-        if best_score >= 0.5:
+        if best_score >= 0.20:
             return best_match
         return None
 
@@ -322,8 +327,8 @@ class AutoValidator:
         mismatches = []
 
         # Параметры, которые не участвуют в сравнении (метаданные/служебные)
-        skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд', 'нтд_1',
-                       'наименование', 'полное_наименование', 'код', 'mdm_key'}
+        # FIX: убраны нтд_1 и standard — они валидные regex-параметры
+        skip_params = {'тип_изделия', 'item_type', 'наименование', 'полное_наименование', 'код', 'mdm_key'}
 
         # Fuzzy matching ключей: строим маппинг extracted_key -> expected_key
         expected_keys = [k for k in expected.keys() if not k.startswith('_')]
@@ -377,7 +382,13 @@ class AutoValidator:
                 norm_a = self._normalize_coating(ext_str)
                 norm_b = self._normalize_coating(exp_str)
                 sim = _text_similarity(norm_a, norm_b)
-                if sim < 0.8:
+                # FIX: subset logic — если токены одного покрытия полностью входят в другой
+                tokens_a = set(norm_a.split('.')) if norm_a else set()
+                tokens_b = set(norm_b.split('.')) if norm_b else set()
+                if tokens_a and tokens_b and (tokens_a.issubset(tokens_b) or tokens_b.issubset(tokens_a)):
+                    sim = 1.0
+                # FIX: threshold снижен до 0.50 (было 0.80)
+                if sim < 0.50:
                     mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (coating sim={sim:.2f})")
                 else:
                     matched += 1

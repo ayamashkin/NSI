@@ -486,9 +486,9 @@ python cli.py result-stats --since 2026-05-14T10:00:00
 python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/hardware2/ens_hardware.pkl
 
 # Генерация масок для тестового индекса
-python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm --validate
+python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm --validate -so output/mask_stats.xlsx
 # Генерация масок для тестового индекса (принудительная перегенерация)
-python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm --force --validate
+python cli.py generate-masks -d cache/masks.db -i models/hardware2/ens_hardware.pkl --llm --force --validate -so output/mask_stats.xlsx
 
 # Batch-обработка (Excel → Excel + result.db)
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/hardware2/ens_hardware.pkl --workers 4 -o output/nomenclature.xlsx
@@ -513,10 +513,10 @@ python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/mas
 python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o models/hardware/ens_hardware.pkl
 
 # Генерация масок (Дозаполнение)
-python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm
+python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm  --validate -so output/mask_stats.xlsx
 
 # Генерация масок (Перегенерация)
-python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm  --force
+python cli.py generate-masks -d cache/masks.db -i models/hardware/ens_hardware.pkl --llm  --force  --validate -so output/mask_stats.xlsx
 
 # Batch-обработка (Excel → Excel + result.db)
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db -i models/hardware/ens_hardware.pkl --workers 3 -o output/nomenclature1.xlsx

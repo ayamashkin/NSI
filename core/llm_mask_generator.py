@@ -3,17 +3,16 @@ LLM Mask Generator
 Генерация regex-маски через LLM. Только default_service — никакого fallback на других провайдеров.
 
 LAST_FIXES:
- 2026-05-20 2026-05-20 10:09 UTC+3 — generate_mask: возвращает metadata (provider, model, temperature,
-   tokens_prompt, tokens_completion, warnings). _call_llm: пробрасывает tokens из ответа API.
-   Позволяет cli.py собирать статистику генерации масок в Excel.
- 2026-05-20 2026-05-20 10:09 UTC+3 — _build_prompt: optional_params переведены на русские имена
-   (покрытие, марка_материала, исполнение, шаг_резьбы, технические_характеристики).
- 2026-05-20 2026-05-20 10:09 UTC+3 — _build_prompt: visible_fields detection теперь требует standalone
-   токен для чисто числовых значений (r'(?<!\d)8(?!\d)'), чтобы избежать ложного
-   совпадения "8" внутри "80" / "31133-80".
- 2026-05-20 09:23 UTC+3 — generate_mask: строго только provider_priority (default_service),
-   без fallback на других клиентов. Transient ошибки (503/timeout) → retry с exponential backoff
-   на ТОМ ЖЕ сервисе. Non-transient (400/auth) → abort без retry.
+ 2026-05-20 2026-05-20 11:51 UTC+3 — _parse_response: добавлен _fix_json_escapes для обработки LLM-ответов
+   с невалидными JSON escape-последовательностями (\s, \d, \w, \., \- и т.д.).
+   Ранее json.loads падал с Invalid \escape при наличии \s внутри pattern-строки,
+   что приводило к retry и потере tokens на повторные запросы.
+ 2026-05-20 2026-05-20 11:51 UTC+3 — generate_mask: возвращает metadata (provider, model, temperature,
+   tokens_prompt, tokens_completion, warnings).
+ 2026-05-20 2026-05-20 11:51 UTC+3 — _build_prompt: optional_params переведены на русские имена.
+ 2026-05-20 2026-05-20 11:51 UTC+3 — _build_prompt: visible_fields detection теперь требует standalone
+   токен для чисто числовых значений (r'(?<!\d)8(?!\d)').
+ 2026-05-20 09:23 UTC+3 — generate_mask: строго только provider_priority (default_service).
  2026-05-18 21:45 UTC+3 — _build_provider_priority: только указанный в конфиге default_service.
 """
 import json
@@ -84,6 +83,53 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
             pass
 
     return None
+
+def _fix_json_escapes(text: str) -> str:
+    """
+    Исправить невалидные JSON escape-последовательности, которые LLM генерирует
+    внутри regex pattern (например: \s, \d, \w, \., \-, \( и т.д.).
+
+    В JSON валидные escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX.
+    Всё остальное (\s, \d и т.д.) — невалидно и вызывает JSONDecodeError.
+
+    Стратегия: заменяем одиночный backslash перед невалидным символом на двойной.
+    """
+    valid_escapes = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'}
+
+    def repl(m):
+        # m.group(0) — backslash + следующий символ
+        char = m.group(1)
+        if char in valid_escapes:
+            return m.group(0)  # оставляем как есть
+        # Удваиваем backslash: \s -> \\s
+        return '\\\\' + char
+
+    # Находим backslash + любой символ (кроме уже удвоенного backslash)
+    # Используем negative lookbehind чтобы не трогать \
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] == '\\' and i + 1 < len(text):
+            # Проверяем, не является ли это уже \
+            if i > 0 and text[i-1] == '\\':
+                result.append(text[i])
+                i += 1
+                continue
+            nxt = text[i + 1]
+            if nxt in valid_escapes:
+                result.append(text[i])
+                result.append(nxt)
+                i += 2
+                continue
+            else:
+                # Невалидный escape — удваиваем
+                result.append('\\\\')
+                result.append(nxt)
+                i += 2
+                continue
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
 
 class LLMMaskGenerator:
     """Генерация regex-маски через LLM. Строго один провайдер — default_service из конфига."""
@@ -363,7 +409,11 @@ class LLMMaskGenerator:
     # --------------------------------------------------------------------------
 
     def _parse_response(self, response: str, standard: str, item_type: str) -> Optional[Dict[str, Any]]:
-        """Извлечь и валидировать JSON из LLM ответа."""
+        """Извлечь и валидировать JSON из LLM ответа.
+
+        FIX: при JSONDecodeError из-за невалидных escape (\s, \d и т.д. внутри pattern)
+        пробуем _fix_json_escapes перед повторным парсингом.
+        """
         if not response:
             logger.warning("Empty LLM response")
             return None
@@ -373,11 +423,20 @@ class LLMMaskGenerator:
             pattern = rf'```{lang}\s*(.*?)\s*```'
             md_json = re.search(pattern, response, re.DOTALL)
             if md_json:
+                candidate = md_json.group(1)
                 try:
-                    data = json.loads(md_json.group(1))
+                    data = json.loads(candidate)
                     return self._validate_mask_dict(data, standard, item_type)
                 except json.JSONDecodeError as e:
                     logger.debug("Markdown JSON parse failed: %s", e)
+                    # FIX: пробуем исправить escapes
+                    try:
+                        fixed = _fix_json_escapes(candidate)
+                        data = json.loads(fixed)
+                        logger.debug("[LLM] JSON parsed after escape fix")
+                        return self._validate_mask_dict(data, standard, item_type)
+                    except json.JSONDecodeError:
+                        pass
 
         # Попытка 2: Balanced braces
         for start in re.finditer(r'(?m)^\s*\{', response):
@@ -406,20 +465,33 @@ class LLMMaskGenerator:
                             data = json.loads(candidate)
                             return self._validate_mask_dict(data, standard, item_type)
                         except json.JSONDecodeError:
-                            break
+                            try:
+                                fixed = _fix_json_escapes(candidate)
+                                data = json.loads(fixed)
+                                logger.debug("[LLM] JSON (balanced) parsed after escape fix")
+                                return self._validate_mask_dict(data, standard, item_type)
+                            except json.JSONDecodeError:
+                                break
 
         # Попытка 3: Простой fallback
         json_match = re.search(r'\{.*?\}', response, re.DOTALL)
         if json_match:
+            candidate = json_match.group()
             try:
-                data = json.loads(json_match.group())
+                data = json.loads(candidate)
                 return self._validate_mask_dict(data, standard, item_type)
             except json.JSONDecodeError as e:
-                logger.warning(
-                    "Failed to parse LLM response JSON: %s. Preview: %r",
-                    e, response[:200]
-                )
-                return None
+                try:
+                    fixed = _fix_json_escapes(candidate)
+                    data = json.loads(fixed)
+                    logger.debug("[LLM] JSON (simple) parsed after escape fix")
+                    return self._validate_mask_dict(data, standard, item_type)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Failed to parse LLM response JSON: %s. Preview: %r",
+                        e, response[:200]
+                    )
+                    return None
 
         logger.warning("No JSON found in LLM response. Preview: %r", response[:200])
         return None
