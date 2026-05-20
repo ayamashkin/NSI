@@ -906,7 +906,8 @@ def diagnose(text, db, ens_index, llm, coating_map):
 @click.option('--validate', is_flag=True, help='Валидировать сгенерированную маску')
 @click.option('--min-score', default=0.85, help='Минимальный score для валидации')
 @click.option('--limit', '-n', default=0, help='Ограничить число стандартов (0 = все, для отладки)')
-def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit):
+@click.option('--force', '-f', is_flag=True, help='Принудительная перегенерация даже для активных масок')
+def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit, force):
     """Генерация масок для стандартов из индекса ЕНС.
 
     Режимы:
@@ -989,6 +990,8 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             mask_id = mask_db.save_mask(mask_record, auto_activate=True, replace_existing=True)
             if mask_id:
                 click.echo(f"✅ Маска сохранена в БД: ID={mask_id}")
+                if force:
+                    click.echo("  🔄 Force: маска перегенерирована")
             else:
                 click.echo("⚠️ Не удалось сохранить маску в БД")
         else:
@@ -1042,9 +1045,11 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
     with click.progressbar(standards.items(), label='Генерация') as bar:
         for (std, itype), examples in bar:
             existing = mask_db.get_mask(std, itype)
-            if existing and existing.is_active:
+            if existing and existing.is_active and not force:
                 stats['existing'] += 1
                 continue
+            if existing and existing.is_active and force:
+                click.echo(f"  🔄 Force: перегенерация маски {std}/{itype} (ID={existing.id})")
 
             if generator:
                 # === ИЗВЛЕКАЕМ ТОЛЬКО НАИМЕНОВАНИЯ (строки), не полные словари ЕНС ===
