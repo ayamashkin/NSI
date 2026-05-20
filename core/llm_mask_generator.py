@@ -3,12 +3,15 @@ LLM Mask Generator
 Генерация regex-маски через LLM. Только default_service — никакого fallback на других провайдеров.
 
 LAST_FIXES:
+ 2026-05-20 2026-05-20 09:13 UTC+3 — _build_prompt: optional_params переведены на русские имена
+   (покрытие, марка_материала, исполнение, шаг_резьбы, технические_характеристики).
+   Ранее английские ключи (coating, material, execution) не совпадали с именами
+   полей ENS → все параметры попадали в required, маска не проходила валидацию.
  2026-05-20 09:23 UTC+3 — generate_mask: строго только provider_priority (default_service),
- без fallback на других клиентов. Transient ошибки (503/timeout) → retry с exponential backoff
- на ТОМ ЖЕ сервисе. Non-transient (400/auth) → abort без retry.
+   без fallback на других клиентов. Transient ошибки (503/timeout) → retry с exponential backoff
+   на ТОМ ЖЕ сервисе. Non-transient (400/auth) → abort без retry.
  2026-05-18 21:45 UTC+3 — _build_provider_priority: только указанный в конфиге default_service.
 """
-
 import json
 import logging
 import random
@@ -22,7 +25,6 @@ from api_clients.base import BaseLLMClient
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
-
 
 def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -78,7 +80,6 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
             pass
 
     return None
-
 
 class LLMMaskGenerator:
     """Генерация regex-маски через LLM. Строго один провайдер — default_service из конфига."""
@@ -246,9 +247,9 @@ class LLMMaskGenerator:
         Вызов LLM через конкретного провайдера.
 
         Returns:
-          - dict с content/provider/model/temperature при успехе
-          - dict с _transient_error=True при transient ошибке (503, timeout и т.д.)
-          - None при non-transient ошибке (400, auth error и т.д.) — retry бессмысленен
+        - dict с content/provider/model/temperature при успехе
+        - dict с _transient_error=True при transient ошибке (503, timeout и т.д.)
+        - None при non-transient ошибке (400, auth error и т.д.) — retry бессмысленен
         """
         client = self.clients.get(provider)
         if not client:
@@ -461,9 +462,9 @@ class LLMMaskGenerator:
             "### ТРЕБУЕМЫЙ ВЫВОД\n"
             "```json\n"
             "{{\n"
-            " \"pattern\": \"...\",\n"
-            " \"params\": {params_list},\n"
-            " \"required\": {required_list}\n"
+            "  \"pattern\": \"...\",\n"
+            "  \"params\": {params_list},\n"
+            "  \"required\": {required_list}\n"
             "}}\n"
             "```\n"
         )
@@ -682,7 +683,11 @@ class LLMMaskGenerator:
 
         # --- JSON-список параметров ---
         params_list = json.dumps(regex_fields, ensure_ascii=False)
-        optional_params = {'coating', 'material', 'execution'}
+        # FIX: русские имена опциональных параметров (были английские — не совпадали с полями ENS)
+        optional_params = {
+            'покрытие', 'марка_материала', 'исполнение',
+            'шаг_резьбы', 'технические_характеристики'
+        }
         required_fields = [f for f in regex_fields if f not in optional_params]
         required_list = json.dumps(required_fields, ensure_ascii=False)
         params_hint = ", ".join(regex_fields[:10])
@@ -718,7 +723,7 @@ class LLMMaskGenerator:
     # --------------------------------------------------------------------------
 
     def _sanitize_filename(self, text: str) -> str:
-        sanitized = re.sub(r'[\\\/:\*?"<>|]', '_', str(text))
+        sanitized = re.sub(r'[\\/:\*?"<>|]', '_', str(text))
         sanitized = re.sub(r'_+', '_', sanitized)
         return sanitized.strip('_')[:80]
 

@@ -1,9 +1,19 @@
 """
 AutoValidator Module
 Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
-LAST_FIX: 2026-05-15 12:52 UTC+3 — _get_ens_examples: поддержка 'наименование_типа' (ENS mapping) помимо 'тип_изделия'
-"""
 
+LAST_FIXES:
+ 2026-05-20 2026-05-20 09:14 UTC+3 — _test_pattern: полное переключение на V2 fuzzy-сравнение
+   (из parametric_client._compare_param_sets). Добавлены:
+   • _normalize_coating — нормализация покрытий (Кд3→Кд, сортировка токенов)
+   • _match_param_keys — fuzzy matching имён параметров
+     (наружный_диаметр_диаметр_вписа ↔ наружный_диаметр_диаметр_вписанного_круга_…)
+   • coating-similarity для покрытие + технические_характеристики
+   • числовая нормализация (str "10" ↔ float "10.0")
+   Ранее strict string compare давал score=0.00 из-за mismatch "Кд.фос.окс" vs "Кд3.фос.окс"
+   и несовпадения имён полей regex vs ENS.
+ 2026-05-15 12:52 UTC+3 — _get_ens_examples: поддержка 'наименование_типа' (ENS mapping) помимо 'тип_изделия'
+"""
 import re
 import logging
 from typing import List, Dict, Any, Optional, Tuple
@@ -14,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Импортируем проверку эквивалентности пустых значений
 try:
-    from core.parametric_client import _is_empty_equivalent
+    from core.parametric_client import _is_empty_equivalent, _text_similarity
 except ImportError:
     # Fallback если parametric_client недоступен
     def _is_empty_equivalent(field: str, value: Any) -> bool:
@@ -27,6 +37,29 @@ except ImportError:
             'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
         }
         return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
+
+    def _text_similarity(a: str, b: str) -> float:
+        if not a or not b:
+            return 0.0
+        a_str = str(a).lower().strip()
+        b_str = str(b).lower().strip()
+        if a_str == b_str:
+            return 1.0
+        def _extract_tokens(text):
+            raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
+            cleaned = []
+            for t in raw:
+                letters = re.sub(r'[0-9]', '', t)
+                if letters:
+                    cleaned.append(letters)
+            return set(cleaned)
+        tokens_a = _extract_tokens(a_str)
+        tokens_b = _extract_tokens(b_str)
+        if not tokens_a or not tokens_b:
+            return 0.0
+        intersection = tokens_a & tokens_b
+        union = tokens_a | tokens_b
+        return len(intersection) / len(union) if union else 0.0
 
 
 @dataclass
@@ -56,7 +89,7 @@ class AutoValidator:
     - Тестирование на N примерах (минимум 10)
     - Score = успешные / всего
     - Успешное извлечение = все required params найдены
-    - Сохранение тестовых примеров для анализа
+    - V2 fuzzy matching: coating normalization, param key fuzzy match, numeric normalization
     """
 
     def __init__(
@@ -75,33 +108,64 @@ class AutoValidator:
         if ens_index_path and Path(ens_index_path).exists():
             self._load_ens_index()
 
+    # ------------------------------------------------------------------
+    # V2 HELPERS (borrowed from parametric_client)
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _token_similarity(a: str, b: str) -> float:
-        """Token-based Jaccard similarity для покрытий."""
-        import re
-        if not a or not b:
-            return 0.0
-        a_str = str(a).lower().strip()
-        b_str = str(b).lower().strip()
-        if a_str == b_str:
-            return 1.0
+    def _normalize_coating(coating: str) -> str:
+        """
+        Нормализация покрытия:
+        - Убирает технологические коды: Кд3 → Кд, Ц9 → Ц
+        - Сортирует токены: Окс.Фос.ЭФП → окс.эфп.фос
+        """
+        if not coating:
+            return coating
+        coating_str = str(coating).strip().lower()
+        if '.' in coating_str:
+            tokens = coating_str.split('.')
+            tokens = [re.sub(r'\d+', '', t) for t in tokens]
+            tokens = [t for t in tokens if t]
+            tokens.sort()
+            return '.'.join(tokens)
+        base = re.sub(r'^(кд|ц|окс|фос|н|ан|хим|пас|бп|неп)\d+', r'\1', coating_str)
+        return base
 
-        def _extract_tokens(text):
-            raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
-            cleaned = []
-            for t in raw:
-                letters = re.sub(r'[0-9]', '', t)
-                if letters:
-                    cleaned.append(letters)
-            return set(cleaned)
+    @staticmethod
+    def _match_param_keys(key_a: str, keys_b: List[str]) -> Optional[str]:
+        """Fuzzy matching имени параметра key_a со списком ключей keys_b."""
+        if not key_a or not keys_b:
+            return None
+        tokens_a = [t for t in key_a.lower().split('_') if len(t) >= 3]
+        if not tokens_a:
+            return None
+        best_match = None
+        best_score = 0.0
+        for key_b in keys_b:
+            tokens_b = [t for t in key_b.lower().split('_') if len(t) >= 3]
+            if not tokens_b:
+                continue
+            matched = 0
+            for ta in tokens_a:
+                for tb in tokens_b:
+                    if ta == tb:
+                        matched += 1
+                        break
+                    if len(ta) >= 4 and len(tb) >= 4:
+                        if ta.startswith(tb) or tb.startswith(ta):
+                            matched += 1
+                            break
+            score = matched / max(len(tokens_a), len(tokens_b)) if max(len(tokens_a), len(tokens_b)) > 0 else 0.0
+            if score > best_score:
+                best_score = score
+                best_match = key_b
+        if best_score >= 0.5:
+            return best_match
+        return None
 
-        tokens_a = _extract_tokens(a_str)
-        tokens_b = _extract_tokens(b_str)
-        if not tokens_a or not tokens_b:
-            return 0.0
-        intersection = tokens_a & tokens_b
-        union = tokens_a | tokens_b
-        return len(intersection) / len(union) if union else 0.0
+    # ------------------------------------------------------------------
+    # ORIGINAL METHODS
+    # ------------------------------------------------------------------
 
     def _load_ens_index(self):
         """Загрузка индекса ЕСН."""
@@ -125,19 +189,7 @@ class AutoValidator:
     ) -> ValidationResult:
         """
         Валидация маски на примерах.
-
-        Args:
-            pattern: Regex паттерн
-            params: Список параметров
-            required: Обязательные параметры
-            standard: Стандарт
-            item_type: Тип изделия
-            ens_examples: Примеры из ЕСН (если None - берем из индекса)
-
-        Returns:
-            ValidationResult
         """
-        # Получаем примеры
         examples = ens_examples or self._get_ens_examples(standard, item_type)
 
         if len(examples) < self.min_examples:
@@ -155,7 +207,6 @@ class AutoValidator:
                 error_message=f"Not enough examples: {len(examples)} < {self.min_examples}"
             )
 
-        # Компилируем паттерн
         try:
             compiled_pattern = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
@@ -170,7 +221,6 @@ class AutoValidator:
                 error_message=f"Invalid regex: {e}"
             )
 
-        # Тестируем на примерах
         details = []
         success_count = 0
 
@@ -206,7 +256,6 @@ class AutoValidator:
     def _get_ens_examples(self, standard: str, item_type: str) -> List[Dict]:
         """
         Получение примеров из ЕСН по стандарту и типу.
-        Тип изделия берется из 'тип_изделия' или 'наименование_типа' (поле 'Наименование типа' из ЕСН).
         """
         if not self._ens_items:
             return []
@@ -215,7 +264,6 @@ class AutoValidator:
         standard_normalized = standard.lower().replace(' ', '')
 
         for item in self._ens_items:
-            # Проверяем стандарт
             item_standard = str(item.get('стандарт', '')).lower().replace(' ', '')
             item_ntd = str(item.get('нтд', '')).lower().replace(' ', '')
 
@@ -224,10 +272,8 @@ class AutoValidator:
                 standard_normalized in item_ntd
             )
 
-            # Проверяем тип — СНАЧАЛА по 'тип_изделия', затем 'наименование_типа' (ENS mapping)
             item_type_val = str(item.get('тип_изделия') or item.get('наименование_типа', '')).lower()
             if not item_type_val:
-                # Fallback на 'тип' ( legacy )
                 item_type_val = str(item.get('тип', '')).lower()
 
             type_match = item_type in item_type_val if item_type else False
@@ -244,7 +290,7 @@ class AutoValidator:
         text: str,
         expected: Dict
     ) -> Dict[str, Any]:
-        """Тестирование паттерна на одном примере."""
+        """Тестирование паттерна на одном примере с V2 fuzzy matching."""
         match = pattern.search(text)
 
         if not match:
@@ -256,49 +302,98 @@ class AutoValidator:
                 'expected': {k: v for k, v in expected.items() if not k.startswith('_')}
             }
 
-        # Извлекаем параметры
         extracted = match.groupdict()
 
-        # Проверяем наличие required параметров
+        # --- Проверяем наличие required параметров ---
         missing = []
         for param in required:
             extracted_val = extracted.get(param)
             expected_val = expected.get(param)
 
-            # Проверяем эквивалентность пустым значениям
             extracted_empty = extracted_val is None or extracted_val == '' or _is_empty_equivalent(param, extracted_val)
             expected_empty = expected_val is None or expected_val == '' or _is_empty_equivalent(param, expected_val)
 
             if extracted_empty and expected_empty:
-                # Оба пустые — OK (опциональный параметр)
                 continue
             elif extracted_val is None or extracted_val == '':
                 missing.append(param)
 
-        # === STRICT CHECK: extracted vs expected values ===
+        # === V2 FUZZY CHECK: extracted vs expected values ===
         mismatches = []
-        for param, extracted_val in extracted.items():
-            if extracted_val is None or str(extracted_val).strip() == '':
+
+        # Параметры, которые не участвуют в сравнении (метаданные/служебные)
+        skip_params = {'тип_изделия', 'item_type', 'standard', 'нтд', 'нтд_1',
+                       'наименование', 'полное_наименование', 'код', 'mdm_key'}
+
+        # Fuzzy matching ключей: строим маппинг extracted_key -> expected_key
+        expected_keys = [k for k in expected.keys() if not k.startswith('_')]
+        matched_map = {}
+        used_expected = set()
+
+        for ext_key in extracted.keys():
+            if ext_key in skip_params:
                 continue
-            expected_val = expected.get(param)
-            if expected_val is None or str(expected_val).strip() == '':
+            ext_val = extracted[ext_key]
+            if ext_val is None or str(ext_val).strip() == '':
+                continue
+            # Точное совпадение
+            if ext_key in expected_keys and ext_key not in used_expected:
+                matched_map[ext_key] = ext_key
+                used_expected.add(ext_key)
+                continue
+            # Fuzzy match
+            candidates = [k for k in expected_keys if k not in used_expected]
+            best_exp = self._match_param_keys(ext_key, candidates)
+            if best_exp:
+                matched_map[ext_key] = best_exp
+                used_expected.add(best_exp)
+
+        # Сравниваем значения по маппингу
+        checked = 0
+        matched = 0
+
+        for ext_key, exp_key in matched_map.items():
+            ext_val = extracted[ext_key]
+            exp_val = expected.get(exp_key)
+
+            ext_str = str(ext_val).lower().strip() if ext_val is not None else ''
+            exp_str = str(exp_val).lower().strip() if exp_val is not None else ''
+
+            # Если оба пустые — пропускаем
+            if not ext_str and not exp_str:
                 continue
 
-            extracted_str = str(extracted_val).lower().strip()
-            expected_str = str(expected_val).lower().strip()
+            # Если один пустой — mismatch
+            if not ext_str or not exp_str:
+                mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (one empty)")
+                continue
 
-            if param == 'покрытие':
-                sim = self._token_similarity(extracted_str, expected_str)
+            checked += 1
+
+            # Сравниваем значения
+            is_coating = (ext_key == 'покрытие') or (exp_key and 'покрытие' in exp_key) or                          (ext_key == 'технические_характеристики') or (exp_key and 'технические_характеристики' in exp_key)
+
+            if is_coating:
+                norm_a = self._normalize_coating(ext_str)
+                norm_b = self._normalize_coating(exp_str)
+                sim = _text_similarity(norm_a, norm_b)
                 if sim < 0.8:
-                    mismatches.append(f"{param}: '{extracted_val}' vs '{expected_val}' (sim={sim:.2f})")
-            elif extracted_str != expected_str:
+                    mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (coating sim={sim:.2f})")
+                else:
+                    matched += 1
+            else:
                 try:
-                    extracted_num = float(extracted_str.replace(',', '.'))
-                    expected_num = float(expected_str.replace(',', '.'))
-                    if extracted_num != expected_num:
-                        mismatches.append(f"{param}: {extracted_val} vs {expected_val}")
+                    num_a = float(ext_str.replace(',', '.'))
+                    num_b = float(exp_str.replace(',', '.'))
+                    if num_a != num_b:
+                        mismatches.append(f"{ext_key}: {ext_val} vs {exp_val}")
+                    else:
+                        matched += 1
                 except ValueError:
-                    mismatches.append(f"{param}: '{extracted_val}' vs '{expected_val}'")
+                    if ext_str != exp_str:
+                        mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}'")
+                    else:
+                        matched += 1
 
         success = len(missing) == 0 and len(mismatches) == 0
 
@@ -319,14 +414,6 @@ class AutoValidator:
     ) -> ValidationResult:
         """
         Валидация маски из базы данных.
-
-        Args:
-            mask_id: ID маски в БД
-            mask_db: Экземпляр MaskDatabase
-            ens_examples: Примеры из ЕСН
-
-        Returns:
-            ValidationResult
         """
         from database.mask_database import MaskRecord
 
