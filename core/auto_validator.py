@@ -74,6 +74,9 @@ class ValidationResult:
 
 
 class AutoValidator:
+    # Class-level cache для ENS индекса (избегаем повторной загрузки)
+    _ens_cache: Dict[str, Any] = {}
+
     def __init__(
         self,
         min_examples: int = 10,
@@ -136,6 +139,24 @@ class AutoValidator:
         return None
 
     def _load_ens_index(self):
+        """Загрузка индекса ЕСН с кэшированием (singleton per path)."""
+        if not self.ens_index_path:
+            return
+        cache_key = str(self.ens_index_path)
+        # Проверяем кэш
+        if cache_key in AutoValidator._ens_cache:
+            self._ens_items = AutoValidator._ens_cache[cache_key]
+            logger.info(f"[AutoValidator] ENS index from cache: {len(self._ens_items)} items")
+            return
+        try:
+            import pickle
+            with open(self.ens_index_path, 'rb') as f:
+                data = pickle.load(f)
+            self._ens_items = data.get('items', [])
+            AutoValidator._ens_cache[cache_key] = self._ens_items
+            logger.info(f"[AutoValidator] Loaded {len(self._ens_items)} ENS items for validation")
+        except Exception as e:
+            logger.warning(f"Failed to load ENS index: {e}")
         try:
             import pickle
             with open(self.ens_index_path, 'rb') as f:
