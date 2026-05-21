@@ -7,15 +7,6 @@ VERSION: 2026-05-20 2026-05-20 14:46 UTC+3 UTC+3
  + api: username/password для OpenWebUI JWT auth
  + mask_generation: default_service для LLMMaskGenerator
 
-LAST_FIXES:
-  2026-05-20 2026-05-20 14:46 UTC+3 UTC+3 — Settings: добавлено поле empty_values (Dict[str, List[str]])
-    для конфигурации пустых значений в валидации (убран хардкод в auto_validator).
-  2026-05-19 22:35 UTC+3 — Settings: добавлено поле default_service для mask_generation.
-  2026-05-18 22:40 UTC+3 — Settings: добавлено поле username для APIConfig (OpenWebUI JWT).
-  2026-05-18 20:45 UTC+3 — Settings: добавлено поле mask_generation с default_service.
-  2026-05-18 19:30 UTC+3 — Settings: добавлено поле default_service.
-  2026-05-18 18:15 UTC+3 — Settings: добавлено поле debug_per_parameter.
-  2026-05-18 16:00 UTC+3 — Settings: добавлено поле result_db_path.
 """
 import os
 import yaml
@@ -43,6 +34,7 @@ class APIConfig:
     password_file: str = ""
     timeout: int = 120
     default_model: str = ""
+    scope: str = ""
 
     def __post_init__(self):
         if self.api_key_file:
@@ -77,6 +69,7 @@ class PromptConfig:
 class MaskGenerationConfig:
     default_service: str = ""
     default_model: str = ""
+    default_temperature: float = 0.1
     prompt_template: str = ""
     save_debug_prompts: bool = False
     debug_prompts_dir: str = "prompts/debug"
@@ -129,7 +122,13 @@ class Settings:
         # Load prompt configs
         prompt_configs = {}
         for name, cfg in config_data.get('prompts', {}).items():
-            prompt_configs[name] = PromptConfig(**cfg)
+            if isinstance(cfg, str):
+                # cfg — путь к файлу шаблона
+                prompt_configs[name] = PromptConfig(template=cfg)
+            elif isinstance(cfg, dict):
+                prompt_configs[name] = PromptConfig(**cfg)
+            else:
+                logger.warning(f"Invalid prompt config for '{name}': {type(cfg)}")
 
         # Load mask generation config
         mask_gen_cfg = MaskGenerationConfig(**config_data.get('mask_generation', {}))
