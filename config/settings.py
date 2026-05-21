@@ -7,6 +7,15 @@ VERSION: 2026-05-20 2026-05-20 14:46 UTC+3 UTC+3
  + api: username/password для OpenWebUI JWT auth
  + mask_generation: default_service для LLMMaskGenerator
 
+LAST_FIXES:
+  2026-05-20 2026-05-20 14:46 UTC+3 UTC+3 — Settings: добавлено поле empty_values (Dict[str, List[str]])
+    для конфигурации пустых значений в валидации (убран хардкод в auto_validator).
+  2026-05-19 22:35 UTC+3 — Settings: добавлено поле default_service для mask_generation.
+  2026-05-18 22:40 UTC+3 — Settings: добавлено поле username для APIConfig (OpenWebUI JWT).
+  2026-05-18 20:45 UTC+3 — Settings: добавлено поле mask_generation с default_service.
+  2026-05-18 19:30 UTC+3 — Settings: добавлено поле default_service.
+  2026-05-18 18:15 UTC+3 — Settings: добавлено поле debug_per_parameter.
+  2026-05-18 16:00 UTC+3 — Settings: добавлено поле result_db_path.
 """
 import os
 import yaml
@@ -151,6 +160,13 @@ def get_settings(config_path: str = "config/config.yaml") -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings.load(config_path)
+    return _settings
+
+
+def reload_settings(config_path: str = "config/config.yaml") -> Settings:
+    global _settings
+    _settings = Settings.load(config_path)
+    logger.info(f"Settings reloaded from {config_path}")
     return _settings
 
 
