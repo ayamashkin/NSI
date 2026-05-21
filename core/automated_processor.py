@@ -57,6 +57,7 @@ def _get_matching_config():
                 v2_exact_threshold = 0.99
                 coating_similarity_threshold = 0.8
                 strict_union_keys = False
+                debug_per_parameter = False
                 numeric_field_weight = 5.0
                 text_field_weight = 2.0
                 default_field_weight = 1.0
