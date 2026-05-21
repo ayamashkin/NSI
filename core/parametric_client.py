@@ -2,11 +2,15 @@
 # FILE: core/parametric_client.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 COMMITS (UTC+3):
-#   2026-05-21 08:23:07  51f335da  21.05.2026
-#   2026-05-21 08:05:56  ee843b22  21.05.2026
-#   2026-05-20 17:47:49  19e8ca02  20.05.2026
-#   2026-05-20 17:39:23  b00c4b25  20.05.2026
-#   2026-05-20 17:31:34  66c66c93  20.05.2026
+# 2026-05-21 08:23:07 51f335da 21.05.2026
+# 2026-05-21 08:05:56 ee843b22 21.05.2026
+# 2026-05-20 17:47:49 19e8ca02 20.05.2026
+# 2026-05-20 17:39:23 b00c4b25 20.05.2026
+# 2026-05-20 17:31:34 66c66c93 20.05.2026
+# =============================================================================
+# FIX 2026-05-21 15:15 UTC+3:
+#   1. _find_in_ens threshold: 0.7 -> 0.5
+#   2. _compare_param_sets: fractional scoring (matched/checked)
 # =============================================================================
 """
 Parametric ENS Client Module
@@ -15,6 +19,9 @@ Level 6: Параметрическое сопоставление с испол
 VERSION: 2026-05-21
 
 LAST_FIXES:
+ 2026-05-21 15:15 UTC+3 — Исправление падения качества распознавания:
+   - _find_in_ens threshold понижен с 0.7 до 0.5
+   - _compare_param_sets возвращает fractional score (matched/checked)
  2026-05-21 08:50 UTC+3 — _normalize_standard теперь использует canonicalize_standard
  (ОСТ 1 с пробелом). Ранее ОСТ 1 → ОСТ1, что ломало exact-match с масками БД.
 """
@@ -29,9 +36,6 @@ from pathlib import Path
 from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
-
-# ... (остальные imports и _get_matching_config, _load_empty_equivalent_values,
-#      _text_similarity, _is_empty_equivalent — без изменений)
 
 # Lazy import для доступа к MatchingConfig (избегаем circular dependency)
 _matching_config = None
@@ -74,7 +78,7 @@ def _load_empty_equivalent_values() -> Dict[str, List[str]]:
                 equiv = data.get('empty_equivalent_values', {})
                 if equiv:
                     _empty_equiv_cache = {k: [str(v).strip() for v in vals]
-                                            for k, vals in equiv.items() if vals}
+                                          for k, vals in equiv.items() if vals}
                     return _empty_equiv_cache
                 break
     except Exception as e:
@@ -296,14 +300,14 @@ class ParametricENSClient:
         relaxed = relaxed.replace('Шайb', 'Шай' + _ru_b)
         relaxed = relaxed.replace('Гайk', 'Гай' + _ru_g)
 
-        # 2. )?(?P< → )? *(?P<
+        # 2. )?(?P< → )? \s*(?P<
         relaxed = re.sub(r'\)\?\(?P<', lambda m: r')?\s*(?P<', relaxed)
 
         # 4. \d+(?:\.\d+)? → \d+(?:[.,]\d+)?
         relaxed = relaxed.replace(r'\d+(?:\\.\d+)?', r'\d+(?:[.,]\d+)?')
         relaxed = relaxed.replace(r'\d+(?:\.\d+)?', r'\d+(?:[.,]\d+)?')
 
-        # 5. ОСТ1 → ОСТ\s*1  (обратная совместимость со старыми масками)
+        # 5. ОСТ1 → ОСТ\s*1 (обратная совместимость со старыми масками)
         if r'ОСТ\s*1' not in relaxed:
             relaxed = re.sub(r'ОСТ1', lambda m: r'ОСТ\s*1', relaxed)
 
@@ -743,15 +747,16 @@ class ParametricENSClient:
             logger.info("[_find_in_ens] RETURNING match: score=%.2f, name=%s",
                         best_score, best_match.get('наименование', '')[:50])
         else:
-            logger.info("[_find_in_ens] No match found (best_score=%.2f < 0.7 threshold)", best_score)
+            logger.info("[_find_in_ens] No match found (best_score=%.2f < 0.5 threshold)", best_score)
 
         with self._find_in_ens_lock:
             self._find_in_ens_cache[cache_key] = {
-                'match': best_match if best_score >= 0.7 else None,
+                'match': best_match if best_score >= 0.5 else None,
                 'debug': debug_candidates
             }
 
-        if best_score < 0.7:
+        # FIX 1: threshold 0.7 -> 0.5
+        if best_score < 0.5:
             return None, debug_candidates
 
         return best_match, debug_candidates
@@ -881,7 +886,7 @@ class ParametricENSClient:
 
         best_score = max(score_ens, score_mask if ens_params_mask else 0.0)
         return best_score, 'partial', {'level': 'partial', 'score_ens': score_ens,
-                                         'score_mask': score_mask if ens_params_mask else None}
+                                        'score_mask': score_mask if ens_params_mask else None}
 
     @staticmethod
     def _match_param_keys(key_a: str, keys_b: List[str]) -> Optional[str]:
@@ -918,7 +923,7 @@ class ParametricENSClient:
     def _compare_param_sets(self, params_a: Dict[str, Any], params_b: Dict[str, Any]) -> float:
         """
         Сравнение двух наборов параметров с fuzzy matching ключей.
-        Score=1.0 если все НЕ-ПУСТЫЕ параметры совпадают.
+        Score = matched / checked (fractional, 0.0..1.0).
         """
         if not params_a or not params_b:
             return 0.0
@@ -1003,31 +1008,29 @@ class ParametricENSClient:
                 norm_a = self._normalize_coating(str_a)
                 norm_b = self._normalize_coating(str_b)
                 sim = _text_similarity(norm_a, norm_b)
-                if sim < 0.8:
-                    if debug_detail:
-                        logger.debug("[_compare] COATING MISMATCH: '%s' vs '%s' (sim=%.2f)", norm_a, norm_b, sim)
-                    return 0.0
-                matched += 1
+                if sim >= 0.8:
+                    matched += 1
+                elif debug_detail:
+                    logger.debug("[_compare] COATING MISMATCH: '%s' vs '%s' (sim=%.2f)", norm_a, norm_b, sim)
             else:
                 try:
                     num_a = float(str_a.replace(',', '.'))
                     num_b = float(str_b.replace(',', '.'))
-                    if num_a != num_b:
-                        if debug_detail:
-                            logger.debug("[_compare] NUM MISMATCH: %s vs %s", val_a, val_b)
-                        return 0.0
-                    matched += 1
+                    if num_a == num_b:
+                        matched += 1
+                    elif debug_detail:
+                        logger.debug("[_compare] NUM MISMATCH: %s vs %s", val_a, val_b)
                 except ValueError:
-                    if str_a != str_b:
-                        if debug_detail:
-                            logger.debug("[_compare] STR MISMATCH: '%s' vs '%s'", val_a, val_b)
-                        return 0.0
-                    matched += 1
+                    if str_a == str_b:
+                        matched += 1
+                    elif debug_detail:
+                        logger.debug("[_compare] STR MISMATCH: '%s' vs '%s'", val_a, val_b)
 
         if checked == 0:
             return 0.0
 
-        return 1.0
+        # FIX 2: fractional scoring вместо бинарного return 1.0
+        return matched / checked
 
     def _normalize_coating(self, coating: str) -> str:
         """

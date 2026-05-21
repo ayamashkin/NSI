@@ -2,11 +2,16 @@
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 COMMITS (UTC+3):
-#   2026-05-21 08:23:07  51f335da  21.05.2026
-#   2026-05-21 08:05:56  ee843b22  21.05.2026
-#   2026-05-20 17:47:49  19e8ca02  20.05.2026
-#   2026-05-20 17:39:23  b00c4b25  20.05.2026
-#   2026-05-20 17:31:34  66c66c93  20.05.2026
+# 2026-05-21 08:23:07 51f335da 21.05.2026
+# 2026-05-21 08:05:56 ee843b22 21.05.2026
+# 2026-05-20 17:47:49 19e8ca02 20.05.2026
+# 2026-05-20 17:39:23 b00c4b25 20.05.2026
+# 2026-05-20 17:31:34 66c66c93 20.05.2026
+# =============================================================================
+# FIX 2026-05-21 15:15 UTC+3:
+#   1. fuzzy threshold: 0.6 -> 0.5 (_fuzzy_match_ens_debug)
+#   2. coating_substitution: force success when ens_code found
+#   3. fuzzy_used: True whenever fuzzy_ens_code is found
 # =============================================================================
 """
 Main Processor Module
@@ -16,9 +21,11 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 VERSION: 2026-05-21
 
 LAST_FIXES:
+ 2026-05-21 15:15 UTC+3 — Исправление падения качества распознавания:
+   - fuzzy threshold понижен с 0.6 до 0.5
+   - coating_substitution форсирует success=True при наличии ens_code
+   - fuzzy_used корректно устанавливается при fuzzy match
  2026-05-21 08:50 UTC+3 — canonicalize_standard при извлечении стандарта и генерации маски.
-  Ранее standard_extractor возвращал ОСТ 1 (с пробелом), а маски в БД могли быть
-  сохранены как ОСТ1 (без пробела) → exact-match не срабатывал.
 """
 
 import json
@@ -171,6 +178,7 @@ class ProcessingResult:
                 and 'params' in self.ens_match and self.ens_match['params']):
             return self.ens_match['params']
         return None
+
 
 class AutomatedParametricProcessor:
     """
@@ -348,8 +356,8 @@ class AutomatedParametricProcessor:
             cached = self._check_cache(clean_text, extracted_standard)
             if cached:
                 logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
-                            clean_text[:50], extracted_standard,
-                            cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
+                             clean_text[:50], extracted_standard,
+                             cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
                 return self._result_from_cache(cached)
             else:
                 logger.info("[CACHE] MISS for '%s' / %s", clean_text[:50], extracted_standard)
@@ -358,7 +366,7 @@ class AutomatedParametricProcessor:
                 logger.debug("[CACHE] skipped (force=True)")
             elif not self.result_db_path:
                 logger.debug("[CACHE] skipped (result_db_path not set)")
-        self._cache_stats['misses'] += 1
+            self._cache_stats['misses'] += 1
 
         logger.info("Processing: %s...", clean_text[:50])
 
@@ -814,8 +822,9 @@ class AutomatedParametricProcessor:
                 if cd.get('params_mismatched'):
                     for pk, pv in cd['params_mismatched'].items():
                         logger.debug("[FUZZY] mismatch: %s: %s", pk, pv)
-            logger.debug("[FUZZY] Best score: %.3f, threshold: 0.6, matched: %s", best_score, best_match is not None and best_score >= 0.6)
-        return (best_match if best_score >= 0.6 else None), debug_candidates
+        # FIX 1: threshold 0.6 -> 0.5
+        logger.debug("[FUZZY] Best score: %.3f, threshold: 0.5, matched: %s", best_score, best_match is not None and best_score >= 0.5)
+        return (best_match if best_score >= 0.5 else None), debug_candidates
 
     def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Переименование параметров — теперь pass-through."""
@@ -1086,7 +1095,7 @@ class AutomatedParametricProcessor:
                         else:
                             logger.debug("[PARAM_MATCH] Fuzzy fallback matched: score=%.2f, ens_code=%s", fuzzy_score, fuzzy_ens_code)
                     else:
-                        logger.warning("[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.6")
+                        logger.warning("[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.5")
 
                     if fuzzy_debug:
                         best_candidate = fuzzy_debug[0]
@@ -1128,8 +1137,8 @@ class AutomatedParametricProcessor:
                         generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         generic_params = self._normalize_params(generic_params)
                         logger.debug("[PARAM_MATCH] Params from generic on text: %s", generic_params)
-                    if not final_matched_params:
-                        final_matched_params = generic_params
+                        if not final_matched_params:
+                            final_matched_params = generic_params
             except Exception as e:
                 logger.debug("[PARAM_MATCH] Generic parse on text error: %s", e)
 
@@ -1240,16 +1249,16 @@ class AutomatedParametricProcessor:
                         logger.debug("[PARAM_MATCH] ENS params mask (from mask): %s", ens_params_mask)
                 except Exception as e:
                     logger.debug("[PARAM_MATCH] Failed to parse ens_name with mask: %s", e)
-            if not ens_params_mask and mask:
-                try:
-                    generic = self._get_generic_pattern(mask.item_type, effective_standard)
-                    if generic:
-                        m = re.search(generic, str(final_ens_name), re.IGNORECASE)
-                        if m:
-                            ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                            logger.debug("[PARAM_MATCH] ENS params mask (from generic): %s", ens_params_mask)
-                except Exception as e:
-                    logger.debug("[PARAM_MATCH] Generic pattern parse error: %s", e)
+        if not ens_params_mask and mask:
+            try:
+                generic = self._get_generic_pattern(mask.item_type, effective_standard)
+                if generic:
+                    m = re.search(generic, str(final_ens_name), re.IGNORECASE)
+                    if m:
+                        ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
+                        logger.debug("[PARAM_MATCH] ENS params mask (from generic): %s", ens_params_mask)
+            except Exception as e:
+                logger.debug("[PARAM_MATCH] Generic pattern parse error: %s", e)
 
         display_params = self._remap_params(final_matched_params) if final_matched_params else {}
         display_ens_params_mask = self._remap_params(ens_params_mask) if ens_params_mask else {}
@@ -1260,12 +1269,12 @@ class AutomatedParametricProcessor:
         ens_name_norm = self.parametric_client._normalize_name(final_ens_name) if final_ens_name else ''
         is_name_exact = text_norm and ens_name_norm and text_norm == ens_name_norm
 
+        # FIX 2: coating_substitution форсирует success=True
         if substitution_info and final_ens_code:
             match_type_out = 'coating_substituted'
             match_type_ru = 'Совпадение после подбора правильного покрытия'
-            if final_score < _get_matching_config().success_threshold:
-                final_score = _get_matching_config().success_threshold
-                logger.info("[PARAM_MATCH] Coating_substituted match: forcing success threshold score=%.2f", final_score)
+            final_score = max(final_score, _get_matching_config().success_threshold)
+            logger.info("[PARAM_MATCH] Coating_substituted match: forcing success threshold score=%.2f", final_score)
         elif is_name_exact and final_ens_code:
             match_type_out = 'name_exact'
             match_type_ru = 'Совпадение по наименованию'
@@ -1303,6 +1312,7 @@ class AutomatedParametricProcessor:
         logger.info("[PARAM_MATCH] RETURN substitution_info=%s: %s", 'SET' if substitution_info else 'NONE', substitution_info)
         logger.info("[PARAM_MATCH] RETURN match_type=%s", match_type_out)
 
+        # FIX 3: fuzzy_used whenever fuzzy_ens_code is found
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
@@ -1327,7 +1337,7 @@ class AutomatedParametricProcessor:
                 'match_type_ru': match_type_ru,
                 'extracted_standard': extracted.get('standard_info'),
                 'extracted_type': extracted.get('item_type'),
-                'fuzzy_used': fuzzy_ens_code is not None and not match_result.ens_code,
+                'fuzzy_used': fuzzy_ens_code is not None,
                 'debug_candidates': debug_candidates[:15] if debug_candidates else [],
                 'fuzzy_score': round(fuzzy_score, 3) if fuzzy_score else 0,
                 'match_result_score': round(match_result.score, 3) if match_result else 0,
