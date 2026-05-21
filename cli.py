@@ -411,7 +411,7 @@ def process_parametric(text, db, ens_index, llm):
 @click.option('--llm', '-l', is_flag=True, help='Использовать LLM для генерации масок')
 @click.option('--validate/--no-validate', default=True, help='Валидировать результаты')
 @click.option('--success-only', is_flag=True, help='Включать только успешные результаты')
-@click.option('--include-details', is_flag=True, help='Включать debug-информацию')
+@click.option('--include-details/--no-include-details', 'include_details', default=None, help='Включать debug-информацию (default из config.output.include_ens_details)')
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 @click.option('--workers', '-w', type=int, default=4, help='Количество параллельных workers')
 @click.option('--result-db', '-r', default='cache/result.db', help='Путь к SQLite БД результатов')
@@ -444,6 +444,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         init_mapper(coating_map)
         click.echo(f"🎨 Карта покрытий загружена: {coating_map}")
     settings = get_settings()
+    # Fallback для include_details из конфига output.include_ens_details
+    if include_details is None:
+        try:
+            include_details = getattr(getattr(settings, 'output', None), 'include_ens_details', True)
+        except Exception:
+            include_details = True
     llm_clients = {}
     if llm:
         llm_clients = _init_llm_clients(settings, all_services=False)
@@ -596,6 +602,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         json_results = []
         for result in valid_results:
             d = result.to_dict()
+            # details оставляем если include_details=True (по умолчанию из конфига)
             if not include_details:
                 d.pop('details', None)
             json_results.append(d)
@@ -636,6 +643,12 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
     from core.automated_processor import AutomatedParametricProcessor
     from config.settings import get_settings
     settings = get_settings()
+    # Fallback для include_details из конфига output.include_ens_details
+    if include_details is None:
+        try:
+            include_details = getattr(getattr(settings, 'output', None), 'include_ens_details', True)
+        except Exception:
+            include_details = True
     llm_clients = {}
     if llm:
         llm_clients = _init_llm_clients(settings, all_services=False)
@@ -679,6 +692,12 @@ def diagnose(text, db, ens_index, llm, coating_map):
     from core.parametric_client import ParametricENSClient
     from config.settings import get_settings
     settings = get_settings()
+    # Fallback для include_details из конфига output.include_ens_details
+    if include_details is None:
+        try:
+            include_details = getattr(getattr(settings, 'output', None), 'include_ens_details', True)
+        except Exception:
+            include_details = True
     llm_clients = {}
     if llm:
         llm_clients = _init_llm_clients(settings, all_services=False)
