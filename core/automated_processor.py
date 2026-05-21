@@ -1,17 +1,24 @@
-#!/usr/bin/env python3
+# =============================================================================
+# FILE: core/automated_processor.py
+# REPO: https://github.com/ayamashkin/NSI
+# LAST 5 COMMITS (UTC+3):
+#   2026-05-21 08:23:07  51f335da  21.05.2026
+#   2026-05-21 08:05:56  ee843b22  21.05.2026
+#   2026-05-20 17:47:49  19e8ca02  20.05.2026
+#   2026-05-20 17:39:23  b00c4b25  20.05.2026
+#   2026-05-20 17:31:34  66c66c93  20.05.2026
+# =============================================================================
 """
 Main Processor Module
 Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2026-05-19
+VERSION: 2026-05-21
 
 LAST_FIXES:
- 2026-05-19 21:45 UTC+3 — RESTORED from b5ae1c32 (safe commit).
-   + ProcessingResult.to_dict() with ens_code/ens_name/level string/match_type_ru
-   + result.db caching restored
-   + ThreadPoolExecutor support preserved
-   + JSON/Excel dual output structure
+ 2026-05-21 08:50 UTC+3 — canonicalize_standard при извлечении стандарта и генерации маски.
+  Ранее standard_extractor возвращал ОСТ 1 (с пробелом), а маски в БД могли быть
+  сохранены как ОСТ1 (без пробела) → exact-match не срабатывал.
 """
 
 import json
@@ -23,6 +30,8 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+from utils.standard_utils import canonicalize_standard
 
 # Lazy import для избежания circular dependency
 _matching_config = None
@@ -53,7 +62,6 @@ def _get_matching_config():
 
 logger = logging.getLogger(__name__)
 
-
 class ProcessingLevel(Enum):
     """Уровни обработки."""
     LEVEL_0_EXTRACT = "standard_extraction"
@@ -64,7 +72,6 @@ class ProcessingLevel(Enum):
     LEVEL_6_PARAMETRIC_MATCH = "parametric_match"
     LEVEL_7_TFIDF_FALLBACK = "tfidf_fallback"
     LEVEL_8_LLM_DIRECT = "llm_direct"
-
 
 class ProcessingResult:
     """Результат обработки."""
@@ -134,7 +141,7 @@ class ProcessingResult:
         return self.details.get('mask_pattern') if self.details else None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Полная сериализация для JSON (как в эталонном results — копия.json)."""
+        """Полная сериализация для JSON."""
         return {
             'text': self.text,
             'level': self.level.value if isinstance(self.level, ProcessingLevel) else str(self.level),
@@ -164,7 +171,6 @@ class ProcessingResult:
                 and 'params' in self.ens_match and self.ens_match['params']):
             return self.ens_match['params']
         return None
-
 
 class AutomatedParametricProcessor:
     """
@@ -233,7 +239,6 @@ class AutomatedParametricProcessor:
         else:
             self.llm_generator = None
 
-        # Загружаем skip_fields из settings и передаём в ParametricENSClient
         skip_fields = None
         if self.settings and hasattr(self.settings, 'output') and hasattr(self.settings.output, 'ens_params_skip_fields'):
             skip_fields = self.settings.output.ens_params_skip_fields
@@ -263,8 +268,6 @@ class AutomatedParametricProcessor:
             cached = manager.get_result(article, text)
             if cached:
                 logger.debug("[CACHE] DB found: ens_code=%s updated_at=%s", cached.get('ens_code'), cached.get('updated_at'))
-            if cached:
-                # Проверяем TTL
                 updated_at = cached.get('updated_at')
                 if updated_at:
                     try:
@@ -273,7 +276,6 @@ class AutomatedParametricProcessor:
                             self._cache_stats['hits'] += 1
                             return cached
                     except Exception:
-                        # Если не удалось распарсить дату, всё равно используем кэш
                         self._cache_stats['hits'] += 1
                         return cached
                 else:
@@ -285,7 +287,6 @@ class AutomatedParametricProcessor:
 
     def _result_from_cache(self, cached: Dict[str, Any]) -> ProcessingResult:
         """Восстановить ProcessingResult из кэшированной записи result.db."""
-        # Десериализация JSON-полей
         params = cached.get('params') or {}
         ens_params = cached.get('ens_params') or {}
         ens_params_mask = cached.get('ens_params_mask') or {}
@@ -300,7 +301,6 @@ class AutomatedParametricProcessor:
                 'params': ens_params
             }
         details = cached.get('details') or {}
-        # Добавляем информацию о кэше
         details['from_cache'] = True
         details['cached_at'] = cached.get('updated_at')
 
@@ -328,20 +328,10 @@ class AutomatedParametricProcessor:
     def process(self, text: str, article: str = "", force: bool = False) -> ProcessingResult:
         """
         Обработка одной строки номенклатуры.
-        Поддерживает кэширование через result.db.
-
-        Args:
-            text: Строка номенклатуры
-            article: Артикул (для ключа кэша)
-            force: Принудительный пересчёт (игнорировать кэш)
-
-        Returns:
-            ProcessingResult
         """
         import time
         start_time = time.time()
 
-        # === LEVEL 0: Standard extraction (needed for cache key) ===
         clean_text = text.strip().rstrip(',.;: ')
         if clean_text != text.strip():
             logger.debug("Cleaned trailing punctuation: '%s' -> '%s'", text, clean_text)
@@ -349,9 +339,9 @@ class AutomatedParametricProcessor:
         extracted = self.standard_extractor.extract_all(clean_text)
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
-        extracted_standard = standard_info.normalized if standard_info else None
+        extracted_standard = canonicalize_standard(standard_info.normalized) if standard_info else None
 
-        # === CACHE CHECK (after extraction, so we have standard for the key) ===
+        # CACHE CHECK
         logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
                      clean_text[:50], extracted_standard, self.result_db_path)
         if not force and self.result_db_path:
@@ -372,14 +362,13 @@ class AutomatedParametricProcessor:
 
         logger.info("Processing: %s...", clean_text[:50])
 
-        # standard_info и item_type уже извлечены выше для кэша
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
 
         if not standard_info or not item_type:
             return self._llm_direct_process(clean_text, start_time)
 
-        standard = standard_info.normalized
+        standard = canonicalize_standard(standard_info.normalized)
         logger.info("[PROCESS] standard='%s', item_type='%s', clean_text='%s'", standard, item_type, clean_text[:60])
 
         # Level 1: Проверка MaskDatabase
@@ -460,8 +449,9 @@ class AutomatedParametricProcessor:
                 ens_item_type = str(type_from_ens).strip().lower()
                 logger.info("[AutoProcessor] Тип из ЕСН: '%s' (был: '%s')", ens_item_type, item_type)
 
+        canon_std = canonicalize_standard(standard)
         mask, attempts = self.llm_generator.generate_mask(
-            standard=standard,
+            standard=canon_std,
             item_type=ens_item_type,
             examples=examples,
             name=text,
@@ -469,7 +459,7 @@ class AutomatedParametricProcessor:
         )
 
         if mask:
-            logger.info("Generated mask for %s/%s", standard, item_type)
+            logger.info("Generated mask for %s/%s", canon_std, item_type)
             return mask
 
         return None
@@ -917,7 +907,7 @@ class AutomatedParametricProcessor:
 
         extracted_std = None
         if extracted.get('standard_info'):
-            extracted_std = extracted['standard_info'].normalized
+            extracted_std = canonicalize_standard(extracted['standard_info'].normalized)
         effective_standard = getattr(mask, 'standard', None) or extracted_std or ''
         if not getattr(mask, 'standard', None) and extracted_std:
             mask.standard = extracted_std
@@ -1030,7 +1020,7 @@ class AutomatedParametricProcessor:
                     substituted_params, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
                     if substitution_info:
                         logger.info("[PARAM_MATCH] Coating substitution applied: %s -> %s",
-                                   substitution_info['original'], substitution_info['corrected'])
+                                    substitution_info['original'], substitution_info['corrected'])
                     else:
                         logger.debug("[PARAM_MATCH] Coating substitution: no substitution applied")
                 else:
@@ -1087,7 +1077,6 @@ class AutomatedParametricProcessor:
                     if fuzzy_match:
                         fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
                         fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
-                        # STRICT NUMERIC VALIDATION
                         numeric_mismatches = self._validate_numeric_params(search_params, fuzzy_match)
                         if numeric_mismatches:
                             logger.warning("[PARAM_MATCH] Fuzzy match REJECTED due to numeric mismatches: %s", numeric_mismatches)
@@ -1139,8 +1128,8 @@ class AutomatedParametricProcessor:
                         generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
                         generic_params = self._normalize_params(generic_params)
                         logger.debug("[PARAM_MATCH] Params from generic on text: %s", generic_params)
-                        if not final_matched_params:
-                            final_matched_params = generic_params
+                    if not final_matched_params:
+                        final_matched_params = generic_params
             except Exception as e:
                 logger.debug("[PARAM_MATCH] Generic parse on text error: %s", e)
 
@@ -1196,20 +1185,19 @@ class AutomatedParametricProcessor:
         else:
             final_score = max(match_result.score, fuzzy_score)
 
-        # DYNAMIC CONFIDENCE: penalize for mismatched params
         if fuzzy_mismatched_params:
-            penalty = min(_get_matching_config().max_confidence_penalty, _get_matching_config().confidence_penalty_per_mismatch * len(fuzzy_mismatched_params))
+            penalty = min(_get_matching_config().max_confidence_penalty,
+                          _get_matching_config().confidence_penalty_per_mismatch * len(fuzzy_mismatched_params))
             final_score = max(0.0, final_score - penalty)
-            logger.info("[PARAM_MATCH] Confidence penalty: -%.2f for %d mismatches, final=%.3f", penalty, len(fuzzy_mismatched_params), final_score)
+            logger.info("[PARAM_MATCH] Confidence penalty: -%.2f for %d mismatches, final=%.3f",
+                        penalty, len(fuzzy_mismatched_params), final_score)
 
-        # Получаем параметры из ENS записи — используем skip_fields из parametric_client
         ens_params_from_index = None
         if final_ens_code:
             try:
                 ens_item = self._get_ens_by_code(final_ens_code)
                 if ens_item:
                     import math
-                    # Используем skip_fields из parametric_client (загружено из конфига)
                     skip_fields = getattr(self.parametric_client, '_skip_fields', set())
                     base_skip = {'_match_score', '_match_type', 'item_type', 'standard'}
                     skip_fields = skip_fields | base_skip
@@ -1239,7 +1227,6 @@ class AutomatedParametricProcessor:
             logger.debug("[PARAM_MATCH] Normalized ens_params: %s", ens_params_from_index)
 
         ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
-        # Если parametric_client вернул regex_only — ens_params_mask уже заполнен extracted_params
         if not ens_params_mask and fallback_params:
             ens_params_mask = fallback_params
         if not ens_params_mask and final_ens_name:
@@ -1276,7 +1263,6 @@ class AutomatedParametricProcessor:
         if substitution_info and final_ens_code:
             match_type_out = 'coating_substituted'
             match_type_ru = 'Совпадение после подбора правильного покрытия'
-            # Coating substitution привела к fuzzy match — считаем success
             if final_score < _get_matching_config().success_threshold:
                 final_score = _get_matching_config().success_threshold
                 logger.info("[PARAM_MATCH] Coating_substituted match: forcing success threshold score=%.2f", final_score)
@@ -1284,7 +1270,6 @@ class AutomatedParametricProcessor:
             match_type_out = 'name_exact'
             match_type_ru = 'Совпадение по наименованию'
         elif match_result.ens_code:
-            # Map all parametric_client match_types explicitly
             pc_type = match_result.match_type
             if pc_type == 'name_exact' or is_name_exact:
                 match_type_out = 'name_exact'
@@ -1305,7 +1290,6 @@ class AutomatedParametricProcessor:
                 match_type_out = pc_type or 'unknown'
                 match_type_ru = 'Сопоставление по параметрам'
         elif fuzzy_ens_code:
-            # Если fuzzy нашел, но V2 подтвердил exact — это parametric_full
             if v2_computed and v2_score >= 0.99:
                 match_type_out = 'parametric_full'
                 match_type_ru = 'Полное совпадение параметров (V2 + fuzzy)'
@@ -1347,8 +1331,8 @@ class AutomatedParametricProcessor:
                 'debug_candidates': debug_candidates[:15] if debug_candidates else [],
                 'fuzzy_score': round(fuzzy_score, 3) if fuzzy_score else 0,
                 'match_result_score': round(match_result.score, 3) if match_result else 0,
-                'v2_score': round(self.details.get('v2_score', 0), 3) if self.details and 'v2_score' in self.details else None,
-                'v2_computed': self.details.get('v2_computed', False) if self.details else False,
+                'v2_score': round(match_result.details.get('v2_score', 0), 3) if match_result and hasattr(match_result, 'details') and match_result.details and 'v2_score' in match_result.details else None,
+                'v2_computed': match_result.details.get('v2_computed', False) if match_result and hasattr(match_result, 'details') and match_result.details else False,
                 'coating_substitution': substitution_info,
                 'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
                 **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().debug_per_parameter and fuzzy_debug else {}),

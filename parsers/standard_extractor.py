@@ -1,6 +1,19 @@
+# =============================================================================
+# FILE: parsers/standard_extractor.py
+# REPO: https://github.com/ayamashkin/NSI
+# LAST 5 COMMITS (UTC+3):
+#   2026-05-21 08:23:07  51f335da  21.05.2026
+#   2026-05-21 08:05:56  ee843b22  21.05.2026
+#   2026-05-20 17:47:49  19e8ca02  20.05.2026
+#   2026-05-20 17:39:23  b00c4b25  20.05.2026
+#   2026-05-20 17:31:34  66c66c93  20.05.2026
+# =============================================================================
 """
 Standard Extractor Module
 Level 0: Детерминированное извлечение стандарта из текста номенклатуры.
+
+LAST_FIX: 2026-05-21 08:50 UTC+3 — normalized теперь использует canonicalize_standard,
+чтобы ОСТ 1 всегда возвращался с пробелом (ОСТ 1 34505-80, не ОСТ1 34505-80).
 """
 
 import re
@@ -8,6 +21,8 @@ import logging
 from typing import Optional, Dict, Any, Tuple, List
 from dataclasses import dataclass
 from enum import Enum
+
+from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +34,7 @@ class StandardType(str, Enum):
     TU = "ТУ"
     ISO = "ISO"
     DIN = "DIN"
-    RAM = "РАМ"  # Регистр авиационных материалов
+    RAM = "РАМ"
     UNKNOWN = "UNKNOWN"
 
 
@@ -35,10 +50,9 @@ class StandardInfo:
 
     @property
     def normalized(self) -> str:
-        """Нормализованное название стандарта."""
-        if self.year:
-            return f"{self.standard_type.value} {self.standard_number}-{self.year}"
-        return f"{self.standard_type.value} {self.standard_number}"
+        """Нормализованное название стандарта (канонический вид)."""
+        raw = self.full_name if self.full_name else f"{self.standard_type.value} {self.standard_number}"
+        return canonicalize_standard(raw)
 
     def to_dict(self) -> Dict[str, Any]:
         """Сериализация для JSON."""
@@ -54,52 +68,34 @@ class StandardInfo:
 class StandardExtractor:
     """
     Извлечение стандарта из текста номенклатуры.
-
-    Features:
-    - Поддержка ГОСТ, ОСТ, ТУ, ISO, DIN, РАМ
-    - Детерминировано, быстро (< 1ms)
-    - Не использует LLM
     """
 
-    # Паттерны для разных типов стандартов
     PATTERNS = {
         StandardType.GOST: [
-            # ГОСТ 7798-70
             r'ГОСТ\s*(\d+)-(\d+)',
-            # ГОСТ Р 52646-2006
             r'ГОСТ\s*[РR]?\s*(\d+)-(\d+)',
-            # ГОСТ ISO 4014-2013
             r'ГОСТ\s*ISO\s*(\d+)-(\d+)',
         ],
         StandardType.OST: [
-            # ОСТ 1 31133-80
             r'ОСТ\s*(\d+)\s*(\d+)-(\d+)',
-            # ОСТ1 31133-80 (без пробела)
             r'ОСТ(\d+)\s*(\d+)-(\d+)',
         ],
         StandardType.TU: [
-            # ТУ 3615-006-00220302-2003
             r'ТУ\s*(\d+-\d+-\d+)',
         ],
         StandardType.ISO: [
-            # ISO 4014:2011
             r'ISO\s*(\d+):?(\d+)?',
         ],
         StandardType.DIN: [
-            # DIN 933
             r'DIN\s*(\d+)',
-            # DIN EN ISO 4014
             r'DIN\s*EN\s*ISO\s*(\d+):?(\d+)?',
         ],
         StandardType.RAM: [
-            # РАМ.758416.003
             r'РАМ\.(\d+)\.(\d+)',
-            # РАМ 758416 003
             r'РАМ\s+(\d+)\s+(\d+)',
         ]
     }
 
-    # Паттерны для определения типа изделия
     TYPE_PATTERNS = {
         'болт': r'\b[Бб]олт\b',
         'винт': r'\b[Вв]инт\b',
@@ -123,47 +119,30 @@ class StandardExtractor:
         self._compiled = {}
         for std_type, patterns in self.PATTERNS.items():
             self._compiled[std_type] = [re.compile(p, re.IGNORECASE) for p in patterns]
-
         self._type_compiled = {
             item_type: re.compile(pattern, re.IGNORECASE)
             for item_type, pattern in self.TYPE_PATTERNS.items()
         }
 
     def extract(self, text: str) -> Optional[StandardInfo]:
-        """
-        Извлечение стандарта из текста.
-
-        Args:
-            text: Строка номенклатуры
-
-        Returns:
-            StandardInfo или None
-        """
+        """Извлечение стандарта из текста."""
         if not text:
             return None
-
-        text = text.strip()
-        # Очистка от пунктуации в конце (Шайба ...-ОСТ 1 34505-80, -> Шайба ...-ОСТ 1 34505-80)
-        text = text.rstrip(',.;: ')
-
-        # Пробуем каждый тип стандарта
+        text = text.strip().rstrip(',.;: ')
         for std_type, patterns in self._compiled.items():
             for pattern in patterns:
                 match = pattern.search(text)
                 if match:
                     return self._parse_match(text, match, std_type)
-
         return None
 
     def _parse_match(self, text: str, match: re.Match, std_type: StandardType) -> StandardInfo:
         """Парсинг match в StandardInfo."""
         groups = match.groups()
-
         if std_type == StandardType.GOST:
             number = groups[0]
             year = groups[1] if len(groups) > 1 else None
         elif std_type == StandardType.OST:
-            # ОСТ 1 31133-80 -> groups: ('1', '31133', '80')
             if len(groups) >= 3:
                 number = f"{groups[0]} {groups[1]}"
                 year = groups[2]
@@ -187,7 +166,6 @@ class StandardExtractor:
             year = None
 
         full_name = match.group(0)
-
         return StandardInfo(
             standard_type=std_type,
             standard_number=number,
@@ -198,37 +176,19 @@ class StandardExtractor:
         )
 
     def extract_type(self, text: str) -> Optional[str]:
-        """
-        Определение типа изделия из текста.
-
-        Args:
-            text: Строка номенклатуры
-
-        Returns:
-            Тип изделия (болт, гайка, etc.) или None
-        """
+        """Определение типа изделия из текста."""
         if not text:
             return None
-
         text_lower = text.lower()
-
-        # Проверяем паттерны в порядке приоритета
         for item_type, pattern in self._type_compiled.items():
             if pattern.search(text_lower):
                 return item_type
-
         return None
 
     def extract_all(self, text: str) -> Dict[str, Any]:
-        """
-        Извлечение всех данных (стандарт + тип).
-
-        Returns:
-            Словарь с standard_info и item_type
-        """
+        """Извлечение всех данных (стандарт + тип)."""
         standard = self.extract(text)
         item_type = self.extract_type(text)
-
         return {
             'standard_info': standard,
             'item_type': item_type,
@@ -245,13 +205,11 @@ class StandardExtractor:
         total = len(texts)
         found = 0
         by_type = {t.value: 0 for t in StandardType}
-
         for text in texts:
             info = self.extract(text)
             if info:
                 found += 1
                 by_type[info.standard_type.value] += 1
-
         return {
             'total': total,
             'found': found,
@@ -260,7 +218,6 @@ class StandardExtractor:
         }
 
 
-# Глобальный singleton
 _extractor_instance: Optional[StandardExtractor] = None
 
 

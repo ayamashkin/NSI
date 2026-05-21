@@ -1,10 +1,20 @@
+# =============================================================================
+# FILE: core/mask_database.py
+# REPO: https://github.com/ayamashkin/NSI
+# LAST 5 COMMITS (UTC+3):
+#   2026-05-21 08:23:07  51f335da  21.05.2026
+#   2026-05-21 08:05:56  ee843b22  21.05.2026
+#   2026-05-20 17:47:49  19e8ca02  20.05.2026
+#   2026-05-20 17:39:23  b00c4b25  20.05.2026
+#   2026-05-20 17:31:34  66c66c93  20.05.2026
+# =============================================================================
 """
 Mask Database Module
 SQLite-based storage for regex masks with auto-validation support.
 
-LAST_FIX: 2026-05-20 2026-05-20 14:55 UTC+3 UTC+3 — save_mask: created_at обновляется
-  при replace_existing и ON CONFLICT (ранее оставался старый timestamp,
-  что приводило к stale cache в result.db).
+LAST_FIX: 2026-05-21 08:50 UTC+3 — canonicalize_standard при save/get/migrate.
+  Ранее маски сохранялись с ОСТ1 (без пробела), а standard_extractor возвращал
+  ОСТ 1 (с пробелом) → exact-match не срабатывал, маска не находилась.
 """
 import sqlite3
 import hashlib
@@ -13,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +105,35 @@ class MaskDatabase:
                 ON masks(pattern_hash)
             """)
             conn.commit()
-            logger.info(f"[MaskDB] Initialized: {self.db_path}")
+        logger.info(f"[MaskDB] Initialized: {self.db_path}")
+        self._migrate_standards()
+
+    def _migrate_standards(self):
+        """Миграция: привести все существующие standard к каноническому виду."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, standard FROM masks")
+            rows = cursor.fetchall()
+            updated = 0
+            for row_id, std in rows:
+                canon = canonicalize_standard(std)
+                if canon != std:
+                    cursor.execute(
+                        "UPDATE masks SET standard = ? WHERE id = ?",
+                        (canon, row_id)
+                    )
+                    updated += 1
+            conn.commit()
+            if updated:
+                logger.info("[MaskDB] Migrated %d standards to canonical form", updated)
 
     def _compute_pattern_hash(self, pattern: str) -> str:
         """Вычисление хеша паттерна для дедупликации."""
         return hashlib.md5(pattern.encode('utf-8')).hexdigest()
 
     def get_mask(self, standard: str, item_type: str) -> Optional[MaskRecord]:
-        """Получение маски по стандарту и типу."""
+        """Получение маски по стандарту и типу (standard канонизируется)."""
+        canon_std = canonicalize_standard(standard)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -111,7 +144,7 @@ class MaskDatabase:
                 WHERE standard = ? AND item_type = ?
                 ORDER BY auto_score DESC, created_at DESC
                 LIMIT 1
-            """, (standard, item_type))
+            """, (canon_std, item_type))
             row = cursor.fetchone()
             if row:
                 return MaskRecord(
@@ -169,19 +202,11 @@ class MaskDatabase:
         auto_activate: bool = True,
         replace_existing: bool = False
     ) -> Optional[int]:
-        """Сохранение маски в БД.
-
-        Args:
-            mask: запись маски
-            auto_activate: автоматически активировать если score >= threshold
-            replace_existing: заменить существующую маску для той же пары (standard, item_type)
-
-        Returns:
-            ID сохраненной маски или None
-        """
+        """Сохранение маски в БД с канонизацией standard."""
+        canon_std = canonicalize_standard(mask.standard)
         pattern_hash = self._compute_pattern_hash(mask.pattern)
         mask_data = {
-            'standard': mask.standard,
+            'standard': canon_std,
             'item_type': mask.item_type.upper(),
             'pattern': mask.pattern,
             'params': ','.join(mask.params),
@@ -196,7 +221,6 @@ class MaskDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            # Проверяем существующую маску для той же пары (standard, item_type)
             if replace_existing:
                 cursor.execute("""
                     SELECT id FROM masks
@@ -206,26 +230,25 @@ class MaskDatabase:
                 existing = cursor.fetchone()
                 if existing:
                     existing_id = existing[0]
-                    logger.info(f"[MaskDB] Replacing mask #{existing_id} for {mask.standard}/{mask.item_type}")
+                    logger.info(f"[MaskDB] Replacing mask #{existing_id} for {canon_std}/{mask.item_type}")
                     cursor.execute("""
                         UPDATE masks SET
-                        pattern = :pattern,
-                        params = :params,
-                        required = :required,
-                        auto_score = :auto_score,
-                        is_active = :is_active,
-                        source = :source,
-                        test_examples = :test_examples,
-                        pattern_hash = :pattern_hash,
-                        created_at = CURRENT_TIMESTAMP,
-                        last_used = CURRENT_TIMESTAMP
+                            pattern = :pattern,
+                            params = :params,
+                            required = :required,
+                            auto_score = :auto_score,
+                            is_active = :is_active,
+                            source = :source,
+                            test_examples = :test_examples,
+                            pattern_hash = :pattern_hash,
+                            created_at = CURRENT_TIMESTAMP,
+                            last_used = CURRENT_TIMESTAMP
                         WHERE id = :existing_id
                     """, {**mask_data, 'existing_id': existing_id})
                     conn.commit()
                     logger.info(f"[MaskDB] Mask #{existing_id} replaced (created_at updated)")
                     return existing_id
 
-            # INSERT или UPDATE по pattern_hash
             cursor.execute("""
                 INSERT INTO masks (
                     standard, item_type, pattern, params, required,
@@ -247,7 +270,7 @@ class MaskDatabase:
             conn.commit()
             if result:
                 mask_id = result[0]
-                logger.info(f"[MaskDB] Mask saved: ID={mask_id}, {mask.standard}/{mask.item_type}, score={mask.auto_score:.2f}")
+                logger.info(f"[MaskDB] Mask saved: ID={mask_id}, {canon_std}/{mask.item_type}, score={mask.auto_score:.2f}")
                 return mask_id
             return None
 
