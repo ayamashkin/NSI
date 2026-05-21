@@ -1,12 +1,6 @@
 """
 Configuration Management Module
 Handles loading and validation of application configuration from YAML files.
-
-VERSION: 2026-05-20 2026-05-20 14:46 UTC+3 UTC+3
- + empty_values: Dict[str, List[str]] для validation (auto_validator)
- + api: username/password для OpenWebUI JWT auth
- + mask_generation: default_service для LLMMaskGenerator
-
 """
 import os
 import yaml
@@ -70,6 +64,7 @@ class MaskGenerationConfig:
     default_service: str = ""
     default_model: str = ""
     default_temperature: float = 0.1
+    keyword_match_from_name: bool = True
     prompt_template: str = ""
     save_debug_prompts: bool = False
     debug_prompts_dir: str = "prompts/debug"
@@ -114,33 +109,40 @@ class Settings:
         with open(path, 'r', encoding='utf-8') as f:
             config_data = yaml.safe_load(f) or {}
 
+        def _filter_fields(dataclass_type, data: dict) -> dict:
+            known = {f.name for f in dataclass_type.__dataclass_fields__.values()}
+            filtered = {k: v for k, v in data.items() if k in known}
+            skipped = set(data.keys()) - known
+            if skipped:
+                logger.warning(f"Unknown {dataclass_type.__name__} fields skipped: {skipped}")
+            return filtered
+
         # Load API configs
         api_configs = {}
         for name, cfg in config_data.get('api', {}).items():
-            api_configs[name] = APIConfig(**cfg)
+            api_configs[name] = APIConfig(**_filter_fields(APIConfig, cfg))
 
         # Load prompt configs
         prompt_configs = {}
         for name, cfg in config_data.get('prompts', {}).items():
             if isinstance(cfg, str):
-                # cfg — путь к файлу шаблона
                 prompt_configs[name] = PromptConfig(template=cfg)
             elif isinstance(cfg, dict):
-                prompt_configs[name] = PromptConfig(**cfg)
+                prompt_configs[name] = PromptConfig(**_filter_fields(PromptConfig, cfg))
             else:
                 logger.warning(f"Invalid prompt config for '{name}': {type(cfg)}")
 
         # Load mask generation config
-        mask_gen_cfg = MaskGenerationConfig(**config_data.get('mask_generation', {}))
+        mask_gen_cfg = MaskGenerationConfig(**_filter_fields(MaskGenerationConfig, config_data.get('mask_generation', {})))
 
         return cls(
-            database=DatabaseConfig(**config_data.get('database', {})),
+            database=DatabaseConfig(**_filter_fields(DatabaseConfig, config_data.get('database', {}))),
             api=api_configs,
             prompts=prompt_configs,
             mask_generation=mask_gen_cfg,
             default_service=config_data.get('default_service', ''),
-            output=OutputConfig(**config_data.get('output', {})),
-            logging=LoggingConfig(**config_data.get('logging', {})),
+            output=OutputConfig(**_filter_fields(OutputConfig, config_data.get('output', {}))),
+            logging=LoggingConfig(**_filter_fields(LoggingConfig, config_data.get('logging', {}))),
             empty_values=config_data.get('empty_values', {})
         )
 
