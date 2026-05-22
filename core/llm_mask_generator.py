@@ -1,5 +1,5 @@
 # =============================================================================
-# FILE: generators/llm_mask_generator.py
+# FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 COMMITS (UTC+3):
 # 2026-05-21 08:23:07 51f335da 21.05.2026
@@ -15,11 +15,14 @@
 #    metadata_dict contains provider, model, temperature, tokens.
 #    This matches cli.py expectations (meta.get("provider")).
 # =============================================================================
+# FIX 2026-05-22 19:11 UTC+3:
+# 3. ADDED yaml.safe_load fallback in _parse_mask_response for single-quoted
+#    JSON and unquoted keys (fixes "Expecting property name enclosed in double quotes").
+# 4. ADDED debug logging of raw LLM response for diagnostics.
+# =============================================================================
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
-
-LAST_FIX: 2026-05-22 14:04 UTC+3 — ENS examples restored + return signature fixed.
 """
 
 import json
@@ -55,10 +58,10 @@ class LLMMaskGenerator:
     """Генератор масок через LLM с ENS-примерами."""
 
     def __init__(
-        self,
-        clients: Dict[str, Any],
-        settings: Any = None,
-        max_retries: int = 3,
+            self,
+            clients: Dict[str, Any],
+            settings: Any = None,
+            max_retries: int = 3,
     ):
         self.clients = clients
         self.settings = settings
@@ -95,7 +98,7 @@ class LLMMaskGenerator:
             examples = validator._get_ens_examples(standard, item_type)
             if examples:
                 logger.info("[LLMMaskGenerator] Loaded %d ENS examples for %s/%s",
-                           len(examples), standard, item_type)
+                            len(examples), standard, item_type)
                 return examples[:max_examples]
         except Exception as e:
             logger.warning("[LLMMaskGenerator] Failed to load examples: %s", e)
@@ -113,10 +116,10 @@ class LLMMaskGenerator:
             visible = []
             hidden = []
             for key in ["тип_изделия", "наименование_типа", "исполнение",
-                       "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
-                       "покрытие", "толщина_проката_стенки_полки",
-                       "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-                       "нтд_1", "нтд_2"]:
+                        "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
+                        "покрытие", "толщина_проката_стенки_полки",
+                        "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+                        "нтд_1", "нтд_2"]:
                 val = ex.get(key)
                 if val and str(val).strip():
                     val_str = str(val).strip()
@@ -136,12 +139,12 @@ class LLMMaskGenerator:
         param_counts = {}
         for ex in examples:
             for key in ["исполнение", "номинальный_диаметр_резьбы", "длина",
-                       "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
+                        "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
                 if ex.get(key) and str(ex.get(key)).strip():
                     param_counts[key] = param_counts.get(key, 0) + 1
         total = len(examples)
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
-            lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
+            lines.append(f" {key}: {count} из {total} ({count / total * 100:.0f}%)")
         lines.append("")
         return "\n".join(lines)
 
@@ -162,8 +165,8 @@ class LLMMaskGenerator:
         return self._default_template()
 
     def _default_template(self) -> str:
-        """Default template with v3 rules."""
-        return """Ты — эксперт по техническим стандартам ГОСТ/ОСТ/ТУ и регулярным выражениям Python 3 (re модуль).
+        r"""Default template with v3 rules."""
+        return r"""Ты — эксперт по техническим стандартам ГОСТ/ОСТ/ТУ и регулярным выражениям Python 3 (re модуль).
 
 ### === ЖЁСТКИЕ ЗАПРЕТЫ (нарушение = брак) ===
 
@@ -198,7 +201,7 @@ class LLMMaskGenerator:
 - [ ] `^` и `$` присутствуют?"""
 
     def _build_prompt(self, standard: str, item_type: str, examples: List[Dict],
-                     name: str = "", standard_info: Any = None) -> str:
+                      name: str = "", standard_info: Any = None) -> str:
         """Собрать промпт с ENS-примерами."""
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
@@ -233,12 +236,12 @@ class LLMMaskGenerator:
         return prompt
 
     def generate_mask(
-        self,
-        standard: str,
-        item_type: str,
-        examples: Optional[List[Dict]] = None,
-        name: str = "",
-        standard_info: Any = None,
+            self,
+            standard: str,
+            item_type: str,
+            examples: Optional[List[Dict]] = None,
+            name: str = "",
+            standard_info: Any = None,
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
         """
         Генерация маски через LLM с ENS-примерами.
@@ -256,7 +259,7 @@ class LLMMaskGenerator:
         prompt = self._build_prompt(canon_std, item_type, examples, name, standard_info)
         service, model, temperature = self._resolve_service()
         logger.info("[LLMMaskGenerator] Generating mask for %s/%s via %s (examples=%d)",
-                   canon_std, item_type, service, len(examples))
+                    canon_std, item_type, service, len(examples))
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             for svc_name, client in self.clients.items():
@@ -288,7 +291,7 @@ class LLMMaskGenerator:
                 except Exception as e:
                     last_error = e
                     logger.debug("[LLMMaskGenerator] %s attempt %d failed: %s",
-                               svc_name, attempt, e)
+                                 svc_name, attempt, e)
         logger.error("[LLMMaskGenerator] Failed after %d attempts: %s",
                      self.max_retries, last_error)
         return None, None
@@ -360,9 +363,13 @@ class LLMMaskGenerator:
                     text = str(response)
 
                 if text and len(text) > 10:
-                    tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens", 0)
-                    tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client, "_last_completion_tokens", 0)
+                    tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens",
+                                                                                        0)
+                    tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client,
+                                                                                                "_last_completion_tokens",
+                                                                                                0)
                     logger.info("[LLMMaskGenerator] %s success, response length=%d", client_type, len(text))
+                    logger.debug("[LLM] Raw content from %s (len=%d): %r", client_type, len(text), text[:500])
                     return {
                         "text": text,
                         "model": model,
@@ -390,23 +397,121 @@ class LLMMaskGenerator:
         return None
 
     def _parse_mask_response(
-        self,
-        text: str,
-        standard: str,
-        item_type: str,
-        service: str = "",
-        model: str = "",
-        temperature: float = 0.0,
-        tokens_prompt: int = 0,
-        tokens_completion: int = 0,
+            self,
+            text: str,
+            standard: str,
+            item_type: str,
+            service: str = "",
+            model: str = "",
+            temperature: float = 0.0,
+            tokens_prompt: int = 0,
+            tokens_completion: int = 0,
     ) -> Optional[MaskGenerationResult]:
-        """Парсинг JSON-ответа LLM."""
+        """Парсинг JSON-ответа LLM.
+
+        FIX 2026-05-22: Добавлен yaml.safe_load fallback для одинарных кавычек
+        и ключей без кавычек. Добавлено логирование сырого ответа.
+        """
+        if not text:
+            logger.warning("[LLMMaskGenerator] Empty response text")
+            return None
+
+        # DEBUG: логируем сырой ответ для диагностики
+        logger.debug("[LLM] Raw response for %s/%s (len=%d): %r", standard, item_type, len(text), text)
+
+        candidate = None
         try:
-            json_match = re.search(r'\{.*\}', text, re.DOTALL)
-            if not json_match:
-                logger.warning("[LLMMaskGenerator] No JSON found in response")
+            # 1. Пробуем найти JSON в markdown code block
+            for lang in ['json', 'python', '']:
+                prefix = f'```{lang}'
+                start = text.find(prefix)
+                if start >= 0:
+                    start += len(prefix)
+                    end = text.find('```', start)
+                    if end >= 0:
+                        candidate = text[start:end].strip()
+                        try:
+                            data = json.loads(candidate)
+                            break
+                        except json.JSONDecodeError:
+                            pass
+                        try:
+                            import yaml
+                            data = yaml.safe_load(candidate)
+                            if isinstance(data, dict):
+                                logger.debug("[LLM] Parsed markdown JSON via yaml.safe_load")
+                                break
+                        except Exception:
+                            pass
+
+            # 2. Если markdown не сработал — пробуем balanced braces
+            if not candidate:
+                for start in re.finditer(r'(?m)^[ \t]*\{', text):
+                    pos = start.start()
+                    brace_count = 0
+                    in_string = False
+                    escape = False
+                    for i, ch in enumerate(text[pos:], start=pos):
+                        if escape:
+                            escape = False
+                            continue
+                        if ch == '\\':
+                            escape = True
+                            continue
+                        if ch == '"' and not escape:
+                            in_string = not in_string
+                            continue
+                        if not in_string:
+                            if ch == '{':
+                                brace_count += 1
+                            elif ch == '}':
+                                brace_count -= 1
+                            if brace_count == 0:
+                                candidate = text[pos:i + 1]
+                                try:
+                                    data = json.loads(candidate)
+                                    break
+                                except json.JSONDecodeError:
+                                    try:
+                                        import yaml
+                                        data = yaml.safe_load(candidate)
+                                        if isinstance(data, dict):
+                                            logger.debug("[LLM] Parsed balanced JSON via yaml.safe_load")
+                                            break
+                                    except Exception:
+                                        pass
+                                break
+                    else:
+                        continue
+                    break
+
+            # 3. Последний fallback — простой поиск { ... }
+            if not candidate or not isinstance(data, dict):
+                json_match = re.search(r'\{.*?\}', text, re.DOTALL)
+                if json_match:
+                    candidate = json_match.group()
+                    try:
+                        data = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        try:
+                            import yaml
+                            data = yaml.safe_load(candidate)
+                            if isinstance(data, dict):
+                                logger.debug("[LLM] Parsed simple JSON via yaml.safe_load")
+                        except Exception:
+                            logger.warning(
+                                "[LLMMaskGenerator] Failed to parse JSON for %s/%s. Preview: %r",
+                                standard, item_type, text[:300]
+                            )
+                            return None
+                else:
+                    logger.warning("[LLMMaskGenerator] No JSON found in response")
+                    return None
+
+            if not isinstance(data, dict):
+                logger.warning("[LLMMaskGenerator] Parsed data is not dict: %s", type(data))
                 return None
-            data = json.loads(json_match.group())
+
             pattern = data.get("pattern", "")
             params = data.get("params", [])
             required = data.get("required", [])
