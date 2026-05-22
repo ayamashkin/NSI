@@ -137,7 +137,7 @@ matching:
   # Score рассчитывается как взвешенное совпадение параметров:
   #   - текстовые поля (покрытие, материал): weight=2.0, token-based Jaccard
   #   - числовые поля (длина, диаметр): weight=1.0, точное сравнение
-  fuzzy_threshold: 0.6
+  fuzzy_threshold: 0.5
 
   # --- v2_exact_threshold ---
   # Порог для V2 exact matching (сравнение извлечённых params с ENS params mask).
@@ -281,7 +281,7 @@ output:
   include_mask_pattern: true
 
   # true = добавлять подробности matching'а (ENS имя, fuzzy score, ens_params)
-  include_ens_details: true
+  include_ens_details: false
 
   # Поля ЕСН, исключаемые из ens_params в JSON-выводе.
   # Служебные/внутренние/дублирующие поля, не несущие полезной информации.

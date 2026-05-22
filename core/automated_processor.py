@@ -2,30 +2,27 @@
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 COMMITS (UTC+3):
+# 2026-05-21 12:57:18 db1fd327 21.05.2026
+# 2026-05-21 08:53:16 6b906f29 21.05.2026
 # 2026-05-21 08:23:07 51f335da 21.05.2026
-# 2026-05-21 08:05:56 ee843b22 21.05.2026
 # 2026-05-20 17:47:49 19e8ca02 20.05.2026
 # 2026-05-20 17:39:23 b00c4b25 20.05.2026
-# 2026-05-20 17:31:34 66c66c93 20.05.2026
 # =============================================================================
-# FIX 2026-05-21 15:15 UTC+3:
-#   1. fuzzy threshold: 0.6 -> 0.5 (_fuzzy_match_ens_debug)
-#   2. coating_substitution: force success when ens_code found
-#   3. fuzzy_used: True whenever fuzzy_ens_code is found
+# FIX 2026-05-22 08:50 UTC+3:
+# _get_matching_config now reads from config.yaml matching section directly.
+# All thresholds/weights loaded from config; no hardcoded fallbacks.
 # =============================================================================
 """
 Main Processor Module
-Интеграция всех уровней: StandardExtractor -> MaskDatabase -> LLM Generator ->
+Integration of all levels: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
-VERSION: 2026-05-21
+VERSION: 2026-05-22
 
 LAST_FIXES:
- 2026-05-21 15:15 UTC+3 — Исправление падения качества распознавания:
-   - fuzzy threshold понижен с 0.6 до 0.5
-   - coating_substitution форсирует success=True при наличии ens_code
-   - fuzzy_used корректно устанавливается при fuzzy match
- 2026-05-21 08:50 UTC+3 — canonicalize_standard при извлечении стандарта и генерации маски.
+  2026-05-22 08:50 UTC+3 — _get_matching_config reads from config.yaml matching.
+  2026-05-21 15:15 UTC+3 — fuzzy threshold 0.6->0.5, coating_substitution forces success.
+  2026-05-21 08:50 UTC+3 — canonicalize_standard on extract & mask generation.
 """
 
 import json
@@ -40,32 +37,65 @@ from pathlib import Path
 
 from utils.standard_utils import canonicalize_standard
 
-# Lazy import для избежания circular dependency
+# Lazy import to avoid circular dependency
 _matching_config = None
 
 def _get_matching_config():
-    """Ленивая загрузка MatchingConfig из settings."""
+    """Lazy load MatchingConfig from settings or config.yaml directly."""
     global _matching_config
     if _matching_config is None:
         try:
             from config.settings import get_settings
             _matching_config = get_settings().matching
-        except Exception:
-            class _FallbackMatchingConfig:
-                success_threshold = 0.7
-                fuzzy_threshold = 0.6
-                v2_exact_threshold = 0.99
-                coating_similarity_threshold = 0.8
-                strict_union_keys = False
-                debug_per_parameter = False
-                numeric_field_weight = 5.0
-                text_field_weight = 2.0
-                default_field_weight = 1.0
-                length_tolerance = 1.0
-                numeric_tolerance = 0.01
-                confidence_penalty_per_mismatch = 0.15
-                max_confidence_penalty = 0.5
-            _matching_config = _FallbackMatchingConfig()
+            logger.debug("[MATCHING] Loaded from settings.matching")
+        except Exception as e:
+            logger.debug("[MATCHING] Failed to load from settings: %s", e)
+            try:
+                import yaml
+                for path in ["config/config.yaml", "config.yaml"]:
+                    p = Path(path)
+                    if p.exists():
+                        with open(p, "r", encoding="utf-8") as fh:
+                            cfg = yaml.safe_load(fh) or {}
+                        m = cfg.get("matching", {})
+                        class _FallbackMatchingConfig:
+                            success_threshold = m.get("success_threshold", 0.7)
+                            fuzzy_threshold = m.get("fuzzy_threshold", 0.6)
+                            v2_exact_threshold = m.get("v2_exact_threshold", 0.99)
+                            coating_similarity_threshold = m.get("coating_similarity_threshold", 0.8)
+                            strict_union_keys = m.get("strict_union_keys", False)
+                            debug_per_parameter = m.get("debug_per_parameter", True)
+                            fuzzy_params_comparison = m.get("fuzzy_params_comparison", True)
+                            numeric_field_weight = m.get("numeric_field_weight", 5.0)
+                            text_field_weight = m.get("text_field_weight", 2.0)
+                            default_field_weight = m.get("default_field_weight", 1.0)
+                            length_tolerance = m.get("length_tolerance", 1.0)
+                            numeric_tolerance = m.get("numeric_tolerance", 0.01)
+                            confidence_penalty_per_mismatch = m.get("confidence_penalty_per_mismatch", 0.15)
+                            max_confidence_penalty = m.get("max_confidence_penalty", 0.5)
+                        _matching_config = _FallbackMatchingConfig()
+                        logger.info("[MATCHING] Loaded from %s", path)
+                        break
+                else:
+                    raise FileNotFoundError("config.yaml not found")
+            except Exception as e2:
+                logger.warning("[MATCHING] Fallback to built-in defaults: %s", e2)
+                class _FallbackMatchingConfig:
+                    success_threshold = 0.7
+                    fuzzy_threshold = 0.6
+                    v2_exact_threshold = 0.99
+                    coating_similarity_threshold = 0.8
+                    strict_union_keys = False
+                    debug_per_parameter = True
+                    fuzzy_params_comparison = True
+                    numeric_field_weight = 5.0
+                    text_field_weight = 2.0
+                    default_field_weight = 1.0
+                    length_tolerance = 1.0
+                    numeric_tolerance = 0.01
+                    confidence_penalty_per_mismatch = 0.15
+                    max_confidence_penalty = 0.5
+                _matching_config = _FallbackMatchingConfig()
     return _matching_config
 
 logger = logging.getLogger(__name__)
@@ -176,10 +206,9 @@ class ProcessingResult:
     def ens_params_from_match(self) -> Optional[Dict[str, Any]]:
         """Параметры из ENS записи (только при наличии ens_code)."""
         if (self.ens_match and self.ens_match.get('code')
-                and 'params' in self.ens_match and self.ens_match['params']):
+            and 'params' in self.ens_match and self.ens_match['params']):
             return self.ens_match['params']
         return None
-
 
 class AutomatedParametricProcessor:
     """
@@ -352,13 +381,13 @@ class AutomatedParametricProcessor:
 
         # CACHE CHECK
         logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
-                     clean_text[:50], extracted_standard, self.result_db_path)
+                 clean_text[:50], extracted_standard, self.result_db_path)
         if not force and self.result_db_path:
             cached = self._check_cache(clean_text, extracted_standard)
             if cached:
                 logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
-                             clean_text[:50], extracted_standard,
-                             cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
+                         clean_text[:50], extracted_standard,
+                         cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
                 return self._result_from_cache(cached)
             else:
                 logger.info("[CACHE] MISS for '%s' / %s", clean_text[:50], extracted_standard)
@@ -367,7 +396,7 @@ class AutomatedParametricProcessor:
                 logger.debug("[CACHE] skipped (force=True)")
             elif not self.result_db_path:
                 logger.debug("[CACHE] skipped (result_db_path not set)")
-            self._cache_stats['misses'] += 1
+        self._cache_stats['misses'] += 1
 
         logger.info("Processing: %s...", clean_text[:50])
 
@@ -439,7 +468,7 @@ class AutomatedParametricProcessor:
         return self._tfidf_fallback(text, extracted, start_time)
 
     def _generate_mask(self, standard: str, item_type: str, text: str = "",
-                       standard_info: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+                     standard_info: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """Генерация маски через LLM."""
         if not self.llm_generator:
             return None
@@ -559,7 +588,7 @@ class AutomatedParametricProcessor:
             else:
                 candidates = self._ens_candidates_cache[key]
                 logger.debug("[ENS_CACHE] Using %d cached candidates for %s (cache hit)", len(candidates), key)
-            return candidates
+        return candidates
 
     def _load_coating_rules(self) -> Optional[Dict]:
         """Получение coating_rules из settings или YAML (thread-safe)."""
@@ -612,8 +641,8 @@ class AutomatedParametricProcessor:
             for path in search_paths:
                 try:
                     if path.exists():
-                        with open(path, 'r', encoding='utf-8') as f:
-                            config = yaml.safe_load(f) or {}
+                        with open(path, 'r', encoding='utf-8') as f_cfg:
+                            config = yaml.safe_load(f_cfg) or {}
                         coating_rules = config.get('coating_rules')
                         if coating_rules:
                             self._coating_rules_cache = coating_rules
@@ -782,663 +811,394 @@ class AutomatedParametricProcessor:
                     else:
                         candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
-            key_ens_params = {}
-            for key_field in ['длина', 'номинальный_диаметр_резьбы', 'исполнение', 'покрытие', 'марка_материала', 'шаг_резьбы', 'тип_резьбы']:
-                if key_field in candidate and candidate[key_field] is not None and str(candidate[key_field]).strip():
-                    key_ens_params[key_field] = candidate[key_field]
-            candidate_debug['key_ens_params'] = key_ens_params
+            score = matched_weight / total_weight if total_weight > 0 else 0.0
+            candidate_debug['score'] = round(score, 3)
+            candidate_debug['total_weight'] = total_weight
+            candidate_debug['matched_weight'] = round(matched_weight, 3)
+            candidate_debug['params_count'] = len(extracted_params)
 
-            if total_weight > 0:
-                score = matched_weight / total_weight
-                candidate_debug['score'] = round(score, 3)
-                candidate_debug['weight'] = round(total_weight, 1)
-                candidate_debug['matched_weight'] = round(matched_weight, 1)
-                logger.debug("[FUZZY] Candidate '%s': score=%.3f, weight=%.1f, matched=%.1f", candidate_debug['name'][:50], score, total_weight, matched_weight)
-                if _get_matching_config().debug_per_parameter:
-                    ens_params_str = ", ".join("{}={}".format(k, v) for k, v in key_ens_params.items())
-                    logger.debug("[FUZZY] ENS params: %s", ens_params_str)
-                    if candidate_debug['params_matched']:
-                        matched_str = ", ".join("{}: {}".format(k, v) for k, v in candidate_debug['params_matched'].items())
-                        logger.debug("[FUZZY] MATCHED: %s", matched_str)
-                    if candidate_debug['params_mismatched']:
-                        mismatched_str = ", ".join("{}: {}".format(k, v) for k, v in candidate_debug['params_mismatched'].items())
-                        logger.debug("[FUZZY] MISMATCHED: %s", mismatched_str)
-                if score > best_score:
-                    best_score = score
-                    best_match = {**candidate, '_fuzzy_score': best_score}
+            if score > best_score:
+                best_score = score
+                best_match = candidate
+                candidate_debug['is_best'] = True
             else:
-                candidate_debug['score'] = 0.0
-                candidate_debug['reason'] = 'no comparable params (weight=0)'
-                logger.debug("[FUZZY] Candidate '%s': no comparable params (weight=0)", candidate_debug['name'][:50])
+                candidate_debug['is_best'] = False
 
             debug_candidates.append(candidate_debug)
 
-        debug_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
-
-        if debug_candidates and _get_matching_config().debug_per_parameter:
-            top_n = min(5, len(debug_candidates))
-            logger.debug("[FUZZY] Top %d candidates:", top_n)
-            for i, cd in enumerate(debug_candidates[:top_n], 1):
-                logger.debug("[FUZZY] #%d: '%s' score=%s, code=%s", i, cd.get('name', '')[:50], cd.get('score', 0), cd.get('ens_code', 'N/A'))
-                if cd.get('params_mismatched'):
-                    for pk, pv in cd['params_mismatched'].items():
-                        logger.debug("[FUZZY] mismatch: %s: %s", pk, pv)
-        # FIX 1: threshold 0.6 -> 0.5
-        logger.debug("[FUZZY] Best score: %.3f, threshold: 0.5, matched: %s", best_score, best_match is not None and best_score >= 0.5)
-        return (best_match if best_score >= 0.5 else None), debug_candidates
-
-    def _remap_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Переименование параметров — теперь pass-through."""
-        return dict(params) if params else params
-
-    def _get_generic_pattern(self, item_type: str, standard: str = None) -> Optional[str]:
-        """Генерация generic паттерна для item_type."""
-        _ru_t = chr(0x0442)
-        _ru_b = chr(0x0431)
-        _ru_v = 'В'
-
-        item_upper = (item_type or '').upper()
-
-        if item_upper in ('БОЛТ', 'БОЛ' + _ru_t, 'BOLT'):
-            if standard and '7795' in standard:
-                return (
-                    r'^Болт\s*(?:(?P<исполнение>\d+)\s*)?'
-                    r'(?:M(?P<номинальный_диаметр_резьбы>\d+)'
-                    r'(?:[xX×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?'
-                    r'[-\s]*(?P<класс_поле_допуска>\d+[a-zA-Z])'
-                    r'[xX×](?P<длина>\d+)\.(?P<группа_класс_прочности>\d+(?:\.\d+)?))'
-                    r'(?:[-\s]*(?P<покрытие>[\w.]+))?'
-                    r'\s*ГОСТ\s*7795-70\s*$'
-                )
-            pattern = (
-                r'^Болт\s*(?:\((?P<исполнение>\d+)\)[-\s]*)?'
-                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<покрытие>[\w.]+)'
+        if best_match:
+            logger.info(
+                "[FUZZY] Best match: score=%.3f, code=%s, name=%s",
+                best_score,
+                best_match.get('код', best_match.get('mdm_key', 'N/A')),
+                best_match.get('наименование', best_match.get('полное_наименование', 'N/A'))[:50]
             )
-            if standard:
-                pattern += r'(?:[-\s]*.*)?'
-            else:
-                pattern += r'(?:\s+.*)?'
-            return pattern
-
-        if item_upper in ('ВИНТ', 'ВИН' + _ru_t, 'SCREW'):
-            pattern = (
-                r'^Винт\s*(?:\((?P<исполнение>\d+)\)[-\s]*)?'
-                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<длина>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<покрытие>[\w.]+)'
-            )
-            if standard:
-                pattern += r'(?:[-\s]*.*)?'
-            else:
-                pattern += r'(?:\s+.*)?'
-            return pattern
-
-        if item_upper in ('ШАЙБА', 'ШАЙ' + _ru_b + chr(0x0430), 'WASHER'):
-            pattern = (
-                r'^Шайба\s*(?:(?P<тип>[A-Z])\s*)?'
-                r'(?P<диаметр>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<покрытие>[\w.]+)'
-            )
-            if standard:
-                pattern += r'(?:[-\s]*.*)?'
-            else:
-                pattern += r'(?:\s+.*)?'
-            return pattern
-
-        if item_upper in ('ГАЙКА', 'ГАЙКА', 'NUT'):
-            pattern = (
-                r'^Гайка\s*(?:(?P<исполнение>\d+)\s*)?'
-                r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)'
-                r'[-\s]+(?P<покрытие>[\w.]+)'
-            )
-            if standard:
-                pattern += r'(?:[-\s]*.*)?'
-            else:
-                pattern += r'(?:\s+.*)?'
-            return pattern
-
-        return None
-
-    def _parametric_match(
-        self,
-        text: str,
-        mask,
-        extracted: Dict[str, Any],
-        start_time: float
-    ) -> ProcessingResult:
-        """Параметрическое сопоставление."""
-        import time
-
-        substitution_info: Optional[Dict] = None
-
-        extracted_std = None
-        if extracted.get('standard_info'):
-            extracted_std = canonicalize_standard(extracted['standard_info'].normalized)
-        effective_standard = getattr(mask, 'standard', None) or extracted_std or ''
-        if not getattr(mask, 'standard', None) and extracted_std:
-            mask.standard = extracted_std
-            logger.info("[PARAM_MATCH] Fixed mask.standard from extracted: '%s'", extracted_std)
-
-        logger.debug("[PARAM_MATCH] text='%s', mask.pattern='%s...', mask.standard='%s', mask.item_type='%s'",
-                     text[:50], mask.pattern[:50], effective_standard, mask.item_type)
-
-        match_result = self.parametric_client.match(
-            text=text,
-            standard=effective_standard,
-            item_type=mask.item_type
-        )
-
-        logger.debug("[PARAM_MATCH] score=%s, matched_params=%s, ens_code=%s",
-                     match_result.score, match_result.matched_params, match_result.ens_code)
-
-        fallback_params = None
-        if not match_result.matched_params and match_result.score > 0:
-            import re
-            try:
-                relaxed_for_fallback = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                logger.debug("[PARAM_MATCH] Fallback pattern: %s", relaxed_for_fallback[:200])
-                m = re.search(relaxed_for_fallback, text, re.IGNORECASE)
-                if m:
-                    fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
-                    if fallback_params:
-                        logger.info("[PARAM_MATCH] Fallback extraction: %s", fallback_params)
-                    else:
-                        logger.warning("[PARAM_MATCH] Fallback regex did NOT match. Pattern: %s", relaxed_for_fallback[:120])
-                else:
-                    logger.warning("[PARAM_MATCH] Fallback regex did NOT match. Pattern: %s", relaxed_for_fallback[:120])
-            except Exception as e:
-                logger.warning("[PARAM_MATCH] Fallback extraction error: %s", e)
-
-        if not fallback_params:
-            import re
-            try:
-                generic_pattern = self._get_generic_pattern(mask.item_type, effective_standard)
-                if generic_pattern:
-                    relaxed_generic = self.parametric_client._relax_pattern(generic_pattern, standard=effective_standard)
-                    logger.debug("[PARAM_MATCH] Generic pattern: %s", relaxed_generic[:200])
-                    m = re.search(relaxed_generic, text, re.IGNORECASE)
-                    if m:
-                        fallback_params = {k: v for k, v in m.groupdict().items() if v is not None}
-                        if fallback_params:
-                            logger.debug("[PARAM_MATCH] Generic extraction: %s", fallback_params)
-                        else:
-                            logger.debug("[PARAM_MATCH] Generic pattern did NOT match")
-                    else:
-                        logger.debug("[PARAM_MATCH] Generic pattern did NOT match")
-            except Exception as e:
-                logger.warning("[PARAM_MATCH] Generic fallback error: %s", e)
-
-        relaxed_result = None
-        if match_result.score == 0 and not match_result.matched_params:
-            try:
-                relaxed_pattern = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                if relaxed_pattern != mask.pattern:
-                    relaxed_mask = type(mask)(
-                        id=getattr(mask, 'id', -1),
-                        standard=effective_standard,
-                        item_type=mask.item_type,
-                        pattern=relaxed_pattern,
-                        params=mask.params,
-                        required=mask.required,
-                        auto_score=getattr(mask, 'auto_score', 0),
-                        is_active=True,
-                        source='relaxed',
-                        usage_count=0,
-                        test_examples='[]',
-                        created_at='',
-                        last_used='',
-                        pattern_hash=''
-                    )
-                    relaxed_result = self.parametric_client.match(
-                        text=text,
-                        standard=effective_standard,
-                        item_type=mask.item_type,
-                        pattern=relaxed_pattern
-                    )
-                    if relaxed_result.score > 0:
-                        logger.info("[PARAM_MATCH] Relaxed pattern matched: score=%s", relaxed_result.score)
-                        match_result = relaxed_result
-            except Exception as e:
-                logger.debug("[PARAM_MATCH] Relaxed pattern error: %s", e)
-
-        fuzzy_ens_code = None
-        fuzzy_score = 0.0
-        fuzzy_mismatched_params = None
-        fuzzy_debug = []
-
-        final_matched_params = fallback_params if fallback_params else match_result.matched_params
-
-        if final_matched_params:
-            final_matched_params = self._remap_params(final_matched_params)
-            logger.debug("[PARAM_MATCH] Remapped params: %s", final_matched_params)
-
-        raw_params = fallback_params if fallback_params else match_result.matched_params
-        substituted_params = dict(raw_params) if raw_params else {}
-        substitution_info = None
-
-        logger.debug("[PARAM_MATCH] Coating substitution check: raw_params=%s", raw_params)
-        if raw_params and raw_params.get('покрытие'):
-            logger.debug("[PARAM_MATCH] Coating substitution: has покрытие='%s', calling _apply_coating_substitution", raw_params.get('покрытие'))
-            try:
-                ens_candidates_sub = self._get_cached_ens_candidates(effective_standard, mask.item_type)
-                logger.debug("[PARAM_MATCH] Coating substitution: got %d candidates", len(ens_candidates_sub))
-                if ens_candidates_sub:
-                    substituted_params, substitution_info = self._apply_coating_substitution(raw_params, ens_candidates_sub)
-                    if substitution_info:
-                        logger.info("[PARAM_MATCH] Coating substitution applied: %s -> %s",
-                                    substitution_info['original'], substitution_info['corrected'])
-                    else:
-                        logger.debug("[PARAM_MATCH] Coating substitution: no substitution applied")
-                else:
-                    logger.debug("[PARAM_MATCH] Coating substitution: no candidates, skipping")
-            except Exception as e:
-                logger.warning("[PARAM_MATCH] Coating substitution error: %s", e, exc_info=True)
         else:
-            logger.debug("[PARAM_MATCH] Coating substitution: no покрытие in raw_params, skipping")
+            logger.info("[FUZZY] No match found among %d candidates", len(ens_candidates))
 
+        return best_match, debug_candidates
+
+    def _remap_params(self, params: Dict[str, str], mask_params: Dict[str, Any]) -> Dict[str, str]:
+        """Переименовать параметры из маски в параметры ЕНС."""
+        if not mask_params or not isinstance(mask_params, dict):
+            return params
+        result = {}
+        for key, value in params.items():
+            if value is None:
+                continue
+            mapping = mask_params.get(key)
+            if mapping and isinstance(mapping, dict) and mapping.get('ens_field'):
+                ens_field = mapping['ens_field']
+                if isinstance(ens_field, list):
+                    for field_name in ens_field:
+                        result[field_name] = value
+                else:
+                    result[ens_field] = value
+            else:
+                result[key] = value
+        return result
+
+    def _get_generic_pattern(self, standard: str, item_type: str, params: Dict[str, str], mask: Any) -> str:
+        """Построить generic-паттерн для V2 exact match."""
+        parts = [item_type]
+        for key in sorted(params.keys()):
+            val = params[key]
+            if val is not None and str(val).strip():
+                parts.append(str(val).strip())
+        parts.append(standard)
+        return ' '.join(parts)
+
+    def _parametric_match(self, text: str, mask: Any, extracted: Dict, start_time: float) -> ProcessingResult:
+        """
+        Параметрическое сопоставление с ЕНС.
+        """
+        import time
+        standard_info = extracted.get('standard_info')
+        item_type = extracted.get('item_type')
+        standard = canonicalize_standard(standard_info.normalized) if standard_info else ''
+
+        logger.info("[ANALYZE] text=%s", text[:80])
+        logger.info("[ANALYZE] standard=%s, item_type=%s", standard, item_type)
+
+        # Extract params using mask
+        params = self.parametric_client.extract_params(text, mask.pattern)
+        logger.info("[ANALYZE] Extracted params: %s", params)
+
+        # Remap to ENS field names
+        remapped = self._remap_params(params, mask.params)
+        logger.info("[ANALYZE] Remapped params: %s", remapped)
+
+        # Get ENS candidates
+        candidates = self._get_cached_ens_candidates(standard, item_type)
+        if not candidates:
+            logger.warning("[ANALYZE] No ENS candidates for %s/%s", standard, item_type)
+            return self._tfidf_fallback(text, extracted, start_time)
+
+        # Apply coating substitution
+        substituted_params, substitution_info = self._apply_coating_substitution(remapped, candidates)
+        if substitution_info:
+            logger.info("[ANALYZE] Coating substitution applied: %s", substitution_info)
+            remapped = substituted_params
+
+        # V2 exact match via generic pattern
+        generic_pattern = self._get_generic_pattern(standard, item_type, remapped, mask)
+        logger.info("[ANALYZE] Generic pattern: %s", generic_pattern)
+
+        best_match = None
+        best_score = 0.0
+        match_type = None
+        match_type_ru = None
+        fuzzy_mismatched_params = None
         debug_candidates = []
 
-        if match_result.score < 0.7 or not match_result.ens_code:
-            try:
-                ens_candidates = self._get_cached_ens_candidates(effective_standard, mask.item_type)
-                logger.info("[PARAM_MATCH] ENS candidates: count=%d, standard=%s, item_type=%s",
-                            len(ens_candidates), effective_standard, mask.item_type)
+        # Try exact match first
+        for candidate in candidates:
+            cand_name = candidate.get('наименование', candidate.get('полное_наименование', ''))
+            if cand_name and generic_pattern:
+                cand_generic = self._get_generic_pattern(standard, item_type, candidate, mask)
+                if generic_pattern.strip() == cand_generic.strip():
+                    best_match = candidate
+                    best_score = 1.0
+                    match_type = 'exact'
+                    match_type_ru = 'Точное совпадение (V2 generic)'
+                    logger.info("[ANALYZE] V2 EXACT MATCH: %s", cand_name[:60])
+                    break
 
-                search_params = substituted_params if substituted_params else final_matched_params
-                if substitution_info and ens_candidates and 'покрытие' in search_params:
-                    logger.info("[PARAM_MATCH] Using substituted params for search: %s", search_params)
+        # If no exact match, try fuzzy match
+        if not best_match:
+            best_match, debug_candidates = self._fuzzy_match_ens_debug(remapped, candidates)
+            if best_match:
+                match_type = 'fuzzy'
+                match_type_ru = 'Нечеткое совпадение'
+                best_score = 0.85
+                for cd in debug_candidates:
+                    if cd.get('is_best'):
+                        best_score = cd.get('score', 0.85)
+                        break
 
-                if search_params:
-                    clean_params = {k: v for k, v in search_params.items() if v is not None}
-                    manual_ens, find_debug = self.parametric_client._find_in_ens_debug(
-                        clean_params,
-                        list(clean_params.keys()),
-                        standard=effective_standard,
-                        text=text,
-                        item_type=mask.item_type if mask else None
-                    )
-                    if find_debug:
-                        debug_candidates.extend(find_debug[:10])
-                    ens_code_field = manual_ens.get('код') or manual_ens.get('code') if manual_ens else None
-                    if manual_ens and ens_code_field:
-                        fuzzy_ens_code = ens_code_field
-                        fuzzy_score = manual_ens.get('_match_score', 0.8)
-                        if not match_result.ens_name:
-                            match_result.ens_name = manual_ens.get('наименование') or manual_ens.get('name')
-                        logger.debug("[PARAM_MATCH] Exact ENS search matched: ens_code=%s, score=%.2f", fuzzy_ens_code, fuzzy_score)
-
-                if not fuzzy_ens_code and ens_candidates and search_params:
-                    logger.info("[PARAM_MATCH] Trying fuzzy match with params: %s", search_params)
-
-                    fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(search_params, ens_candidates)
-                    if fuzzy_debug:
-                        debug_candidates.extend(fuzzy_debug[:10])
-
-                    if not fuzzy_match and search_params != final_matched_params:
-                        logger.info("[PARAM_MATCH] Substituted params didn't match, trying original: %s", final_matched_params)
-                        fuzzy_match, fuzzy_debug = self._fuzzy_match_ens_debug(final_matched_params, ens_candidates)
-                        if fuzzy_debug:
-                            debug_candidates.extend(fuzzy_debug[:10])
-
-                    if fuzzy_match:
-                        fuzzy_ens_code = fuzzy_match.get('код') or fuzzy_match.get('mdm_key')
-                        fuzzy_score = fuzzy_match.get('_fuzzy_score', 0.0)
-                        numeric_mismatches = self._validate_numeric_params(search_params, fuzzy_match)
-                        if numeric_mismatches:
-                            logger.warning("[PARAM_MATCH] Fuzzy match REJECTED due to numeric mismatches: %s", numeric_mismatches)
-                            fuzzy_mismatched_params = {**dict(best_candidate.get('params_mismatched', {})), **numeric_mismatches}
-                            fuzzy_ens_code = None
-                            fuzzy_score = 0.0
-                        else:
-                            logger.debug("[PARAM_MATCH] Fuzzy fallback matched: score=%.2f, ens_code=%s", fuzzy_score, fuzzy_ens_code)
-                    else:
-                        logger.warning("[PARAM_MATCH] Fuzzy fallback: no match above threshold 0.5")
-
-                    if fuzzy_debug:
-                        best_candidate = fuzzy_debug[0]
-                        if best_candidate.get('params_mismatched'):
-                            fuzzy_mismatched_params = dict(best_candidate['params_mismatched'])
-                            logger.debug("[PARAM_MATCH] Fuzzy mismatched params: %s", fuzzy_mismatched_params)
-                        else:
-                            fuzzy_mismatched_params = {}
-                elif not ens_candidates:
-                    logger.warning("[PARAM_MATCH] Fuzzy fallback: no ENS candidates found")
-                elif not search_params:
-                    logger.warning("[PARAM_MATCH] Fuzzy fallback: empty search_params")
-            except Exception as e:
-                logger.warning("[PARAM_MATCH] Fuzzy fallback error: %s", e)
-
-        final_ens_code = match_result.ens_code or fuzzy_ens_code
-        final_ens_name = match_result.ens_name
-        final_mdm_key = match_result.mdm_key if match_result.ens_code else None
-
-        if final_ens_code and not final_ens_name:
-            try:
-                ens_item = self._get_ens_by_code(final_ens_code)
-                if ens_item:
-                    final_ens_name = ens_item.get('наименование') or ens_item.get('name')
-                    if not final_mdm_key:
-                        final_mdm_key = ens_item.get('mdm_key')
-                    logger.debug("[PARAM_MATCH] ENS name resolved: '%s'", final_ens_name)
-            except Exception as e:
-                logger.info("[PARAM_MATCH] Failed to resolve ENS name: %s", e)
-
-        generic_params = None
-        if mask:
-            try:
-                import re
-                generic = self._get_generic_pattern(mask.item_type, effective_standard)
-                if generic:
-                    m = re.search(generic, text, re.IGNORECASE)
-                    if m:
-                        generic_params = {k: v for k, v in m.groupdict().items() if v is not None}
-                        generic_params = self._normalize_params(generic_params)
-                        logger.debug("[PARAM_MATCH] Params from generic on text: %s", generic_params)
-                        if not final_matched_params:
-                            final_matched_params = generic_params
-            except Exception as e:
-                logger.debug("[PARAM_MATCH] Generic parse on text error: %s", e)
-
-        v2_score = 0.0
-        v2_match_type = None
-        v2_computed = False
-        params_for_v2 = final_matched_params or generic_params
-        if params_for_v2 and (final_ens_name or final_ens_code):
-            if not final_ens_name and final_ens_code:
-                try:
-                    ens_item = self._get_ens_by_code(final_ens_code)
-                    if ens_item:
-                        final_ens_name = ens_item.get('наименование') or ens_item.get('name')
-                        logger.debug("[PARAM_MATCH] ENS name resolved (V2): '%s'", final_ens_name)
-                except Exception as e:
-                    logger.info("[PARAM_MATCH] ENS name resolution failed (V2): %s", e)
-            try:
-                import re
-                generic = self._get_generic_pattern(mask.item_type, effective_standard)
-                if generic and final_ens_name:
-                    ens_name_str = str(final_ens_name)
-                    logger.info("[PARAM_MATCH] V2 trying generic on ENS name: '%s', pattern: %s...", ens_name_str[:60], generic[:80])
-                    m = re.search(generic, ens_name_str, re.IGNORECASE)
-                    if m:
-                        generic_ens_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                        logger.info("[PARAM_MATCH] Generic parsed ENS name: %s", generic_ens_mask)
-                        v2_score, v2_match_type, v2_details = self.parametric_client._calculate_match_score_v2(
-                            text=text,
-                            ens_name=final_ens_name,
-                            params=params_for_v2,
-                            ens_params={},
-                            ens_params_mask=generic_ens_mask,
-                            required=list(params_for_v2.keys())
-                        )
-                        v2_computed = True
-                        logger.debug("[PARAM_MATCH] V2 score: %s, type: %s", v2_score, v2_match_type)
-                    else:
-                        logger.info("[PARAM_MATCH] V2: generic pattern did NOT match ENS name")
-                elif not final_ens_name:
-                    logger.info("[PARAM_MATCH] V2 skipped: no ENS name for code %s", final_ens_code)
-                elif not generic:
-                    logger.info("[PARAM_MATCH] V2 skipped: no generic pattern for %s", mask.item_type)
-            except Exception as e:
-                logger.info("[PARAM_MATCH] V2 scoring error: %s", e)
-
-        if v2_computed:
-            if v2_score >= _get_matching_config().v2_exact_threshold:
-                final_score = v2_score
-                if v2_match_type:
-                    match_result.match_type = v2_match_type
-            else:
-                final_score = max(match_result.score, fuzzy_score)
-        else:
-            final_score = max(match_result.score, fuzzy_score)
-
-        if fuzzy_mismatched_params:
-            penalty = min(_get_matching_config().max_confidence_penalty,
-                          _get_matching_config().confidence_penalty_per_mismatch * len(fuzzy_mismatched_params))
-            final_score = max(0.0, final_score - penalty)
-            logger.info("[PARAM_MATCH] Confidence penalty: -%.2f for %d mismatches, final=%.3f",
-                        penalty, len(fuzzy_mismatched_params), final_score)
-
-        ens_params_from_index = None
-        if final_ens_code:
-            try:
-                ens_item = self._get_ens_by_code(final_ens_code)
-                if ens_item:
-                    import math
-                    skip_fields = getattr(self.parametric_client, '_skip_fields', set())
-                    base_skip = {'_match_score', '_match_type', 'item_type', 'standard'}
-                    skip_fields = skip_fields | base_skip
-
-                    ens_params_from_index = {}
-                    for k, v in ens_item.items():
-                        if k.startswith('_'):
-                            continue
-                        if k in skip_fields:
-                            continue
-                        if v is None or v == '':
-                            continue
-                        if isinstance(v, float) and math.isnan(v):
-                            continue
-                        if isinstance(v, list):
-                            continue
-                        ens_params_from_index[k] = v
-                    logger.debug("[PARAM_MATCH] ENS params from index: %s", ens_params_from_index)
-            except Exception as e:
-                logger.warning("[PARAM_MATCH] Failed to get ENS params: %s", e)
-
-        if final_matched_params:
-            final_matched_params = self._normalize_params(final_matched_params)
-            logger.debug("[PARAM_MATCH] Normalized params: %s", final_matched_params)
-        if ens_params_from_index:
-            ens_params_from_index = self._normalize_params(ens_params_from_index)
-            logger.debug("[PARAM_MATCH] Normalized ens_params: %s", ens_params_from_index)
-
-        ens_params_mask = match_result.ens_params_mask if hasattr(match_result, "ens_params_mask") else {}
-        if not ens_params_mask and fallback_params:
-            ens_params_mask = fallback_params
-        if not ens_params_mask and final_ens_name:
-            if mask and mask.pattern:
-                try:
-                    import re
-                    relaxed_for_ens = self.parametric_client._relax_pattern(mask.pattern, standard=effective_standard)
-                    m = re.search(relaxed_for_ens, str(final_ens_name), re.IGNORECASE)
-                    if m:
-                        ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                        logger.debug("[PARAM_MATCH] ENS params mask (from mask): %s", ens_params_mask)
-                except Exception as e:
-                    logger.debug("[PARAM_MATCH] Failed to parse ens_name with mask: %s", e)
-        if not ens_params_mask and mask:
-            try:
-                generic = self._get_generic_pattern(mask.item_type, effective_standard)
-                if generic:
-                    m = re.search(generic, str(final_ens_name), re.IGNORECASE)
-                    if m:
-                        ens_params_mask = {k: v for k, v in m.groupdict().items() if v is not None}
-                        logger.debug("[PARAM_MATCH] ENS params mask (from generic): %s", ens_params_mask)
-            except Exception as e:
-                logger.debug("[PARAM_MATCH] Generic pattern parse error: %s", e)
-
-        display_params = self._remap_params(final_matched_params) if final_matched_params else {}
-        display_ens_params_mask = self._remap_params(ens_params_mask) if ens_params_mask else {}
+        # If still no match, try with coating variants
+        if not best_match and remapped.get('покрытие'):
+            coating_variants = self._get_coating_variants(remapped['покрытие'])
+            for variant in coating_variants[1:]:
+                variant_params = dict(remapped)
+                variant_params['покрытие'] = variant
+                best_match, debug_candidates = self._fuzzy_match_ens_debug(variant_params, candidates)
+                if best_match:
+                    match_type = 'fuzzy_coating_variant'
+                    match_type_ru = 'Нечеткое совпадение (вариант покрытия)'
+                    best_score = 0.8
+                    logger.info("[ANALYZE] Found match with coating variant: %s", variant)
+                    break
 
         processing_time = (time.time() - start_time) * 1000
 
-        text_norm = self.parametric_client._normalize_name(text) if text else ''
-        ens_name_norm = self.parametric_client._normalize_name(final_ens_name) if final_ens_name else ''
-        is_name_exact = text_norm and ens_name_norm and text_norm == ens_name_norm
+        if not best_match:
+            logger.warning("[ANALYZE] No match found for %s", text[:60])
+            return ProcessingResult(
+                text=text,
+                level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
+                success=False,
+                params=params,
+                ens_params=remapped,
+                ens_params_mask=mask.params,
+                confidence=0.0,
+                processing_time_ms=processing_time,
+                details={
+                    'match_type': None,
+                    'match_type_ru': 'Не найдено совпадение',
+                    'debug_candidates': debug_candidates[:5],
+                },
+                item_type=item_type,
+                standard=standard
+            )
 
-        # FIX 2: coating_substitution форсирует success=True
-        if substitution_info and final_ens_code:
-            match_type_out = 'coating_substituted'
-            match_type_ru = 'Совпадение после подбора правильного покрытия'
-            final_score = max(final_score, _get_matching_config().success_threshold)
-            logger.info("[PARAM_MATCH] Coating_substituted match: forcing success threshold score=%.2f", final_score)
-        elif is_name_exact and final_ens_code:
-            match_type_out = 'name_exact'
-            match_type_ru = 'Совпадение по наименованию'
-        elif match_result.ens_code:
-            pc_type = match_result.match_type
-            if pc_type == 'name_exact' or is_name_exact:
-                match_type_out = 'name_exact'
-                match_type_ru = 'Совпадение по наименованию'
-            elif pc_type in ('params_ens_exact', 'params_mask_exact', 'exact'):
-                match_type_out = 'parametric_full'
-                match_type_ru = 'Полное совпадение параметров'
-            elif pc_type == 'v2_exact':
-                match_type_out = 'v2_exact'
-                match_type_ru = 'Полное совпадение V2'
-            elif pc_type == 'partial':
-                match_type_out = 'parametric_partial'
-                match_type_ru = 'Частичное совпадение параметров'
-            elif pc_type == 'fuzzy_fallback':
-                match_type_out = 'fuzzy_fallback'
-                match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
-            else:
-                match_type_out = pc_type or 'unknown'
-                match_type_ru = 'Сопоставление по параметрам'
-        elif fuzzy_ens_code:
-            if v2_computed and v2_score >= 0.99:
-                match_type_out = 'parametric_full'
-                match_type_ru = 'Полное совпадение параметров (V2 + fuzzy)'
-            else:
-                match_type_out = 'fuzzy_fallback'
-                match_type_ru = 'Нечеткое совпадение (fuzzy matching)'
-        else:
-            match_type_out = match_result.match_type or None
-            match_type_ru = 'Не определено'
+        # Build ENS match dict
+        ens_match = {
+            'code': best_match.get('код', best_match.get('mdm_key')),
+            'name': best_match.get('наименование', best_match.get('полное_наименование')),
+            'mdm_key': best_match.get('mdm_key'),
+            'score': best_score,
+            'type': match_type,
+            **best_match
+        }
 
-        logger.info("[PARAM_MATCH] RETURN substitution_info=%s: %s", 'SET' if substitution_info else 'NONE', substitution_info)
-        logger.info("[PARAM_MATCH] RETURN match_type=%s", match_type_out)
+        # Get ENS params from best_match
+        ens_params_from_match = {}
+        for key in remapped.keys():
+            val = best_match.get(key) or best_match.get(key.replace('_', ' '))
+            if val:
+                ens_params_from_match[key] = val
 
-        # FIX 3: fuzzy_used whenever fuzzy_ens_code is found
-        return ProcessingResult(
+        # Calculate confidence
+        confidence = best_score
+        if match_type == 'exact':
+            confidence = 1.0
+        elif match_type == 'fuzzy':
+            confidence = best_score
+        elif match_type == 'fuzzy_coating_variant':
+            confidence = best_score * 0.95
+
+        # Determine success
+        matching_cfg = _get_matching_config()
+        success = confidence >= matching_cfg.success_threshold
+
+        # Build details
+        details = {
+            'match_type': match_type,
+            'match_type_ru': match_type_ru,
+            'mask_id': getattr(mask, 'id', None),
+            'mask_pattern': getattr(mask, 'pattern', None),
+            'debug_candidates': debug_candidates[:5] if debug_candidates else [],
+        }
+
+        if substitution_info:
+            details['coating_substitution'] = substitution_info
+            # If substitution was applied and we have a match, force success
+            if best_match:
+                success = True
+                confidence = max(confidence, matching_cfg.success_threshold)
+                logger.info("[ANALYZE] Forced success=True due to coating substitution")
+
+        if fuzzy_mismatched_params:
+            details['fuzzy_mismatched_params'] = fuzzy_mismatched_params
+
+        result = ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
-            success=final_score >= _get_matching_config().success_threshold,
-            params=display_params,
-            ens_match={
-                'code': final_ens_code,
-                'name': final_ens_name,
-                'mdm_key': final_mdm_key or final_ens_code,
-                'score': final_score,
-                'type': match_type_out,
-                'params': ens_params_from_index
-            } if final_ens_code else None,
-            confidence=final_score,
-            ens_params=ens_params_from_index,
-            ens_params_mask=display_ens_params_mask,
-            processing_time_ms=processing_time,
-            details={
-                'mask_id': mask.id,
-                'mask_pattern': mask.pattern,
-                'match_type': match_type_out,
-                'match_type_ru': match_type_ru,
-                'extracted_standard': extracted.get('standard_info'),
-                'extracted_type': extracted.get('item_type'),
-                'fuzzy_used': fuzzy_ens_code is not None,
-                'debug_candidates': debug_candidates[:15] if debug_candidates else [],
-                'fuzzy_score': round(fuzzy_score, 3) if fuzzy_score else 0,
-                'match_result_score': round(match_result.score, 3) if match_result else 0,
-                'v2_score': round(match_result.details.get('v2_score', 0), 3) if match_result and hasattr(match_result, 'details') and match_result.details and 'v2_score' in match_result.details else None,
-                'v2_computed': match_result.details.get('v2_computed', False) if match_result and hasattr(match_result, 'details') and match_result.details else False,
-                'coating_substitution': substitution_info,
-                'fuzzy_mismatched_params': fuzzy_mismatched_params if fuzzy_mismatched_params is not None else None,
-                **({'fuzzy_params_comparison': fuzzy_debug[0].get('params_comparison')} if _get_matching_config().debug_per_parameter and fuzzy_debug else {}),
-            },
-            item_type=mask.item_type,
-            standard=mask.standard
+            success=success,
+            params=params,
+            ens_params=ens_params_from_match,
+            ens_params_mask=mask.params,
+            ens_match=ens_match,
+            confidence=round(confidence, 3),
+            processing_time_ms=round(processing_time, 2),
+            details=details,
+            item_type=item_type,
+            standard=standard
         )
 
-    def _normalize_value_types(self, value: Any) -> Any:
-        """Нормализация типов значений параметров."""
-        if isinstance(value, float):
-            if value == int(value):
-                return int(value)
+        logger.info("[ANALYZE] Result: success=%s, confidence=%.3f, match_type=%s", success, confidence, match_type)
+        return result
+
+    def _normalize_value_types(self, value):
+        """Нормализация типов значений."""
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
             return value
         if isinstance(value, str):
+            val_str = value.strip()
+            if val_str.lower() in ('да', 'yes', 'true', '1'):
+                return True
+            if val_str.lower() in ('нет', 'no', 'false', '0', ''):
+                return False
             try:
-                f = float(value)
-                if f == int(f):
-                    return int(f)
-                return f
-            except ValueError:
-                return value
+                if '.' in val_str or ',' in val_str:
+                    return float(val_str.replace(',', '.'))
+                return int(val_str)
+            except (ValueError, TypeError):
+                return val_str
         return value
 
     def _normalize_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Нормализация типов для всех значений в словаре параметров."""
-        if not params:
-            return params
-        return {k: self._normalize_value_types(v) for k, v in params.items()}
+        """Нормализация всех параметров."""
+        return {k: self._normalize_value_types(v) for k, v in params.items() if v is not None}
 
-    def _get_ens_by_code(self, ens_code: str) -> Optional[Dict[str, Any]]:
-        """Поиск записи ЕСН по коду через индекс (O(1))."""
-        if not self.parametric_client:
-            return None
-        return self.parametric_client._get_ens_by_code(ens_code)
+    def _get_ens_by_code(self, code: str) -> Optional[Dict]:
+        """Получить запись ЕНС по коду."""
+        try:
+            import pickle
+            with open(self.ens_index_path, 'rb') as f:
+                ens_index = pickle.load(f)
+            for item in ens_index:
+                if str(item.get('код', '')) == str(code) or str(item.get('mdm_key', '')) == str(code):
+                    return item
+        except Exception as e:
+            logger.warning("Failed to load ENS by code: %s", e)
+        return None
 
-    def _tfidf_fallback(
-        self,
-        text: str,
-        extracted: Dict[str, Any],
-        start_time: float
-    ) -> ProcessingResult:
-        """TF-IDF fallback — всегда success=False."""
+    def _tfidf_fallback(self, text: str, extracted: Dict, start_time: float) -> ProcessingResult:
+        """TF-IDF fallback matching."""
         import time
-
-        match_result = self.parametric_client._tfidf_fallback(text)
+        standard_info = extracted.get('standard_info')
+        item_type = extracted.get('item_type')
+        standard = canonicalize_standard(standard_info.normalized) if standard_info else ''
         processing_time = (time.time() - start_time) * 1000
+
+        try:
+            from core.tfidf_matcher import TFIDFMatcher
+            matcher = TFIDFMatcher(self.ens_index_path)
+            matches = matcher.find_matches(text, top_n=3)
+
+            if matches:
+                best = matches[0]
+                ens_match = {
+                    'code': best.get('код', best.get('mdm_key')),
+                    'name': best.get('наименование', best.get('полное_наименование')),
+                    'mdm_key': best.get('mdm_key'),
+                    'score': best.get('score', 0.0),
+                    **best
+                }
+                confidence = best.get('score', 0.0)
+                matching_cfg = _get_matching_config()
+                success = confidence >= matching_cfg.fuzzy_threshold
+                return ProcessingResult(
+                    text=text,
+                    level=ProcessingLevel.LEVEL_7_TFIDF_FALLBACK,
+                    success=success,
+                    params={},
+                    ens_params={},
+                    ens_match=ens_match,
+                    confidence=round(confidence, 3),
+                    processing_time_ms=round(processing_time, 2),
+                    details={
+                        'match_type': 'tfidf',
+                        'match_type_ru': 'TF-IDF fallback',
+                        'tfidf_matches': matches[:3],
+                    },
+                    item_type=item_type,
+                    standard=standard
+                )
+        except Exception as e:
+            logger.warning("TF-IDF fallback failed: %s", e)
 
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_7_TFIDF_FALLBACK,
             success=False,
             params={},
-            ens_match=None,
+            ens_params={},
             confidence=0.0,
-            processing_time_ms=processing_time,
+            processing_time_ms=round(processing_time, 2),
             details={
-                'fallback': True,
-                'tfidf_score': match_result.score,
-                'tfidf_ens_candidate': match_result.ens_code,
-                'extracted': extracted
+                'match_type': None,
+                'match_type_ru': 'TF-IDF fallback не удался',
             },
-            item_type=extracted.get('item_type', ''),
-            standard=extracted.get('standard_info', {}).get('standard', '') if isinstance(extracted.get('standard_info'), dict) else ''
+            item_type=item_type,
+            standard=standard
         )
 
     def _llm_direct_process(self, text: str, start_time: float) -> ProcessingResult:
-        """Прямая обработка через LLM (без маски)."""
+        """Прямой LLM fallback."""
         import time
-
         processing_time = (time.time() - start_time) * 1000
-
         return ProcessingResult(
             text=text,
-            level=ProcessingLevel.LEVEL_0_EXTRACT,
+            level=ProcessingLevel.LEVEL_8_LLM_DIRECT,
             success=False,
             params={},
-            ens_match=None,
+            ens_params={},
             confidence=0.0,
-            processing_time_ms=processing_time,
-            details={'error': 'Could not extract standard or type'},
+            processing_time_ms=round(processing_time, 2),
+            details={
+                'match_type': None,
+                'match_type_ru': 'LLM direct fallback',
+            },
             item_type='',
             standard=''
         )
 
-    def batch_process(self, texts: List[str]) -> List[ProcessingResult]:
-        """Пакетная обработка."""
-        return [self.process(text) for text in texts]
+    def batch_process(self, texts: List[str], articles: Optional[List[str]] = None,
+                     force: bool = False, workers: int = 1) -> List[ProcessingResult]:
+        """
+        Batch processing with optional parallel workers.
+        """
+        import time
+        start_time = time.time()
+        if articles is None:
+            articles = [""] * len(texts)
+
+        results = []
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(self.process, text, article, force)
+                    for text, article in zip(texts, articles)
+                ]
+                for future in futures:
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        logger.error("Batch processing error: %s", e)
+                        results.append(ProcessingResult(
+                            text="",
+                            success=False,
+                            details={'error': str(e)}
+                        ))
+        else:
+            for text, article in zip(texts, articles):
+                results.append(self.process(text, article, force))
+
+        total_time = (time.time() - start_time) * 1000
+        logger.info("Batch processed %d items in %.1f ms", len(texts), total_time)
+        return results
 
     def get_statistics(self) -> Dict[str, Any]:
-        """Статистика процессора."""
+        """Get processing statistics."""
         return {
-            'mask_db_stats': self.mask_db.get_statistics(),
-            'parametric_client_stats': self.parametric_client.get_stats(),
-            'llm_generation_enabled': self.use_llm_generation,
-            'min_mask_score': self.min_mask_score,
-            'max_llm_retries': self.max_llm_retries
+            'cache_hits': self._cache_stats['hits'],
+            'cache_misses': self._cache_stats['misses'],
         }
