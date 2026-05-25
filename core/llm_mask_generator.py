@@ -1,12 +1,5 @@
 # =============================================================================
 # FILE: core/llm_mask_generator.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 COMMITS (UTC+3):
-# 2026-05-21 08:23:07 51f335da 21.05.2026
-# 2026-05-21 08:05:56 ee843b22 21.05.2026
-# 2026-05-20 17:47:49 19e8ca02 20.05.2026
-# 2026-05-20 17:39:23 b00c4b25 20.05.2026
-# 2026-05-20 17:31:34 66c66c93 20.05.2026
 # =============================================================================
 # FIX 2026-05-22 14:04 UTC+3:
 # 1. RESTORED ENS examples injection into prompt.
@@ -411,132 +404,169 @@ class LLMMaskGenerator:
     ) -> Optional[MaskGenerationResult]:
         """Парсинг JSON-ответа LLM.
 
-        FIX 2026-05-22: Добавлен yaml.safe_load fallback для одинарных кавычек
-        и ключей без кавычек. Добавлено логирование сырого ответа.
+        FIX 2026-05-25: MTSAIClient возвращает Python dict repr (одинарные кавычки).
+        Добавлен ast.literal_eval + извлечение из content/raw.
         """
         if not text:
             logger.warning("[LLMMaskGenerator] Empty response text")
             return None
 
-        # DEBUG: логируем сырой ответ для диагностики
-        logger.debug("[LLM] Raw response for %s/%s (len=%d): %r", standard, item_type, len(text), text)
+        logger.debug("[LLM] Raw response for %s/%s (len=%d): %r",
+                     standard, item_type, len(text), text[:800])
 
+        data = None
         candidate = None
+
+        # --- STRATEGY 1: Python dict repr (MTSAIClient format) ---
         try:
-            # 1. Пробуем найти JSON в markdown code block
-            for lang in ['json', 'python', '']:
-                prefix = f'```{lang}'
+            import ast
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, dict):
+                # MTSAI returns {success, content, raw, error, model, tokens}
+                if "content" in parsed and isinstance(parsed["content"], dict):
+                    data = parsed["content"]
+                    logger.debug("[LLM] Parsed via ast.literal_eval -> content")
+                elif "raw" in parsed and isinstance(parsed["raw"], str):
+                    text = parsed["raw"]
+                    logger.debug("[LLM] Parsed via ast.literal_eval -> raw, re-parsing")
+                else:
+                    data = parsed
+                    logger.debug("[LLM] Parsed via ast.literal_eval -> direct dict")
+        except (ValueError, SyntaxError, TypeError) as e:
+            logger.debug("[LLM] ast.literal_eval failed: %s", e)
+
+        # --- STRATEGY 2: YAML fallback (single quotes, unquoted keys) ---
+        if data is None:
+            try:
+                import yaml
+                data = yaml.safe_load(text)
+                if isinstance(data, dict):
+                    if "content" in data and isinstance(data["content"], dict):
+                        data = data["content"]
+                        logger.debug("[LLM] Parsed via yaml.safe_load -> content")
+                    elif "raw" in data and isinstance(data["raw"], str):
+                        text = data["raw"]
+                        logger.debug("[LLM] Parsed via yaml.safe_load -> raw, re-parsing")
+                    else:
+                        logger.debug("[LLM] Parsed via yaml.safe_load -> direct dict")
+                else:
+                    data = None
+            except Exception as e:
+                logger.debug("[LLM] yaml.safe_load failed: %s", e)
+
+        # --- STRATEGY 3: Markdown code block inside text ---
+        if data is None:
+            for prefix in ["```json", "```python", "```"]:
                 start = text.find(prefix)
                 if start >= 0:
                     start += len(prefix)
-                    end = text.find('```', start)
+                    end = text.find("```", start)
                     if end >= 0:
                         candidate = text[start:end].strip()
-                        try:
-                            data = json.loads(candidate)
-                            break
-                        except json.JSONDecodeError:
-                            pass
-                        try:
-                            import yaml
-                            data = yaml.safe_load(candidate)
-                            if isinstance(data, dict):
-                                logger.debug("[LLM] Parsed markdown JSON via yaml.safe_load")
-                                break
-                        except Exception:
-                            pass
+                        break
+            if candidate:
+                try:
+                    data = json.loads(candidate)
+                    logger.debug("[LLM] Parsed markdown JSON via json.loads")
+                except json.JSONDecodeError:
+                    try:
+                        import yaml
+                        data = yaml.safe_load(candidate)
+                        if isinstance(data, dict):
+                            logger.debug("[LLM] Parsed markdown JSON via yaml.safe_load")
+                        else:
+                            data = None
+                    except Exception:
+                        pass
 
-            # 2. Если markdown не сработал — пробуем balanced braces
-            if not candidate:
-                for start in re.finditer(r'(?m)^[ \t]*\{', text):
-                    pos = start.start()
-                    brace_count = 0
-                    in_string = False
-                    escape = False
-                    for i, ch in enumerate(text[pos:], start=pos):
-                        if escape:
-                            escape = False
-                            continue
-                        if ch == '\\':
-                            escape = True
-                            continue
-                        if ch == '"' and not escape:
-                            in_string = not in_string
-                            continue
-                        if not in_string:
-                            if ch == '{':
-                                brace_count += 1
-                            elif ch == '}':
-                                brace_count -= 1
-                            if brace_count == 0:
-                                candidate = text[pos:i + 1]
-                                try:
-                                    data = json.loads(candidate)
-                                    break
-                                except json.JSONDecodeError:
-                                    try:
-                                        import yaml
-                                        data = yaml.safe_load(candidate)
-                                        if isinstance(data, dict):
-                                            logger.debug("[LLM] Parsed balanced JSON via yaml.safe_load")
-                                            break
-                                    except Exception:
-                                        pass
-                                break
-                    else:
+        # --- STRATEGY 4: Balanced braces ---
+        if data is None:
+            for start_match in re.finditer(r"(?m)^[ \t]*\{", text):
+                pos = start_match.start()
+                brace_count = 0
+                in_string = False
+                escape = False
+                for i, ch in enumerate(text[pos:], start=pos):
+                    if escape:
+                        escape = False
                         continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == '"' and not escape:
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if ch == "{":
+                            brace_count += 1
+                        elif ch == "}":
+                            brace_count -= 1
+                        if brace_count == 0:
+                            candidate = text[pos:i + 1]
+                            try:
+                                data = json.loads(candidate)
+                                logger.debug("[LLM] Parsed balanced JSON")
+                            except json.JSONDecodeError:
+                                try:
+                                    import yaml
+                                    data = yaml.safe_load(candidate)
+                                    if isinstance(data, dict):
+                                        logger.debug("[LLM] Parsed balanced JSON via yaml")
+                                    else:
+                                        data = None
+                                except Exception:
+                                    pass
+                            break
+                if data is not None:
                     break
 
-            # 3. Последний fallback — простой поиск { ... }
-            if not candidate or not isinstance(data, dict):
-                json_match = re.search(r'\{.*?\}', text, re.DOTALL)
-                if json_match:
-                    candidate = json_match.group()
+        # --- STRATEGY 5: Simple regex fallback ---
+        if data is None:
+            json_match = re.search(r"\{.*?\}", text, re.DOTALL)
+            if json_match:
+                candidate = json_match.group()
+                try:
+                    data = json.loads(candidate)
+                    logger.debug("[LLM] Parsed simple JSON")
+                except json.JSONDecodeError:
                     try:
-                        data = json.loads(candidate)
-                    except json.JSONDecodeError:
-                        try:
-                            import yaml
-                            data = yaml.safe_load(candidate)
-                            if isinstance(data, dict):
-                                logger.debug("[LLM] Parsed simple JSON via yaml.safe_load")
-                        except Exception:
-                            logger.warning(
-                                "[LLMMaskGenerator] Failed to parse JSON for %s/%s. Preview: %r",
-                                standard, item_type, text[:300]
-                            )
-                            return None
-                else:
-                    logger.warning("[LLMMaskGenerator] No JSON found in response")
-                    return None
+                        import yaml
+                        data = yaml.safe_load(candidate)
+                        if isinstance(data, dict):
+                            logger.debug("[LLM] Parsed simple JSON via yaml")
+                        else:
+                            data = None
+                    except Exception:
+                        pass
 
-            if not isinstance(data, dict):
-                logger.warning("[LLMMaskGenerator] Parsed data is not dict: %s", type(data))
-                return None
-
-            pattern = data.get("pattern", "")
-            params = data.get("params", [])
-            required = data.get("required", [])
-            if not pattern or not pattern.startswith("^") or not pattern.endswith("$"):
-                logger.warning("[LLMMaskGenerator] Invalid pattern: %s", pattern[:50])
-                return None
-            pattern = self._fix_pattern(pattern, standard, item_type)
-            return MaskGenerationResult(
-                pattern=pattern,
-                params=params,
-                required=required,
-                standard=standard,
-                item_type=item_type,
-                raw_response=text,
-                service=service,
-                model=model,
-                temperature=temperature,
-                tokens_prompt=tokens_prompt,
-                tokens_completion=tokens_completion,
+        # --- Validate and build result ---
+        if data is None or not isinstance(data, dict):
+            logger.warning(
+                "[LLMMaskGenerator] Failed to parse any JSON for %s/%s. Preview: %r",
+                standard, item_type, text[:300]
             )
-        except Exception as e:
-            logger.warning("[LLMMaskGenerator] Parse error: %s", e)
             return None
+
+        pattern = data.get("pattern", "")
+        params = data.get("params", [])
+        required = data.get("required", [])
+        if not pattern or not pattern.startswith("^") or not pattern.endswith("$"):
+            logger.warning("[LLMMaskGenerator] Invalid pattern: %s", pattern[:50])
+            return None
+        pattern = self._fix_pattern(pattern, standard, item_type)
+        return MaskGenerationResult(
+            pattern=pattern,
+            params=params,
+            required=required,
+            standard=standard,
+            item_type=item_type,
+            raw_response=text,
+            service=service,
+            model=model,
+            temperature=temperature,
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
+        )
 
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
         """Исправить типичные ошибки LLM в regex."""
