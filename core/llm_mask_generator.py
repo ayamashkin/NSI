@@ -170,18 +170,42 @@ class LLMMaskGenerator:
         return None
 
     def _format_stats(self, examples: List[Dict]) -> str:
-        """Форматировать статистику параметров для вставки в промпт."""
+        """Форматировать статистику глобально видимых параметров для вставки в промпт.
+
+        FIX 2026-05-25 v3: считаем только параметры, видимые в наименовании.
+        """
         if not examples:
             return "(нет данных)"
-        lines = []
+
+        check_keys = [
+            "тип_изделия", "исполнение",
+            "толщина_проката_стенки_полки",
+            "номинальный_диаметр_резьбы", "шаг_резьбы",
+            "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+            "длина",
+            "покрытие", "толщина_покрытия",
+            "группа_класс_прочности", "класс_поле_допуска", "свойства",
+            "марка_материала", "марка_материала_1", "тип_резьбы",
+        ]
+
         param_counts = {}
         for ex in examples:
-            for key in ["исполнение", "номинальный_диаметр_резьбы", "длина",
-                        "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
-                val = self._get_example_value(ex, key)
-                if val and val.strip():
+            name = ex.get("наименование", ex.get("полное_наименование", ""))
+            if not name:
+                continue
+            for key in check_keys:
+                if key == "тип_изделия":
                     param_counts[key] = param_counts.get(key, 0) + 1
+                    continue
+                val = self._get_example_value(ex, key)
+                if not val:
+                    continue
+                val_str = val.strip()
+                if self._is_value_in_name(val_str, name, param_key=key):
+                    param_counts[key] = param_counts.get(key, 0) + 1
+
         total = len(examples)
+        lines = []
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
             lines.append(f"  {key}: {count} из {total} ({count/total*100:.0f}%)")
         return "\n".join(lines) if lines else "(нет параметров)"
@@ -523,27 +547,48 @@ class LLMMaskGenerator:
         return prompt
 
     def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
-        """Извлечь список видимых параметров из ENS-примеров для подстановки в промпт."""
+        """Извлечь список глобально видимых параметров из ENS-примеров.
+
+        FIX 2026-05-25 v3: union across all examples — параметр видим,
+        если присутствует хотя бы в одном примере.
+        """
         if not examples:
             return ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
-        visible = set()
-        for ex in examples[:5]:
+
+        check_keys = [
+            "тип_изделия", "исполнение",
+            "толщина_проката_стенки_полки",
+            "номинальный_диаметр_резьбы", "шаг_резьбы",
+            "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+            "длина",
+            "покрытие", "толщина_покрытия",
+            "группа_класс_прочности", "класс_поле_допуска", "свойства",
+            "марка_материала", "марка_материала_1", "тип_резьбы",
+        ]
+
+        global_visible = set()
+        for ex in examples:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
-            name_lower = name.lower()
-            for key in ["тип_изделия", "исполнение", "номинальный_диаметр_резьбы",
-                        "длина", "шаг_резьбы", "покрытие", "нтд_1", "нтд_2"]:
+            for key in check_keys:
+                if key == "наименование_типа":
+                    continue
                 val = self._get_example_value(ex, key)
-                if val:
-                    val_str = val.strip().lower()
-                    if val_str in name_lower:
-                        visible.add(key)
-            # Обязательные поля всегда добавляем
-            visible.add("тип_изделия")
-            if any("нтд" in k for k in visible):
-                visible.add("нтд_1")
-        return list(visible)
+                if not val:
+                    continue
+                val_str = val.strip()
+                if key == "тип_изделия":
+                    if name.lower().startswith(val_str.lower()):
+                        global_visible.add(key)
+                    continue
+                if self._is_value_in_name(val_str, name, param_key=key):
+                    global_visible.add(key)
+
+        # Обязательные поля
+        global_visible.add("тип_изделия")
+        global_visible.add("нтд_1")
+        return list(global_visible)
 
     def _get_debug_dir(self) -> Optional[Path]:
         """Получить путь к debug-директории из конфига.

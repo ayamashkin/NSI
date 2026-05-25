@@ -277,11 +277,13 @@ class AutoValidator:
     ) -> Dict:
         """Проверить один пример ЕНС против regex.
 
-        FIX 2026-05-25:
+        FIX 2026-05-25 v3:
         1. Added detailed DEBUG logging for match/no-match diagnosis.
         2. FIXED duplicate mismatches: each param checked exactly once.
         3. FIXED _values_match: comma→dot normalization, numeric float compare,
            coating token-based fuzzy match.
+        4. FIXED optional params: params not in required are NOT checked for
+           presence — if missing in example, it's OK (LLM marks them optional).
         """
         text = ex.get("полное_наименование", ex.get("наименование", ""))
         if not text:
@@ -309,13 +311,13 @@ class AutoValidator:
             "код", "mdm_key", "нтд_1", "нтд_2", "стандарт", "нтд",
         }
 
+        # --- Check REQUIRED params: must be present and match ---
         for param in required:
             if param in skip_params:
                 continue
 
             extracted_val = extracted.get(param)
-            # Найти соответствие в example по имени параметра
-            best_exp_key, best_sim = self._find_expected_key(param, ex)
+            best_exp_key, _ = self._find_expected_key(param, ex)
             expected_val = ex.get(best_exp_key) if best_exp_key else None
 
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
@@ -327,7 +329,7 @@ class AutoValidator:
                 continue  # extra extracted is OK
             elif extracted_empty or extracted_val == "":
                 missing.append(param)
-                logger.debug("[AutoValidator] Missing param %s: expected=%r", param, expected_val)
+                logger.debug("[AutoValidator] Missing required param %s: expected=%r", param, expected_val)
                 continue
 
             if not self._values_match(str(extracted_val), str(expected_val)):
@@ -337,7 +339,44 @@ class AutoValidator:
                     "extracted": extracted_val,
                 })
                 logger.debug(
-                    "[AutoValidator] Mismatch %s: expected=%r extracted=%r",
+                    "[AutoValidator] Mismatch required %s: expected=%r extracted=%r",
+                    param, expected_val, extracted_val
+                )
+
+        # --- Check OPTIONAL params (in params but not required):
+        #     if present in example, must match; if missing in example, OK ---
+        optional_params = set(params) - set(required) - skip_params
+        for param in optional_params:
+            extracted_val = extracted.get(param)
+            best_exp_key, _ = self._find_expected_key(param, ex)
+            expected_val = ex.get(best_exp_key) if best_exp_key else None
+
+            extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
+            expected_empty = expected_val is None or str(expected_val).strip() == ""
+
+            if expected_empty:
+                continue  # optional param not in this example — OK
+            if extracted_empty:
+                # optional param expected but not extracted — this is a mismatch
+                mismatches.append({
+                    "param": param,
+                    "expected": expected_val,
+                    "extracted": None,
+                })
+                logger.debug(
+                    "[AutoValidator] Optional param %s expected but not extracted: expected=%r",
+                    param, expected_val
+                )
+                continue
+
+            if not self._values_match(str(extracted_val), str(expected_val)):
+                mismatches.append({
+                    "param": param,
+                    "expected": expected_val,
+                    "extracted": extracted_val,
+                })
+                logger.debug(
+                    "[AutoValidator] Mismatch optional %s: expected=%r extracted=%r",
                     param, expected_val, extracted_val
                 )
 
