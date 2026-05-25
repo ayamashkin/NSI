@@ -1,59 +1,17 @@
+# =============================================================================
+# FIX 2026-05-25 20:05:21 UTC+3:
+# 1. _format_stats: добавлен параметр standard (сигнатура не совпадала с
+#    вызовом в _build_prompt, что вызывало TypeError: takes 2 positional args
+#    but 3 were given).
+# 2. _format_examples: добавлен параметр standard в вызовы _is_value_in_name
+#    для консистентности с _format_stats и предотвращения false positives
+#    на номерах стандарта.
+# =============================================================================
+
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
 """
-# =============================================================================
-# FIX 2026-05-25 21:56 UTC+3 v4:
-# 1. ADDED _find_value_positions: возвращает список (start, end) для каждого match.
-#    Нормализации: exact, comma→dot, coatings prefix, М-prefix.
-#    НЕ использует float .0 → int (слишком агрессивно).
-#    НЕ использует numeric no-separator (5.8 → 58 может матчить неверно).
-# 2. FIXED _format_examples: жадный positional matching с occupied tracking.
-#    Один фрагмент строки = один параметр. Порядок = приоритет.
-# 3. ADDED SKIP_PARAMS: параметры-метаданные (толщина_покрытия, марка_материала
-#    и др.) никогда не считаются видимыми.
-# 4. FIXED _is_value_in_name: удаляет стандарт из строки перед проверкой
-#    (предотвращает false positive на числах из номера стандарта).
-# 5. FIXED _format_stats: принимает standard, использует positional matching.
-# =============================================================================
-# FIX 2026-05-25 18:40 UTC+3:
-# 1. FIXED _call_llm: now correctly extracts "raw" or "text" from dict response
-#    (MTSAIClient returns dict with "raw"/"text"/"content"; previously str(response)
-#    was used, producing Python repr instead of markdown JSON).
-# 2. FIXED _sanitize_mask_result: removed aggressive colon-in-char-class fix
-#    that broke patterns like [:-\s] (used for optional colon separator).
-# 3. ADDED regex compile validation after generation — if pattern fails to
-#    compile, mask is rejected with warning.
-# 4. FIXED _fix_pattern: added removal of nested named groups (?P<name>(?P<name2>...))
-#    which are invalid in Python re.
-# 5. FIXED _build_prompt: task/format sections are NOT appended to _default_template()
-#    (it already contains them), preventing prompt duplication.
-# 6. ADDED detailed DEBUG logging in _parse_mask_response for each strategy.
-# =============================================================================
-# FIX 2026-05-25 14:11 UTC+3:
-# 1. FIXED _get_prompt_template: now READS file content from path specified
-#    in mask_generation.prompt_template instead of returning the path string.
-# 2. FIXED _save_debug_prompt/_save_debug_response: use debug_prompts_dir
-#    from config (mask_generation.debug_prompts_dir) with subdirs prompts/
-#    and responses/. Respects save_debug_prompts flag.
-# 3. REMOVED duplicate header from _build_prompt.
-# 4. FIXED _format_examples: ENS field mapping (нтд_1->стандарт/нтд,
-#    тип_изделия->наименование_типа/тип).
-# 5. ADDED placeholder replacement for {provider},{model},{temperature},{timestamp}.
-# =============================================================================
-# FIX 2026-05-22 19:11 UTC+3:
-# 1. ADDED yaml.safe_load fallback in _parse_mask_response for single-quoted
-#    JSON and unquoted keys.
-# 2. ADDED debug logging of raw LLM response for diagnostics.
-# =============================================================================
-# FIX 2026-05-22 14:04 UTC+3:
-# 1. RESTORED ENS examples injection into prompt.
-# 2. FIXED return signature: generate_mask() now returns
-#    (MaskGenerationResult, metadata_dict).
-# =============================================================================
-# 2026-05-21 15:23:07 51f335da — canonicalize_standard fixes.
-# 2026-05-20 17:47:49 19e8ca02 — generate-masks metadata & stats-output.
-# =============================================================================
 
 import json
 import logging
@@ -182,7 +140,7 @@ class LLMMaskGenerator:
                 return str(val).strip()
         return None
 
-    def _format_stats(self, examples: List[Dict]) -> str:
+    def _format_stats(self, examples: List[Dict], standard: str = "") -> str:
         """Форматировать статистику глобально видимых параметров для вставки в промпт.
 
         FIX 2026-05-25 v3: считаем только параметры, видимые в наименовании.
@@ -484,7 +442,7 @@ class LLMMaskGenerator:
                     if name.lower().startswith(val_str.lower()):
                         global_visible.add(key)
                     continue
-                if self._is_value_in_name(val_str, name, param_key=key):
+                if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
                     global_visible.add(key)
 
         # --- Шаг 2: Для каждого примера: видимые + отсутствующие (из global_visible) ---
@@ -518,7 +476,7 @@ class LLMMaskGenerator:
 
                 if val:
                     val_str = val.strip()
-                    if self._is_value_in_name(val_str, name, param_key=key):
+                    if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
                         # Найти позицию в строке для сортировки
                         pos = name.lower().find(val_str.lower())
                         if pos < 0:
