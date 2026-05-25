@@ -73,7 +73,11 @@ class AutoValidator:
         self._ens_items: Optional[List[Dict]] = None
 
     def _load_ens_index(self) -> Dict:
-        """Загрузить ENS индекс из pickle."""
+        """Загрузить ENS индекс из pickle с поддержкой разных форматов.
+
+        FIX 2026-05-25: robust loader — поддерживает tuple (index, vectorizer),
+        dict с metadata keys, и прямые dict of lists.
+        """
         if self._ens_index is not None:
             return self._ens_index
         if not self.ens_index_path.exists():
@@ -82,10 +86,55 @@ class AutoValidator:
             return self._ens_index
         try:
             with open(self.ens_index_path, "rb") as f:
-                self._ens_index = pickle.load(f)
-            count = sum(len(v) for v in self._ens_index.values())
-            logger.info("[AutoValidator] Loaded %d ENS items for validation", count)
+                data = pickle.load(f)
+
+            # Format 1: Direct dict {(std, type): [items]} — filter only list values
+            if isinstance(data, dict):
+                list_values = {k: v for k, v in data.items() if isinstance(v, list)}
+                if list_values:
+                    self._ens_index = list_values
+                    count = sum(len(v) for v in list_values.values())
+                    skipped = set(data.keys()) - set(list_values.keys())
+                    if skipped:
+                        logger.info("[AutoValidator] Skipped non-list keys: %s", skipped)
+                    logger.info("[AutoValidator] Loaded %d ENS items from %d keys (filtered dict)",
+                                count, len(list_values))
+                    return self._ens_index
+
+            # Format 2: Tuple (index_dict, vectorizer, ...)
+            if isinstance(data, (tuple, list)) and len(data) > 0:
+                first = data[0]
+                if isinstance(first, dict):
+                    self._ens_index = first
+                    count = sum(len(v) for v in self._ens_index.values())
+                    logger.info("[AutoValidator] Loaded %d ENS items from tuple[0]", count)
+                    return self._ens_index
+
+            # Format 3: Dict with metadata keys
+            if isinstance(data, dict):
+                for key in ['index', 'data', 'ens_index', 'items']:
+                    if key in data and isinstance(data[key], dict):
+                        subdata = data[key]
+                        test_val = next(iter(subdata.values())) if subdata else None
+                        if isinstance(test_val, list):
+                            self._ens_index = subdata
+                            count = sum(len(v) for v in subdata.values())
+                            logger.info("[AutoValidator] Loaded %d ENS items from key '%s'", count, key)
+                            return self._ens_index
+
+            # Format 4: Filter dict — оставить только list-значения
+            if isinstance(data, dict):
+                filtered = {k: v for k, v in data.items() if isinstance(v, list)}
+                if filtered:
+                    self._ens_index = filtered
+                    count = sum(len(v) for v in filtered.values())
+                    logger.info("[AutoValidator] Loaded %d ENS items (filtered lists)", count)
+                    return self._ens_index
+
+            logger.error("[AutoValidator] Unknown pickle format: %s", type(data).__name__)
+            self._ens_index = {}
             return self._ens_index
+
         except Exception as e:
             logger.error("[AutoValidator] Failed to load ENS index: %s", e)
             self._ens_index = {}
