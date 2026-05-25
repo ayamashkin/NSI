@@ -724,6 +724,51 @@ class LLMMaskGenerator:
         logger.error("[LLMMaskGenerator] All LLM call methods failed for %s", client_type)
         return None
 
+    @staticmethod
+    def _extract_json_fields(text: str) -> Optional[Dict]:
+        """Извлечь pattern/params/required из JSON-like текста через regex.
+
+        FIX 2026-05-25: Fallback когда json.loads/yaml не справляются с
+        невалидными JSON escapes (\\s, \\w, \\d от LLM).
+        """
+        # pattern: извлекаем строку между "pattern": "..."
+        # Используем (?:(?!"\s*[},]).)* для non-greedy до закрывающей кавычки
+        pat_match = re.search(
+            r'"pattern"\s*:\s*"((?:\.|[^"\])*)"',
+            text,
+            re.DOTALL
+        )
+        if not pat_match:
+            return None
+
+        raw_pattern = pat_match.group(1)
+        # JSON → Python: \\ → \, \" → ", \n → newline и т.д.
+        # Но \s, \d, \w остаются как есть (один backslash + буква)
+        pattern = raw_pattern.replace(r"\\", "\\")  # \\ → \ (два → один)
+        pattern = pattern.replace(r'\"', '"')       # \" → "
+        pattern = pattern.replace(r"\n", "\n")       # \n → newline
+        pattern = pattern.replace(r"\t", "\t")       # \t → tab
+
+        # params
+        params = []
+        p_match = re.search(r'"params"\s*:\s*(\[[^\]]*\])', text, re.DOTALL)
+        if p_match:
+            try:
+                params = json.loads(p_match.group(1))
+            except Exception:
+                pass
+
+        # required
+        required = []
+        r_match = re.search(r'"required"\s*:\s*(\[[^\]]*\])', text, re.DOTALL)
+        if r_match:
+            try:
+                required = json.loads(r_match.group(1))
+            except Exception:
+                pass
+
+        return {"pattern": pattern, "params": params, "required": required}
+
     def _parse_mask_response(
         self,
         text: str,
@@ -890,6 +935,12 @@ class LLMMaskGenerator:
                             data = None
                     except Exception:
                         pass
+
+        # --- STRATEGY 6: Regex-based field extraction (ultimate fallback) ---
+        if data is None:
+            data = self._extract_json_fields(text)
+            if data:
+                logger.debug("[LLM] Parsed via regex field extraction")
 
         # --- Validate and build result ---
         if data is None or not isinstance(data, dict):
