@@ -3,13 +3,15 @@ LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
 """
 # =============================================================================
-# FIX 2026-05-25 13:35 UTC+3:
-# 1. REMOVED duplicate header from _build_prompt — LLM no longer sees
-#    "# Тип изделия: …" as data to match.
-# 2. ADDED debug prompt/response saving to debug/prompts/ and debug/responses/.
-# 3. FIXED _format_examples: added ENS field mapping (нтд_1->стандарт/нтд,
-#    тип_изделия->наименование_типа/тип) so examples actually appear.
-# 4. FIXED _extract_visible_params: same field mapping for нтд_1.
+# FIX 2026-05-25 14:11 UTC+3:
+# 1. FIXED _get_prompt_template: now READS file content from path specified
+#    in mask_generation.prompt_template instead of returning the path string.
+# 2. FIXED _save_debug_prompt/_save_debug_response: use debug_prompts_dir
+#    from config (mask_generation.debug_prompts_dir) with subdirs prompts/
+#    and responses/. Respects save_debug_prompts flag.
+# 3. REMOVED duplicate header from _build_prompt.
+# 4. FIXED _format_examples: ENS field mapping (нтд_1->стандарт/нтд,
+#    тип_изделия->наименование_типа/тип).
 # 5. ADDED placeholder replacement for {provider},{model},{temperature},{timestamp}.
 # =============================================================================
 # FIX 2026-05-22 19:11 UTC+3:
@@ -20,9 +22,11 @@ Generates regex masks using LLM with ENS examples context.
 # FIX 2026-05-22 14:04 UTC+3:
 # 1. RESTORED ENS examples injection into prompt.
 # 2. FIXED return signature: generate_mask() now returns
-#    (MaskGenerationResult, metadata_dict) instead of (result, int).
+#    (MaskGenerationResult, metadata_dict).
 # =============================================================================
-
+# 2026-05-21 08:23:07 51f335da — canonicalize_standard fixes.
+# 2026-05-20 17:47:49 19e8ca02 — generate-masks metadata & stats-output.
+# =============================================================================
 
 import json
 import logging
@@ -191,11 +195,23 @@ class LLMMaskGenerator:
         return "\n".join(lines)
 
     def _get_prompt_template(self) -> str:
-        """Загрузить шаблон промпта."""
+        """Загрузить шаблон промпта.
+
+        FIX 2026-05-25: Читаем содержимое файла по пути из
+        mask_generation.prompt_template, а не возвращаем сам путь как строку.
+        """
         if self.settings and hasattr(self.settings, "mask_generation"):
             mg = self.settings.mask_generation
-            if hasattr(mg, "prompt_template") and mg.prompt_template:
-                return mg.prompt_template
+            template_path = getattr(mg, "prompt_template", "")
+            if template_path:
+                p = Path(template_path)
+                if p.exists():
+                    content = p.read_text(encoding="utf-8")
+                    logger.info("[LLMMaskGenerator] Loaded prompt template from %s", template_path)
+                    return content
+                else:
+                    logger.warning("[LLMMaskGenerator] prompt_template path not found: %s", template_path)
+        # Fallback paths
         for path in [
             "prompts/templates/mask_generation.txt",
             "prompts/mask_generation.txt",
@@ -203,7 +219,9 @@ class LLMMaskGenerator:
         ]:
             p = Path(path)
             if p.exists():
+                logger.info("[LLMMaskGenerator] Loaded prompt template from fallback %s", path)
                 return p.read_text(encoding="utf-8")
+        logger.warning("[LLMMaskGenerator] No template file found, using default")
         return self._default_template()
 
     def _default_template(self) -> str:
@@ -368,15 +386,38 @@ class LLMMaskGenerator:
                 visible.add("нтд_1")
         return list(visible)
 
+    def _get_debug_dir(self) -> Optional[Path]:
+        """Получить путь к debug-директории из конфига.
+
+        FIX 2026-05-25: Используем mask_generation.debug_prompts_dir из config.
+        Файлы сохраняются напрямую в эту директорию (без подпапок).
+        Возвращает None если save_debug_prompts=false.
+        """
+        if not self.settings:
+            return None
+        mg = getattr(self.settings, "mask_generation", None)
+        if not mg:
+            return None
+        if not getattr(mg, "save_debug_prompts", False):
+            return None
+        debug_dir = getattr(mg, "debug_prompts_dir", "prompts/debug")
+        if not debug_dir:
+            return None
+        return Path(debug_dir)
+
     def _save_debug_prompt(self, standard: str, item_type: str, prompt: str) -> None:
-        """Сохранить промпт в debug/prompts/."""
+        """Сохранить промпт в debug-директорию.
+
+        Формат имени: {item_type}_{standard}.txt
+        Пример: Болт_ОСТ 1 31141-80.txt
+        """
+        base_dir = self._get_debug_dir()
+        if not base_dir:
+            return
         try:
-            debug_dir = Path("debug/prompts")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_std = re.sub(r'[^\w\d-]', '_', standard)
-            fname = f"{ts}_{safe_std}_{item_type}.txt"
-            path = debug_dir / fname
+            base_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"{item_type}_{standard}.txt"
+            path = base_dir / fname
             path.write_text(prompt, encoding='utf-8')
             logger.debug("[LLMMaskGenerator] Prompt saved to %s", path)
         except Exception as e:
@@ -384,14 +425,18 @@ class LLMMaskGenerator:
 
     def _save_debug_response(self, standard: str, item_type: str, response: str,
                              service: str, attempt: int) -> None:
-        """Сохранить ответ LLM в debug/responses/."""
+        """Сохранить ответ LLM в debug-директорию.
+
+        Формат имени: {item_type}_{standard}_a{attempt}.txt
+        Пример: Болт_ОСТ 1 31141-80_a1.txt
+        """
+        base_dir = self._get_debug_dir()
+        if not base_dir:
+            return
         try:
-            debug_dir = Path("debug/responses")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_std = re.sub(r'[^\w\d-]', '_', standard)
-            fname = f"{ts}_{safe_std}_{item_type}_{service}_a{attempt}.txt"
-            path = debug_dir / fname
+            base_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"{item_type}_{standard}_a{attempt}.txt"
+            path = base_dir / fname
             path.write_text(response, encoding='utf-8')
             logger.debug("[LLMMaskGenerator] Response saved to %s", path)
         except Exception as e:
@@ -655,7 +700,7 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == '\\\\':
+                    if ch == '\\':
                         escape = True
                         continue
                     if ch == '"' and not escape:
@@ -737,14 +782,14 @@ class LLMMaskGenerator:
         """Исправить типичные ошибки LLM в regex."""
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(
-                r"\(\?P<нтд_1>\\d\+[^\\)]*\)",
+                r"\(\?P<нтд_1>\d+[^\)]*\)",
                 f"(?P<нтд_1>{re.escape(standard)})",
                 pattern
             )
             logger.info("[LLMMaskGenerator] Fixed нтд_1 for ОСТ standard")
         if "ГОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(
-                r"\(\?P<нтд_1>\\d\+[^\\)]*\)",
+                r"\(\?P<нтд_1>\d+[^\)]*\)",
                 f"(?P<нтд_1>{re.escape(standard)})",
                 pattern
             )
