@@ -193,7 +193,16 @@ class LLMMaskGenerator:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
+            # Clean name
+            name_clean = re.sub(
+                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
+                '',
+                name,
+                flags=re.IGNORECASE
+            )
             for key in check_keys:
+                if key in LLMMaskGenerator.SKIP_PARAMS:
+                    continue
                 if key == "тип_изделия":
                     param_counts[key] = param_counts.get(key, 0) + 1
                     continue
@@ -201,7 +210,7 @@ class LLMMaskGenerator:
                 if not val:
                     continue
                 val_str = val.strip()
-                if self._is_value_in_name(val_str, name, param_key=key):
+                if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
                     param_counts[key] = param_counts.get(key, 0) + 1
 
         total = len(examples)
@@ -210,21 +219,44 @@ class LLMMaskGenerator:
             lines.append(f"  {key}: {count} из {total} ({count/total*100:.0f}%)")
         return "\n".join(lines) if lines else "(нет параметров)"
 
+    # Parameters that are NEVER visible in the nomenclature string (metadata only)
+    SKIP_PARAMS = {
+        "марка_материала", "марка_материала_1", "толщина_покрытия",
+        "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
+    }
+
     @staticmethod
-    def _is_value_in_name(val: str, name: str, param_key: str = "") -> bool:
+    def _is_value_in_name(val: str, name: str, param_key: str = "", standard: str = "") -> bool:
         """Проверить, что значение параметра присутствует в строке номенклатуры.
 
-        FIX 2026-05-25 v2:
-        - Покрытия: token-based fuzzy (Ц9.хр → Ц видно в "...-Ц-...")
-        - Числа с разделителем: 5,8/5.8 ↔ 58 (для прочности без точки в номенклатуре)
-        - Марка материала: только exact match (30ХГСА ≠ случайным буквам)
-        - Остальное: substring match с нормализацией.
+        FIX 2026-05-25 v3:
+        - Удаляем стандарт из строки перед проверкой (предотвращает false positive
+          на числах из номера стандарта, например толщина=3.0 матчит 31104).
+        - Покрытия: token-based fuzzy (Ц9.хр → Ц).
+        - Числа с разделителем: 5,8/5.8 ↔ 58.
+        - SKIP_PARAMS: параметры-метаданные никогда не считаются видимыми.
+        - Марка материала: только exact match.
         """
         if not val or not name:
             return False
+
+        # Metadata params are never visible in the name
+        if param_key in LLMMaskGenerator.SKIP_PARAMS:
+            return False
+
+        # Remove standard from name to prevent false positives
+        name_clean = name
+        if standard:
+            name_clean = re.sub(
+                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
+                '',
+                name_clean,
+                flags=re.IGNORECASE
+            )
+
         val_raw = str(val).strip()
         val_str = val_raw.lower().replace(",", ".")
-        name_lower = name.lower().replace(",", ".")
+        name_lower = name_clean.lower().replace(",", ".")
 
         # 1. Exact / substring match
         if val_str in name_lower:
@@ -286,6 +318,13 @@ class LLMMaskGenerator:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 return set()
+            # Clean name: remove standard
+            name_clean = re.sub(
+                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
+                '',
+                name,
+                flags=re.IGNORECASE
+            )
             visible = set()
             for key in ["тип_изделия", "исполнение", "толщина_проката_стенки_полки",
                         "номинальный_диаметр_резьбы", "шаг_резьбы",
@@ -293,13 +332,15 @@ class LLMMaskGenerator:
                         "длина", "покрытие", "толщина_покрытия",
                         "группа_класс_прочности", "класс_поле_допуска", "свойства",
                         "марка_материала", "марка_материала_1", "тип_резьбы"]:
+                if key in LLMMaskGenerator.SKIP_PARAMS:
+                    continue
                 val = ex.get(key)
                 if val and str(val).strip():
                     val_str = str(val).strip().lower()
                     if key == "тип_изделия":
                         if name.lower().startswith(val_str):
                             visible.add(key)
-                    elif val_str in name.lower():
+                    elif val_str in name_clean.lower():
                         visible.add(key)
             return visible
 
@@ -1296,6 +1337,16 @@ class LLMMaskGenerator:
         pattern = result.pattern
         params = list(result.params)
         required = list(result.required)
+
+        # 0. Удалить metadata-only params (SKIP_PARAMS) — они не видны в наименовании
+        for sp in LLMMaskGenerator.SKIP_PARAMS:
+            if sp in params:
+                params.remove(sp)
+                logger.info("[LLMMaskGenerator] Sanitized: removed metadata param %s", sp)
+            if sp in required:
+                required.remove(sp)
+            # Remove from pattern
+            pattern = re.sub(rf'\(\?P<{re.escape(sp)}>[^)]+\)\??', '', pattern)
 
         # 1. Удалить дублирующий наименование_типа
         if "тип_изделия" in params and "наименование_типа" in params:

@@ -309,6 +309,9 @@ class AutoValidator:
         skip_params = {
             "тип_изделия", "item_type", "наименование", "полное_наименование",
             "код", "mdm_key", "нтд_1", "нтд_2", "стандарт", "нтд",
+            # Metadata-only params never visible in nomenclature string
+            "марка_материала", "марка_материала_1", "толщина_покрытия",
+            "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
         }
 
         # --- Check REQUIRED params: must be present and match ---
