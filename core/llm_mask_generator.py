@@ -1,7 +1,7 @@
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
-"""
+ы"""
 # =============================================================================
 # FIX 2026-05-22 14:04 UTC+3:
 # 1. RESTORED ENS examples injection into prompt.
@@ -61,10 +61,10 @@ class LLMMaskGenerator:
     """Генератор масок через LLM с ENS-примерами."""
 
     def __init__(
-            self,
-            clients: Dict[str, Any],
-            settings: Any = None,
-            max_retries: int = 3,
+        self,
+        clients: Dict[str, Any],
+        settings: Any = None,
+        max_retries: int = 3,
     ):
         self.clients = clients
         self.settings = settings
@@ -101,7 +101,7 @@ class LLMMaskGenerator:
             examples = validator._get_ens_examples(standard, item_type)
             if examples:
                 logger.info("[LLMMaskGenerator] Loaded %d ENS examples for %s/%s",
-                            len(examples), standard, item_type)
+                           len(examples), standard, item_type)
                 return examples[:max_examples]
         except Exception as e:
             logger.warning("[LLMMaskGenerator] Failed to load examples: %s", e)
@@ -119,10 +119,10 @@ class LLMMaskGenerator:
             visible = []
             hidden = []
             for key in ["тип_изделия", "наименование_типа", "исполнение",
-                        "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
-                        "покрытие", "толщина_проката_стенки_полки",
-                        "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-                        "нтд_1", "нтд_2"]:
+                       "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
+                       "покрытие", "толщина_проката_стенки_полки",
+                       "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+                       "нтд_1", "нтд_2"]:
                 val = ex.get(key)
                 if val and str(val).strip():
                     val_str = str(val).strip()
@@ -142,12 +142,12 @@ class LLMMaskGenerator:
         param_counts = {}
         for ex in examples:
             for key in ["исполнение", "номинальный_диаметр_резьбы", "длина",
-                        "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
+                       "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
                 if ex.get(key) and str(ex.get(key)).strip():
                     param_counts[key] = param_counts.get(key, 0) + 1
         total = len(examples)
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
-            lines.append(f" {key}: {count} из {total} ({count / total * 100:.0f}%)")
+            lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
         lines.append("")
         return "\n".join(lines)
 
@@ -204,25 +204,52 @@ class LLMMaskGenerator:
 - [ ] `^` и `$` присутствуют?"""
 
     def _build_prompt(self, standard: str, item_type: str, examples: List[Dict],
-                      name: str = "", standard_info: Any = None) -> str:
-        """Собрать промпт с ENS-примерами."""
+                     name: str = "", standard_info: Any = None) -> str:
+        """Собрать промпт с ENS-примерами.
+
+        FIX 2026-05-25: Заменяем placeholder'ы {examples_text}, {stats_text} и т.д.
+        в загруженном template. Раньше они оставались незамененными — примеры
+        не попадали в промпт.
+        """
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
-        prompt = f"""# Тип изделия: {item_type}
-# Стандарт: {standard}
-# Провайдер: {{provider}}
-# Модель: {{model}}
-# Температура: {{temperature}}
-# Время: {{timestamp}}
-# ==================================================
-{template}
 
-{examples_text}
+        # --- Замена placeholder'ов в template ---
+        if "{examples_text}" in template:
+            template = template.replace("{examples_text}", examples_text or "(примеры отсутствуют)")
+        if "{stats_text}" in template:
+            # stats уже включены в examples_text через _format_examples
+            template = template.replace("{stats_text}", "")
+        if "{item_type}" in template:
+            template = template.replace("{item_type}", item_type)
+        if "{standard}" in template:
+            template = template.replace("{standard}", standard)
+        if "{params_list}" in template:
+            # visible params inferred from examples
+            visible = self._extract_visible_params(examples)
+            template = template.replace("{params_list}", json.dumps(visible, ensure_ascii=False))
+        if "{required_list}" in template:
+            visible = self._extract_visible_params(examples)
+            optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
+            required = [p for p in visible if p not in optional]
+            template = template.replace("{required_list}", json.dumps(required, ensure_ascii=False))
+
+        # --- Добавляем ЗАДАЧА/ФОРМАТ только если их нет в template ---
+        has_task = "=== ЗАДАЧА ===" in template or "ЗАДАЧА:" in template.lower()
+        has_format = "=== ФОРМАТ ОТВЕТА ===" in template or "```json" in template
+
+        task_section = ""
+        if not has_task:
+            task_section = f"""
 
 === ЗАДАЧА ===
 
 Создай regex-паттерн для стандарта {standard}, тип изделия {item_type}.
-Используй ВИДИМЫЕ параметры из примеров выше.
+Используй ВИДИМЫЕ параметры из примеров выше."""
+
+        format_section = ""
+        if not has_format:
+            format_section = """
 
 === ФОРМАТ ОТВЕТА ===
 
@@ -234,17 +261,49 @@ class LLMMaskGenerator:
 }}
 ```
 
-Только JSON, без комментариев.
+Только JSON, без комментариев."""
+
+        prompt = f"""# Тип изделия: {item_type}
+# Стандарт: {standard}
+# Провайдер: {{provider}}
+# Модель: {{model}}
+# Температура: {{temperature}}
+# Время: {{timestamp}}
+# ==================================================
+{template}{task_section}{format_section}
 """
         return prompt
 
+    def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
+        """Извлечь список видимых параметров из ENS-примеров для подстановки в промпт."""
+        if not examples:
+            return ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
+        visible = set()
+        for ex in examples[:5]:
+            name = ex.get("наименование", ex.get("полное_наименование", ""))
+            if not name:
+                continue
+            name_lower = name.lower()
+            for key in ["тип_изделия", "исполнение", "номинальный_диаметр_резьбы",
+                        "длина", "шаг_резьбы", "покрытие", "нтд_1", "нтд_2"]:
+                val = ex.get(key)
+                if val and str(val).strip():
+                    val_str = str(val).strip().lower()
+                    if val_str in name_lower:
+                        visible.add(key)
+        # Обязательные поля всегда добавляем
+        visible.add("тип_изделия")
+        if any("нтд" in k for k in visible):
+            visible.add("нтд_1")
+        return list(visible)
+
     def generate_mask(
-            self,
-            standard: str,
-            item_type: str,
-            examples: Optional[List[Dict]] = None,
-            name: str = "",
-            standard_info: Any = None,
+        self,
+        standard: str,
+        item_type: str,
+        examples: Optional[List[Dict]] = None,
+        name: str = "",
+        standard_info: Any = None,
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
         """
         Генерация маски через LLM с ENS-примерами.
@@ -262,7 +321,7 @@ class LLMMaskGenerator:
         prompt = self._build_prompt(canon_std, item_type, examples, name, standard_info)
         service, model, temperature = self._resolve_service()
         logger.info("[LLMMaskGenerator] Generating mask for %s/%s via %s (examples=%d)",
-                    canon_std, item_type, service, len(examples))
+                   canon_std, item_type, service, len(examples))
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             for svc_name, client in self.clients.items():
@@ -294,7 +353,7 @@ class LLMMaskGenerator:
                 except Exception as e:
                     last_error = e
                     logger.debug("[LLMMaskGenerator] %s attempt %d failed: %s",
-                                 svc_name, attempt, e)
+                               svc_name, attempt, e)
         logger.error("[LLMMaskGenerator] Failed after %d attempts: %s",
                      self.max_retries, last_error)
         return None, None
@@ -366,11 +425,8 @@ class LLMMaskGenerator:
                     text = str(response)
 
                 if text and len(text) > 10:
-                    tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens",
-                                                                                        0)
-                    tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client,
-                                                                                                "_last_completion_tokens",
-                                                                                                0)
+                    tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens", 0)
+                    tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client, "_last_completion_tokens", 0)
                     logger.info("[LLMMaskGenerator] %s success, response length=%d", client_type, len(text))
                     logger.debug("[LLM] Raw content from %s (len=%d): %r", client_type, len(text), text[:500])
                     return {
@@ -400,15 +456,15 @@ class LLMMaskGenerator:
         return None
 
     def _parse_mask_response(
-            self,
-            text: str,
-            standard: str,
-            item_type: str,
-            service: str = "",
-            model: str = "",
-            temperature: float = 0.0,
-            tokens_prompt: int = 0,
-            tokens_completion: int = 0,
+        self,
+        text: str,
+        standard: str,
+        item_type: str,
+        service: str = "",
+        model: str = "",
+        temperature: float = 0.0,
+        tokens_prompt: int = 0,
+        tokens_completion: int = 0,
     ) -> Optional[MaskGenerationResult]:
         """Парсинг JSON-ответа LLM.
 
@@ -600,3 +656,4 @@ class LLMMaskGenerator:
             logger.info("[LLMMaskGenerator] Fixed тип_изделия name")
         return pattern
 
+    
