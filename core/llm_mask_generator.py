@@ -145,11 +145,32 @@ class LLMMaskGenerator:
                     return str(val).strip()
         return None
 
-    def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
-        """Форматировать ENS-примеры для вставки в промпт."""
+    def _format_stats(self, examples: List[Dict]) -> str:
+        """Форматировать статистику параметров для вставки в промпт."""
         if not examples:
-            return ""
-        lines = ["=== ПРИМЕРЫ ИЗ ЕНС (только ВИДИМЫЕ параметры) ===", ""]
+            return "(нет данных)"
+        lines = []
+        param_counts = {}
+        for ex in examples:
+            for key in ["исполнение", "номинальный_диаметр_резьбы", "длина",
+                       "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
+                val = self._get_example_value(ex, key)
+                if val and val.strip():
+                    param_counts[key] = param_counts.get(key, 0) + 1
+        total = len(examples)
+        for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
+            lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
+        return "\n".join(lines) if lines else "(нет параметров)"
+
+    def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
+        """Форматировать ENS-примеры для вставки в промпт.
+
+        FIX 2026-05-25: Убраны заголовок и статистика — они есть в template.
+        Возвращаем только сами примеры.
+        """
+        if not examples:
+            return "(примеры отсутствуют)"
+        lines = []
         for i, ex in enumerate(examples[:10], 1):
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
@@ -180,18 +201,6 @@ class LLMMaskGenerator:
                 hid_str = ", ".join([f"{k}={v}" for k, v in hidden])
                 lines.append(f" Скрытые: {hid_str}")
             lines.append("")
-        lines.append("=== СТАТИСТИКА ПО ПАРАМЕТРАМ ===")
-        param_counts = {}
-        for ex in examples:
-            for key in ["исполнение", "номинальный_диаметр_резьбы", "длина",
-                       "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
-                val = self._get_example_value(ex, key)
-                if val and val.strip():
-                    param_counts[key] = param_counts.get(key, 0) + 1
-        total = len(examples)
-        for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
-            lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
-        lines.append("")
         return "\n".join(lines)
 
     def _get_prompt_template(self) -> str:
@@ -299,18 +308,21 @@ class LLMMaskGenerator:
                       name: str = "", standard_info: Any = None) -> str:
         """Собрать промпт с ENS-примерами.
 
-        FIX 2026-05-25: Убран дублирующий заголовок. Теперь весь промпт
-        формируется из template файла + placeholder замены.
+        FIX 2026-05-25:
+        1. Добавлен header с мета-информацией (provider, model, temperature, timestamp).
+        2. Убрано дублирование: examples_text содержит только примеры,
+           stats_text — только статистику (placeholder из template).
         """
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
+        stats_text = self._format_stats(examples)
 
         service, model, temperature = self._resolve_service()
 
         # --- Замена placeholder'ов в template ---
         replacements = {
-            "{examples_text}": examples_text or "(примеры отсутствуют)",
-            "{stats_text}": "",  # stats уже включены в examples_text
+            "{examples_text}": examples_text,
+            "{stats_text}": stats_text,
             "{item_type}": item_type,
             "{standard}": standard,
             "{provider}": service or "LLM",
@@ -360,7 +372,16 @@ class LLMMaskGenerator:
 
 Только JSON, без комментариев."""
 
-        prompt = template + task_section + format_section
+        # Header с мета-информацией (не для regex — для отладки)
+        header = f"""# Тип изделия: {item_type}
+# Стандарт: {standard}
+# Провайдер: {service or 'LLM'}
+# Модель: {model or 'unknown'}
+# Температура: {temperature}
+# Время: {datetime.now().isoformat()}
+# =================================================="""
+
+        prompt = header + "\n" + template + task_section + format_section
         return prompt
 
     def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
