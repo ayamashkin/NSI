@@ -537,7 +537,9 @@ class LLMMaskGenerator:
         Формат имени: {item_type}_{standard}_a{attempt}.txt
         Пример: Болт_ОСТ 1 31141-80_a1.txt
 
-        FIX 2026-05-25: Добавлен header с мета-информацией перед JSON-ответом.
+        FIX 2026-05-25:
+        1. Добавлен header с мета-информацией.
+        2. Извлекаем только 'raw' content из dict repr (не сохраняем весь dict).
         """
         base_dir = self._get_debug_dir()
         if not base_dir:
@@ -548,6 +550,24 @@ class LLMMaskGenerator:
             path = base_dir / fname
 
             svc, model, temp = self._resolve_service()
+
+            # Извлечь raw content из Python dict repr
+            raw_content = response
+            try:
+                import ast
+                parsed = ast.literal_eval(response)
+                if isinstance(parsed, dict) and "raw" in parsed:
+                    raw_content = parsed["raw"]
+                    # Убрать markdown обёртку ```json ... ```
+                    for prefix in ["```json", "```python", "```"]:
+                        if raw_content.startswith(prefix):
+                            raw_content = raw_content[len(prefix):].strip()
+                            break
+                    if raw_content.endswith("```"):
+                        raw_content = raw_content[:-3].strip()
+            except Exception:
+                pass  # не dict repr — сохраняем как есть
+
             lines = [
                 f"# Тип изделия: {item_type}",
                 f"# Стандарт: {standard}",
@@ -557,9 +577,9 @@ class LLMMaskGenerator:
                 f"# Время: {datetime.now().isoformat()}",
                 "# ==================================================",
                 "",
-                response,
+                raw_content,
             ]
-            path.write_text("\n".join(lines), encoding="utf-8")
+            path.write_text("\n".join(lines), encoding='utf-8')
             logger.debug("[LLMMaskGenerator] Response saved to %s", path)
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to save response: %s", e)
@@ -725,53 +745,70 @@ class LLMMaskGenerator:
         return None
 
     @staticmethod
+    @staticmethod
     def _extract_json_fields(text: str) -> Optional[Dict]:
-        """Извлечь pattern/params/required из JSON-like текста через regex.
+        """Извлечь pattern/params/required из JSON-like текста.
 
-        FIX 2026-05-25: Fallback когда json.loads/yaml не справляются с
-        невалидными JSON escapes (\\s, \\w, \\d от LLM).
+        FIX 2026-05-25: Простой парсинг без сложных regex.
+        Ищем поля по ключам, извлекаем значения между кавычками.
         """
         logger.debug("[LLM] _extract_json_fields called, text len=%d", len(text))
-        """Извлечь pattern/params/required из JSON-like текста через regex.
 
-        FIX 2026-05-25: Fallback когда json.loads/yaml не справляются с
-        невалидными JSON escapes (\\s, \\w, \\d от LLM).
-        """
-        # pattern: извлекаем строку между "pattern": "..."
-        # Используем (?:(?!"\s*[},]).)* для non-greedy до закрывающей кавычки
-        pat_match = re.search(
-            r'"pattern"\s*:\s*"((?:\.|[^"\])*)"',
-            text,
-            re.DOTALL
-        )
-        if not pat_match:
+        def _find_quoted_value(text: str, key: str) -> Optional[str]:
+            """Найти строковое значение между кавычками после key."""
+            pos = text.find(key)
+            if pos < 0:
+                return None
+            quote = text.find('"', pos + len(key))
+            if quote < 0:
+                return None
+            i = quote + 1
+            while i < len(text):
+                if text[i] == '\\' and i + 1 < len(text):
+                    i += 2
+                elif text[i] == '"':
+                    break
+                else:
+                    i += 1
+            if i >= len(text):
+                return None
+            return text[quote + 1:i]
+
+        def _find_array(text: str, key: str) -> List[str]:
+            """Найти массив строк [...] после key."""
+            pos = text.find(key)
+            if pos < 0:
+                return []
+            bracket = text.find('[', pos + len(key))
+            if bracket < 0:
+                return []
+            depth = 1
+            j = bracket + 1
+            while j < len(text) and depth > 0:
+                if text[j] == '[':
+                    depth += 1
+                elif text[j] == ']':
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                return []
+            try:
+                return json.loads(text[bracket:j])
+            except Exception:
+                return []
+
+        raw_pattern = _find_quoted_value(text, '"pattern"')
+        if not raw_pattern:
             return None
 
-        raw_pattern = pat_match.group(1)
-        # JSON → Python: \\ → \, \" → ", \n → newline и т.д.
-        # Но \s, \d, \w остаются как есть (один backslash + буква)
-        pattern = raw_pattern.replace(r"\\", "\\")  # \\ → \ (два → один)
-        pattern = pattern.replace(r'\"', '"')       # \" → "
-        pattern = pattern.replace(r"\n", "\n")       # \n → newline
-        pattern = pattern.replace(r"\t", "\t")       # \t → tab
+        # JSON → Python: \\ → \, \" → ", \n → newline
+        pattern = raw_pattern.replace('\\\\', '\\')
+        pattern = pattern.replace('\\"', '"')
+        pattern = pattern.replace('\\n', '\n')
+        pattern = pattern.replace('\\t', '	')
 
-        # params
-        params = []
-        p_match = re.search(r'"params"\s*:\s*(\[[^\]]*\])', text, re.DOTALL)
-        if p_match:
-            try:
-                params = json.loads(p_match.group(1))
-            except Exception:
-                pass
-
-        # required
-        required = []
-        r_match = re.search(r'"required"\s*:\s*(\[[^\]]*\])', text, re.DOTALL)
-        if r_match:
-            try:
-                required = json.loads(r_match.group(1))
-            except Exception:
-                pass
+        params = _find_array(text, '"params"')
+        required = _find_array(text, '"required"')
 
         return {"pattern": pattern, "params": params, "required": required}
 
@@ -945,11 +982,15 @@ class LLMMaskGenerator:
         # --- STRATEGY 6: Regex-based field extraction (ultimate fallback) ---
         if data is None:
             logger.debug("[LLM] Trying _extract_json_fields fallback...")
-            data = self._extract_json_fields(text)
-            if data:
-                logger.info("[LLM] Parsed via regex field extraction for %s/%s", standard, item_type)
-            else:
-                logger.debug("[LLM] _extract_json_fields returned None")
+            try:
+                data = self._extract_json_fields(text)
+                if data:
+                    logger.info("[LLM] Parsed via regex field extraction for %s/%s", standard, item_type)
+                else:
+                    logger.debug("[LLM] _extract_json_fields returned None")
+            except Exception as e:
+                logger.warning("[LLM] _extract_json_fields failed: %s", e)
+                data = None
 
         # --- Validate and build result ---
         if data is None or not isinstance(data, dict):
