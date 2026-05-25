@@ -117,6 +117,7 @@ class AutoValidator:
         temperature: float = 0.0,
         tokens_prompt: int = 0,
         tokens_completion: int = 0,
+        **kwargs,  # FIX 2026-05-25: совместимость с cli.py (ens_examples и др.)
     ) -> ValidationResult:
         """Валидировать маску на примерах ЕНС."""
         examples = self._get_ens_examples(standard, item_type)

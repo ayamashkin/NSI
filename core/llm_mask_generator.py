@@ -1124,7 +1124,7 @@ class LLMMaskGenerator:
         return pattern
 
     def _sanitize_mask_result(self, result: MaskGenerationResult) -> MaskGenerationResult:
-        """Универсальная очистка маски от типичных LLM-ошибок.
+        r"""Универсальная очистка маски от типичных LLM-ошибок.
 
         FIX 2026-05-25: Не хардкод под стандарт, а универсальные правила:
         1. Удалить наименование_типа, если есть тип_изделия.
