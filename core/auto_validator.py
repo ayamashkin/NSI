@@ -398,6 +398,8 @@ class AutoValidator:
         - comma→dot normalization (0,1 ↔ 0.1)
         - numeric float comparison
         - coating token-based fuzzy match (Хим.Фос.прм ⊆ Хим.Фос.хр.прм)
+        - coating prefix match (Ц9.хр ≈ Ц)
+        - numeric dot-optional (5.8 ≈ 58, точка как разделитель)
         """
         v1_raw = str(val1).strip()
         v2_raw = str(val2).strip()
@@ -416,6 +418,21 @@ class AutoValidator:
         except (ValueError, TypeError):
             pass
 
+        # Numeric: dot as optional separator (5.8 ↔ 58)
+        if '.' in v1 and v1.replace('.', '').isdigit():
+            if v1.replace('.', '') == v2:
+                return True
+        if '.' in v2 and v2.replace('.', '').isdigit():
+            if v2.replace('.', '') == v1:
+                return True
+        # 2-digit ↔ dotted (58 ↔ 5.8)
+        if len(v1) == 2 and v1.isdigit() and len(v2) >= 3 and v2[0].isdigit() and v2[1] == '.' and v2[2:].isdigit():
+            if v1 == v2.replace('.', ''):
+                return True
+        if len(v2) == 2 and v2.isdigit() and len(v1) >= 3 and v1[0].isdigit() and v1[1] == '.' and v1[2:].isdigit():
+            if v2 == v1.replace('.', ''):
+                return True
+
         # Coating / composite: token-based fuzzy match
         t1 = set(v1.split("."))
         t2 = set(v2.split("."))
@@ -431,50 +448,69 @@ class AutoValidator:
             if len(t2 - t1) <= 1 and len(intersection) >= len(t2) * 0.5:
                 return True
 
+        # Coating prefix match (Ц9.хр ≈ Ц, Кд6-9.хр ≈ Кд)
+        cp1 = re.match(r"^([a-zA-Zа-яА-Я]+)", v1)
+        cp2 = re.match(r"^([a-zA-Zа-яА-Я]+)", v2)
+        if cp1 and cp2:
+            if cp1.group(1) == cp2.group(1):
+                return True
+
         return False
 
     @staticmethod
-    def _is_value_in_name(val: str, name: str) -> bool:
+    def _is_value_in_name(val: str, name: str, param_key: str = "") -> bool:
         """Проверить, что значение параметра присутствует в строке номенклатуры.
 
-        FIX 2026-05-25: Support М-prefix (e.g. М22) and robust fuzzy matching.
+        FIX 2026-05-25 v2: синхронизировано с llm_mask_generator.py.
+        - Покрытия: token-based fuzzy (Ц9.хр → Ц)
+        - Числа с разделителем: 5,8/5.8 ↔ 58
+        - Марка материала: только exact match
         """
         if not val or not name:
             return False
-        val_str = str(val).strip().replace(",", ".")
+        val_raw = str(val).strip()
+        val_str = val_raw.lower().replace(",", ".")
         name_lower = name.lower().replace(",", ".")
 
-        # 1. Exact match
-        if val_str.lower() in name_lower:
+        # 1. Exact / substring match
+        if val_str in name_lower:
             return True
 
-        # 2. Float .0: 16.0 matches 16
+        # 2. Numeric with decimal separator ↔ without (5.8 ↔ 58)
+        if re.match(r"^\d+[.,]\d+$", val_raw):
+            no_sep = re.sub(r"[.,]", "", val_str)
+            if no_sep in name_lower:
+                return True
+
+        # 3. Coatings / composite: token-based fuzzy match
+        if param_key in ("покрытие", "coating", "покрытие_1") or \
+           re.search(r"[a-zA-Zа-яА-Я]", val_str):
+            tokens = re.split(r"[.\-]", val_str)
+            tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
+            for tok in tokens:
+                if tok in name_lower:
+                    return True
+            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+            if prefix and prefix.group(1) in name_lower:
+                return True
+
+        # 4. Material grade: strict exact match only
+        if param_key in ("марка_материала", "марка_материала_1", "материал"):
+            return val_str in name_lower
+
+        # 5. Float .0: 16.0 matches 16
         if '.' in val_str and val_str.endswith('.0'):
             int_part = val_str[:-2]
-            if int_part and int_part.lower() in name_lower:
+            if int_part and int_part in name_lower:
                 return True
 
-        # 3. Letter parts for coatings
-        letter_parts = re.findall(r"[a-zA-Zа-яА-Я]+", val_str)
-        for part in letter_parts:
-            if part.lower() in name_lower:
+        # 6. General: tolerance classes etc.
+        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
+            if val_str in name_lower:
                 return True
 
-        # 4. Prefix before first digit (Кд6-9 → Кд)
-        prefix_match = re.match(r"^([a-zA-Zа-яА-Я\.\-]+)", val_str)
-        if prefix_match:
-            prefix = prefix_match.group(1).rstrip('.-')
-            prefix_clean = re.sub(r"[0-9]", "", prefix).rstrip('.-')
-            if prefix_clean and prefix_clean.lower() in name_lower:
-                return True
-
-        # 5. Without digits (Кд3.фос → Кд.фос)
-        no_digits = re.sub(r"[0-9]", "", val_str).strip(".- ")
-        if no_digits and no_digits.lower() in name_lower:
-            return True
-
-        # 6. М-prefix: М22 → 22 (for diameters)
-        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_str, re.IGNORECASE)
+        # 7. М-prefix: М22 → 22
+        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
         if m_match:
             num = m_match.group(1)
             if num.lower() in name_lower:

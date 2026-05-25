@@ -195,6 +195,7 @@ class LLMMaskGenerator:
         - покрытия Кд6-9.хр → матчит Кд, Кд.фос, Кд.фос.окс
         - покрытия Ц9.хр → матчит Ц
         - покрытия Ан.Окс.хр → матчит Ан, Окс, Ан.Окс
+        - числа с точкой: 5.8 ↔ 58 (точка как опциональный разделитель)
         """
         if not val or not name:
             return False
@@ -211,14 +212,26 @@ class LLMMaskGenerator:
             if int_part and int_part.lower() in name_lower:
                 return True
 
-        # 3. Для покрытий и других составных значений:
+        # 3. Числа: точка как опциональный разделитель (5.8 ↔ 58)
+        if '.' in val_str and val_str.replace('.', '').isdigit():
+            no_dot = val_str.replace('.', '')
+            if no_dot.lower() in name_lower:
+                return True
+        if val_str.isdigit() and len(val_str) >= 2:
+            # 58 → 5.8 (вставляем точку после первой цифры)
+            dotted = val_str[0] + '.' + val_str[1:]
+            if dotted.lower() in name_lower:
+                return True
+            # 58 → 5.8.0 и т.д. — не применяем
+
+        # 4. Для покрытий и других составных значений:
         #    извлекаем все буквенные части и проверяем каждую
         letter_parts = re.findall(r"[a-zA-Zа-яА-Я]+", val_str)
         for part in letter_parts:
             if part.lower() in name_lower:
                 return True
 
-        # 4. Префикс до первой цифры (Кд6-9 → Кд)
+        # 5. Префикс до первой цифры (Кд6-9 → Кд, Ц9.хр → Ц)
         prefix_match = re.match(r"^([a-zA-Zа-яА-Я\.\-]+)", val_str)
         if prefix_match:
             prefix = prefix_match.group(1).rstrip('.-')
@@ -227,7 +240,14 @@ class LLMMaskGenerator:
             if prefix_clean and prefix_clean.lower() in name_lower:
                 return True
 
-        # 5. Проверка без цифр вообще (Кд3.фос → Кд.фос)
+        # 6. Покрытия: буквенный префикс (Ц9.хр → Ц)
+        coating_prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+        if coating_prefix:
+            cp = coating_prefix.group(1)
+            if cp.lower() in name_lower:
+                return True
+
+        # 7. Проверка без цифр вообще (Кд3.фос → Кд.фос)
         no_digits = re.sub(r"[0-9]", "", val_str).strip(".- ")
         if no_digits and no_digits.lower() in name_lower:
             return True
@@ -243,6 +263,10 @@ class LLMMaskGenerator:
         3. Добавлен fuzzy matching (_is_value_in_name) для float и покрытий.
         4. Расширен check_keys всеми возможными видимыми параметрами.
         5. Добавлена подсказка про структуру строки.
+        6. FIX: параметры сортируются по позиции в строке (а не фикс. порядком).
+        7. FIX: deduplicate скрытых параметров.
+        8. FIX: скрытые параметры НЕ выводятся в промпт (только видимые).
+           LLM должен генерировать regex ТОЛЬКО по видимым параметрам.
         """
         if not examples:
             return "(примеры отсутствуют)"
@@ -250,23 +274,26 @@ class LLMMaskGenerator:
         lines = []
         lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
         lines.append("")
+        lines.append("ПРАВИЛО: В regex включаются ТОЛЬКО параметры, видимые в наименовании.")
+        lines.append("Скрытые параметры (марка материала, прочность и т.д.) — НЕ включаются в pattern.")
+        lines.append("")
 
         for i, ex in enumerate(examples[:10], 1):
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
-            visible = []
-            hidden = []
+            visible = []   # list of (key, val_str, position)
 
-            # Полный набор параметров, которые могут быть видимыми в строке
+            # Полный набор параметров в логическом порядке (тип → исполнение → размеры → покрытие)
             check_keys = [
                 "тип_изделия", "исполнение",
-                "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
+                "толщина_проката_стенки_полки",
+                "номинальный_диаметр_резьбы", "шаг_резьбы",
+                "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+                "длина",
                 "покрытие", "толщина_покрытия",
                 "группа_класс_прочности", "класс_поле_допуска", "свойства",
                 "марка_материала", "марка_материала_1", "тип_резьбы",
-                "толщина_проката_стенки_полки",
-                "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
             ]
 
             for key in check_keys:
@@ -282,23 +309,30 @@ class LLMMaskGenerator:
                 # тип_изделия: проверяем по началу строки
                 if key == "тип_изделия":
                     if name.lower().startswith(val_str.lower()):
-                        visible.append((key, val_str))
-                    else:
-                        hidden.append((key, val_str))
+                        visible.append((key, val_str, 0))
                     continue
 
                 if self._is_value_in_name(val_str, name):
-                    visible.append((key, val_str))
-                else:
-                    hidden.append((key, val_str))
+                    # Найти позицию в строке для сортировки
+                    pos = name.lower().find(val_str.lower())
+                    if pos < 0:
+                        # fuzzy: ищем первую буквенную часть
+                        m = re.search(r"[a-zA-Zа-яА-Я]+", val_str)
+                        if m:
+                            pos = name.lower().find(m.group().lower())
+                        if pos < 0:
+                            pos = 999
+                    visible.append((key, val_str, pos))
+
+            # Сортировать видимые по позиции в строке
+            visible.sort(key=lambda x: x[2])
 
             lines.append(f'{i}. Исходное: "{name}"')
             if visible:
-                vis_str = " ".join([f"(?P<{k}>{v})" for k, v in visible])
+                vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible])
                 lines.append(f"   Видимые: {vis_str}")
-            if hidden:
-                hid_str = ", ".join([f"{k}={v}" for k, v in hidden])
-                lines.append(f"   Скрытые: {hid_str}")
+            else:
+                lines.append("   (нет видимых параметров)")
             lines.append("")
 
         return "\n".join(lines)
