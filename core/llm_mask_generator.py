@@ -1,26 +1,35 @@
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
-ы"""
+"""
+# =============================================================================
+# FIX 2026-05-25 13:35 UTC+3:
+# 1. REMOVED duplicate header from _build_prompt — LLM no longer sees
+#    "# Тип изделия: …" as data to match.
+# 2. ADDED debug prompt/response saving to debug/prompts/ and debug/responses/.
+# 3. FIXED _format_examples: added ENS field mapping (нтд_1->стандарт/нтд,
+#    тип_изделия->наименование_типа/тип) so examples actually appear.
+# 4. FIXED _extract_visible_params: same field mapping for нтд_1.
+# 5. ADDED placeholder replacement for {provider},{model},{temperature},{timestamp}.
+# =============================================================================
+# FIX 2026-05-22 19:11 UTC+3:
+# 1. ADDED yaml.safe_load fallback in _parse_mask_response for single-quoted
+#    JSON and unquoted keys.
+# 2. ADDED debug logging of raw LLM response for diagnostics.
 # =============================================================================
 # FIX 2026-05-22 14:04 UTC+3:
 # 1. RESTORED ENS examples injection into prompt.
 # 2. FIXED return signature: generate_mask() now returns
 #    (MaskGenerationResult, metadata_dict) instead of (result, int).
-#    metadata_dict contains provider, model, temperature, tokens.
-#    This matches cli.py expectations (meta.get("provider")).
 # =============================================================================
-# FIX 2026-05-22 19:11 UTC+3:
-# 3. ADDED yaml.safe_load fallback in _parse_mask_response for single-quoted
-#    JSON and unquoted keys (fixes "Expecting property name enclosed in double quotes").
-# 4. ADDED debug logging of raw LLM response for diagnostics.
-# =============================================================================
+
 
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -107,6 +116,31 @@ class LLMMaskGenerator:
             logger.warning("[LLMMaskGenerator] Failed to load examples: %s", e)
         return []
 
+    @staticmethod
+    def _get_example_value(ex: Dict, key: str) -> Optional[str]:
+        """Получить значение из примера ЕНС с учётом маппинга полей."""
+        # Прямой доступ
+        val = ex.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+        # Альтернативные имена полей
+        if key == "нтд_1":
+            for alt in ["стандарт", "нтд"]:
+                val = ex.get(alt)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+        if key == "тип_изделия":
+            for alt in ["наименование_типа", "тип"]:
+                val = ex.get(alt)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+        if key == "исполнение":
+            for alt in ["вариант_исполнения", "исполнение"]:
+                val = ex.get(alt)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+        return None
+
     def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
         """Форматировать ENS-примеры для вставки в промпт."""
         if not examples:
@@ -118,32 +152,37 @@ class LLMMaskGenerator:
                 continue
             visible = []
             hidden = []
-            for key in ["тип_изделия", "наименование_типа", "исполнение",
-                       "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
-                       "покрытие", "толщина_проката_стенки_полки",
-                       "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-                       "нтд_1", "нтд_2"]:
-                val = ex.get(key)
-                if val and str(val).strip():
-                    val_str = str(val).strip()
-                    if val_str in name or val_str.lower() in name.lower():
+            check_keys = ["тип_изделия", "наименование_типа", "исполнение",
+                         "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
+                         "покрытие", "толщина_проката_стенки_полки",
+                         "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+                         "нтд_1", "нтд_2"]
+            for key in check_keys:
+                val = self._get_example_value(ex, key)
+                if val:
+                    val_str = val.strip()
+                    # нтд_1 всегда считаем видимым, если есть в данных
+                    if key == "нтд_1" and val_str:
+                        visible.append((key, val_str))
+                    elif val_str in name or val_str.lower() in name.lower():
                         visible.append((key, val_str))
                     else:
                         hidden.append((key, val_str))
             lines.append(f'{i}. Исходное: "{name}"')
             if visible:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v in visible])
-                lines.append(f"   Видимые: {vis_str}")
+                lines.append(f" Видимые: {vis_str}")
             if hidden:
                 hid_str = ", ".join([f"{k}={v}" for k, v in hidden])
-                lines.append(f"   Скрытые: {hid_str}")
+                lines.append(f" Скрытые: {hid_str}")
             lines.append("")
         lines.append("=== СТАТИСТИКА ПО ПАРАМЕТРАМ ===")
         param_counts = {}
         for ex in examples:
             for key in ["исполнение", "номинальный_диаметр_резьбы", "длина",
                        "шаг_резьбы", "покрытие", "толщина_проката_стенки_полки"]:
-                if ex.get(key) and str(ex.get(key)).strip():
+                val = self._get_example_value(ex, key)
+                if val and val.strip():
                     param_counts[key] = param_counts.get(key, 0) + 1
         total = len(examples)
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
@@ -174,58 +213,98 @@ class LLMMaskGenerator:
 ### === ЖЁСТКИЕ ЗАПРЕТЫ (нарушение = брак) ===
 
 1. **ТОЛЬКО ВИДИМЫЕ ПАРАМЕТРЫ**. Named group создаётся ТОЛЬКО если значение реально присутствует в исходной строке номенклатуры.
-2. **ИМЯ ГРУППЫ ТИПА ИЗДЕЛИЯ — СТРОГО `тип_изделия`**.
-3. **НЕТ ГРУППЕ `исполнение`**, если в примерах нет вариантов с `(N)`.
-4. **НЕТ ГРУППЕ `технические_характеристики` как отдельной**.
-5. **НЕТ `standard` в `required`**.
+2. **ИМЯ ГРУППЫ ТИПА ИЗДЕЛИЯ — СТРОГО `тип_изделия`**. Не `наименование_типа`, не `тип`, не `вид`. Только `тип_изделия`.
+3. **НЕТ ГРУППЕ `исполнение`**, если в примерах нет вариантов с `(N)` или `N-` после типа изделия. Если исполнение есть — группа опциональная `(?:\(?(?P<исполнение>\d+)\)?)?`.
+4. **НЕТ ГРУППЕ `технические_характеристики` как отдельной**. Если в строке только покрытие (Бп, Кд, Хим.Пас) — используй только `покрытие`.
+5. **НЕТ `standard` в `required`**. `standard` — метаданные, не извлекается из строки.
 6. **НЕТ `толщина_покрытия` в regex**, если в строке нет явного числа толщины.
 
-7. Разделители: `[-\s]+`. Не используй `.` как разделитель.
-8. Десятичная точка: `(?:[.,]\d+)?` только внутри числовой группы.
-9. Шаг резьбы: `[xXхХ×]` (включая кириллические х/Х).
-10. Покрытие: `[\w.]+` матчит кириллицу (включая "ОСТ"!). Покрытие должно предшествовать `нтд_1`.
-11. Порядок: `тип_изделия` → `исполнение` (опц.) → числовые → `покрытие` → `нтд_1`.
+### === ПРАВИЛА РАЗДЕЛИТЕЛЕЙ ===
+7. Разделители между параметрами: `[-\s]+` (тире, пробел, таб). Не используй `.` как разделитель — это десятичная точка.
+8. Десятичная точка/запятая: `(?:[.,]\d+)?` только внутри числовой группы. Пример: `\d+(?:[.,]\d+)?` для 12.5.
+
+### === КИРИЛЛИЦА В REGEX ===
+9. **Шаг резьбы**: используй `[xXхХ×]` (включая кириллические х/Х и × U+00D7). Пример: `M12х1.5` должно матчиться.
+10. **Покрытие**: `[\w.]+` матчит кириллицу (включая "ОСТ"!). Поэтому покрытие должно строго предшествовать `нтд_1` в паттерне, или использовать негативный lookahead `(?!\w)`.
+
+### === СТРУКТУРА ПАТТЕРНА ===
+11. Порядок групп: `тип_изделия` → `исполнение` (опц.) → числовые параметры → `покрытие` → `нтд_1`.
 12. Полная строка: `^...$` обязательно.
-13. Имена групп ≤30 символов.
-14. Точка `.`: при сомнении разделяй `(?P<a>\d+)\.(?P<b>\d+)`.
-15. **Группа `нтд_1` ДОЛЖНА матчить ПОЛНОЕ название стандарта**.
-   - Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)`
-   - Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)`
-   - **ЗАПРЕЩЕНО** использовать `\d+` вместо `ОСТ`/`ГОСТ`.
-16. **Пример правильного pattern**:
+13. Имена групп ≤30 символов, только [a-zA-Zа-яА-Я0-9_].
+
+### === ПРАВИЛО ТОЧКИ ===
+14. Точка `.` в номенклатуре:
+   - ДЕСЯТИЧНАЯ: если дробная часть имеет смысл (12.5 мм).
+   - РАЗДЕЛИТЕЛЬ: если после точки ровно 2 цифры-кода (100.58 → длина=100, группа=58).
+   - **ПРАВИЛО**: при сомнении разделяй: `(?P<a>\d+)\.(?P<b>\d+)` вместо `(?P<x>\d+(?:[.,]\d+)?)`.
+
+### === КРИТИЧНО: ФОРМАТ НТД_1 ===
+15. **Группа `нтд_1` ДОЛЖНА матчить ПОЛНОЕ название стандарта** из заголовка этого промпта.
+   - Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `(?P<нтд_1>ОСТ\s*1\s*33049-80)`
+   - Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)` или `(?P<нтд_1>ГОСТ\s*7795-70)`
+   - **ЗАПРЕЩЕНО** использовать `\d+` вместо `ОСТ`/`ГОСТ` — это сломает парсинг.
+16. **Пример правильного pattern для ОСТ 1 33049-80 / Гайка**:
    ```
    ^(?P<тип_изделия>Гайка)\s*(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?\s*[-\s]+(?P<покрытие>[\w.]+)\s*[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
    ```
 
+### === ФОРМАТ ОТВЕТА ===
+
+```json
+{
+  "pattern": "^...$",
+  "params": ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1", "шаг_резьбы"],
+  "required": ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
+}
+```
+
+- `params`: ВСЕ named group имена (только видимые в строке).
+- `required`: обязательные параметры (все кроме опциональных: исполнение, шаг_резьбы).
+
 ### === ПРОВЕРКА ПЕРЕД ОТВЕТОМ ===
-- [ ] Все группы реально видны в примерах?
+
+Перед выводом JSON проверь:
+- [ ] Все группы из `params` реально видны в примерах?
 - [ ] `тип_изделия` — первый и обязательный?
-- [ ] `нтд_1` содержит полное название стандарта, а НЕ `\d+`?
-- [ ] `^` и `$` присутствуют?"""
+- [ ] `standard` НЕТ в `required`?
+- [ ] `исполнение` есть только если в примерах есть `(N)`?
+- [ ] Шаг резьбы использует `[xXхХ×]`?
+- [ ] Покрытие не перехватывает `ОСТ`?
+- [ ] `нтд_1` содержит полное название стандарта (`ОСТ 1 XXXXX-80` или `ГОСТ XXXX-XX`), а НЕ `\d+`?
+- [ ] `^` и `$` присутствуют?
+
+=== СТРОГОЕ СООТВЕТСТВИЕ ===
+
+Выведи ОДИН JSON-объект. Без комментариев, markdown, объяснений — только JSON."""
 
     def _build_prompt(self, standard: str, item_type: str, examples: List[Dict],
-                     name: str = "", standard_info: Any = None) -> str:
+                      name: str = "", standard_info: Any = None) -> str:
         """Собрать промпт с ENS-примерами.
 
-        FIX 2026-05-25: Заменяем placeholder'ы {examples_text}, {stats_text} и т.д.
-        в загруженном template. Раньше они оставались незамененными — примеры
-        не попадали в промпт.
+        FIX 2026-05-25: Убран дублирующий заголовок. Теперь весь промпт
+        формируется из template файла + placeholder замены.
         """
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
 
+        service, model, temperature = self._resolve_service()
+
         # --- Замена placeholder'ов в template ---
-        if "{examples_text}" in template:
-            template = template.replace("{examples_text}", examples_text or "(примеры отсутствуют)")
-        if "{stats_text}" in template:
-            # stats уже включены в examples_text через _format_examples
-            template = template.replace("{stats_text}", "")
-        if "{item_type}" in template:
-            template = template.replace("{item_type}", item_type)
-        if "{standard}" in template:
-            template = template.replace("{standard}", standard)
+        replacements = {
+            "{examples_text}": examples_text or "(примеры отсутствуют)",
+            "{stats_text}": "",  # stats уже включены в examples_text
+            "{item_type}": item_type,
+            "{standard}": standard,
+            "{provider}": service or "LLM",
+            "{model}": model or "unknown",
+            "{temperature}": str(temperature),
+            "{timestamp}": datetime.now().isoformat(),
+        }
+        for placeholder, value in replacements.items():
+            if placeholder in template:
+                template = template.replace(placeholder, value)
+
         if "{params_list}" in template:
-            # visible params inferred from examples
             visible = self._extract_visible_params(examples)
             template = template.replace("{params_list}", json.dumps(visible, ensure_ascii=False))
         if "{required_list}" in template:
@@ -263,15 +342,7 @@ class LLMMaskGenerator:
 
 Только JSON, без комментариев."""
 
-        prompt = f"""# Тип изделия: {item_type}
-# Стандарт: {standard}
-# Провайдер: {{provider}}
-# Модель: {{model}}
-# Температура: {{temperature}}
-# Время: {{timestamp}}
-# ==================================================
-{template}{task_section}{format_section}
-"""
+        prompt = template + task_section + format_section
         return prompt
 
     def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
@@ -285,17 +356,46 @@ class LLMMaskGenerator:
                 continue
             name_lower = name.lower()
             for key in ["тип_изделия", "исполнение", "номинальный_диаметр_резьбы",
-                        "длина", "шаг_резьбы", "покрытие", "нтд_1", "нтд_2"]:
-                val = ex.get(key)
-                if val and str(val).strip():
-                    val_str = str(val).strip().lower()
+                       "длина", "шаг_резьбы", "покрытие", "нтд_1", "нтд_2"]:
+                val = self._get_example_value(ex, key)
+                if val:
+                    val_str = val.strip().lower()
                     if val_str in name_lower:
                         visible.add(key)
-        # Обязательные поля всегда добавляем
-        visible.add("тип_изделия")
-        if any("нтд" in k for k in visible):
-            visible.add("нтд_1")
+            # Обязательные поля всегда добавляем
+            visible.add("тип_изделия")
+            if any("нтд" in k for k in visible):
+                visible.add("нтд_1")
         return list(visible)
+
+    def _save_debug_prompt(self, standard: str, item_type: str, prompt: str) -> None:
+        """Сохранить промпт в debug/prompts/."""
+        try:
+            debug_dir = Path("debug/prompts")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_std = re.sub(r'[^\w\d-]', '_', standard)
+            fname = f"{ts}_{safe_std}_{item_type}.txt"
+            path = debug_dir / fname
+            path.write_text(prompt, encoding='utf-8')
+            logger.debug("[LLMMaskGenerator] Prompt saved to %s", path)
+        except Exception as e:
+            logger.debug("[LLMMaskGenerator] Failed to save prompt: %s", e)
+
+    def _save_debug_response(self, standard: str, item_type: str, response: str,
+                             service: str, attempt: int) -> None:
+        """Сохранить ответ LLM в debug/responses/."""
+        try:
+            debug_dir = Path("debug/responses")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_std = re.sub(r'[^\w\d-]', '_', standard)
+            fname = f"{ts}_{safe_std}_{item_type}_{service}_a{attempt}.txt"
+            path = debug_dir / fname
+            path.write_text(response, encoding='utf-8')
+            logger.debug("[LLMMaskGenerator] Response saved to %s", path)
+        except Exception as e:
+            logger.debug("[LLMMaskGenerator] Failed to save response: %s", e)
 
     def generate_mask(
         self,
@@ -309,16 +409,20 @@ class LLMMaskGenerator:
         Генерация маски через LLM с ENS-примерами.
 
         RETURNS:
-            (MaskGenerationResult, metadata_dict) on success
-            (None, None) on failure
+        (MaskGenerationResult, metadata_dict) on success
+        (None, None) on failure
 
         metadata_dict contains: provider, model, temperature,
-                               tokens_prompt, tokens_completion
+        tokens_prompt, tokens_completion
         """
         canon_std = canonicalize_standard(standard)
         if examples is None:
             examples = self._get_ens_examples(canon_std, item_type)
         prompt = self._build_prompt(canon_std, item_type, examples, name, standard_info)
+
+        # DEBUG: save prompt before sending
+        self._save_debug_prompt(canon_std, item_type, prompt)
+
         service, model, temperature = self._resolve_service()
         logger.info("[LLMMaskGenerator] Generating mask for %s/%s via %s (examples=%d)",
                    canon_std, item_type, service, len(examples))
@@ -328,6 +432,10 @@ class LLMMaskGenerator:
                 try:
                     result = self._call_llm(client, prompt, model, temperature)
                     if result:
+                        # DEBUG: save raw response
+                        self._save_debug_response(canon_std, item_type, result["text"],
+                                                  svc_name, attempt)
+
                         mask = self._parse_mask_response(
                             result["text"], canon_std, item_type,
                             service=svc_name,
@@ -355,7 +463,7 @@ class LLMMaskGenerator:
                     logger.debug("[LLMMaskGenerator] %s attempt %d failed: %s",
                                svc_name, attempt, e)
         logger.error("[LLMMaskGenerator] Failed after %d attempts: %s",
-                     self.max_retries, last_error)
+                    self.max_retries, last_error)
         return None, None
 
     def _resolve_service(self) -> Tuple[str, str, float]:
@@ -374,8 +482,6 @@ class LLMMaskGenerator:
 
     def _call_llm(self, client: Any, prompt: str, model: str, temperature: float) -> Optional[Dict]:
         """Вызвать LLM клиент с fallback на разные интерфейсы."""
-
-        # DEBUG: log what we have
         client_type = type(client).__name__
         logger.debug("[LLMMaskGenerator] Calling %s with model=%s temp=%s", client_type, model, temperature)
 
@@ -385,7 +491,6 @@ class LLMMaskGenerator:
                 method = getattr(client, "chat", None) or getattr(client, "generate", None)
                 messages = [{"role": "user", "content": prompt}]
 
-                # Try with messages first
                 try:
                     response = method(
                         messages=messages,
@@ -393,7 +498,6 @@ class LLMMaskGenerator:
                         temperature=temperature,
                     )
                 except TypeError as te:
-                    # Fallback: try with prompt= instead of messages=
                     logger.debug("[LLMMaskGenerator] messages failed, trying prompt: %s", te)
                     response = method(
                         prompt=prompt,
@@ -401,12 +505,10 @@ class LLMMaskGenerator:
                         temperature=temperature,
                     )
 
-                # Extract text from response
                 text = None
                 if isinstance(response, str):
                     text = response
                 elif isinstance(response, dict):
-                    # OpenAI format: choices[0].message.content
                     choices = response.get("choices", [])
                     if choices and isinstance(choices, list):
                         choice = choices[0]
@@ -476,7 +578,7 @@ class LLMMaskGenerator:
             return None
 
         logger.debug("[LLM] Raw response for %s/%s (len=%d): %r",
-                     standard, item_type, len(text), text[:800])
+                    standard, item_type, len(text), text[:800])
 
         data = None
         candidate = None
@@ -486,7 +588,6 @@ class LLMMaskGenerator:
             import ast
             parsed = ast.literal_eval(text)
             if isinstance(parsed, dict):
-                # MTSAI returns {success, content, raw, error, model, tokens}
                 if "content" in parsed and isinstance(parsed["content"], dict):
                     data = parsed["content"]
                     logger.debug("[LLM] Parsed via ast.literal_eval -> content")
@@ -554,33 +655,33 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == "\\":
+                    if ch == '\\\\':
                         escape = True
                         continue
                     if ch == '"' and not escape:
                         in_string = not in_string
                         continue
                     if not in_string:
-                        if ch == "{":
+                        if ch == '{':
                             brace_count += 1
-                        elif ch == "}":
+                        elif ch == '}':
                             brace_count -= 1
-                        if brace_count == 0:
-                            candidate = text[pos:i + 1]
-                            try:
-                                data = json.loads(candidate)
-                                logger.debug("[LLM] Parsed balanced JSON")
-                            except json.JSONDecodeError:
+                            if brace_count == 0:
+                                candidate = text[pos:i + 1]
                                 try:
-                                    import yaml
-                                    data = yaml.safe_load(candidate)
-                                    if isinstance(data, dict):
-                                        logger.debug("[LLM] Parsed balanced JSON via yaml")
-                                    else:
-                                        data = None
-                                except Exception:
-                                    pass
-                            break
+                                    data = json.loads(candidate)
+                                    logger.debug("[LLM] Parsed balanced JSON")
+                                except json.JSONDecodeError:
+                                    try:
+                                        import yaml
+                                        data = yaml.safe_load(candidate)
+                                        if isinstance(data, dict):
+                                            logger.debug("[LLM] Parsed balanced JSON via yaml")
+                                        else:
+                                            data = None
+                                    except Exception:
+                                        pass
+                                break
                 if data is not None:
                     break
 
@@ -636,14 +737,14 @@ class LLMMaskGenerator:
         """Исправить типичные ошибки LLM в regex."""
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(
-                r"\(\?P<нтд_1>\\d\+[^\)]*\)",
+                r"\(\?P<нтд_1>\\d\+[^\\)]*\)",
                 f"(?P<нтд_1>{re.escape(standard)})",
                 pattern
             )
             logger.info("[LLMMaskGenerator] Fixed нтд_1 for ОСТ standard")
         if "ГОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(
-                r"\(\?P<нтд_1>\\d\+[^\)]*\)",
+                r"\(\?P<нтд_1>\\d\+[^\\)]*\)",
                 f"(?P<нтд_1>{re.escape(standard)})",
                 pattern
             )
@@ -655,5 +756,3 @@ class LLMMaskGenerator:
             pattern = pattern.replace("наименование_типа", "тип_изделия")
             logger.info("[LLMMaskGenerator] Fixed тип_изделия name")
         return pattern
-
-    
