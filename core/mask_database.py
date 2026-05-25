@@ -1,12 +1,7 @@
-# =============================================================================
-# FILE: core/mask_database.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 COMMITS (UTC+3):
-# 2026-05-21 08:23:07 51f335da 21.05.2026
-# 2026-05-21 08:05:56 ee843b22 21.05.2026
-# 2026-05-20 17:47:49 19e8ca02 20.05.2026
-# 2026-05-20 17:39:23 b00c4b25 20.05.2026
-# 2026-05-20 17:31:34 66c66c93 20.05.2026
+"""
+Mask Database Module
+SQLite-based storage for regex masks with auto-validation support.
+"""
 # =============================================================================
 # FIX 2026-05-22 11:09 UTC+3:
 # 1. _compute_pattern_hash now includes standard+item_type to avoid collisions.
@@ -15,14 +10,7 @@
 # 4. Added replace_existing_fallback: if exact (std+type) not found,
 #    delete any mask with conflicting pattern_hash before insert.
 # =============================================================================
-"""
-Mask Database Module
-SQLite-based storage for regex masks with auto-validation support.
 
-LAST_FIX: 2026-05-22 11:09 UTC+3 — pattern_hash now includes standard+item_type.
-  Previously pattern_hash = md5(pattern) only, causing UNIQUE conflicts
-  when two standards had similar patterns (e.g., generated masks).
-"""
 import sqlite3
 import hashlib
 import logging
