@@ -88,6 +88,27 @@ class AutoValidator:
             with open(self.ens_index_path, "rb") as f:
                 data = pickle.load(f)
 
+            # Format 0: Dict with 'items' key containing flat list
+            if isinstance(data, dict) and 'items' in data and isinstance(data['items'], list):
+                items = data['items']
+                # Build index from flat list: group by (standard, item_type)
+                index = {}
+                for item in items:
+                    std = item.get('стандарт', item.get('нтд_1', item.get('нтд', '')))
+                    itype = item.get('наименование_типа', item.get('тип_изделия', item.get('тип', '')))
+                    if not std or not itype:
+                        continue
+                    std = canonicalize_standard(str(std))
+                    itype = str(itype).strip().upper()
+                    key = (std, itype)
+                    if key not in index:
+                        index[key] = []
+                    index[key].append(item)
+                self._ens_index = index
+                count = sum(len(v) for v in index.values())
+                logger.info("[AutoValidator] Loaded %d ENS items into %d groups from 'items' key", count, len(index))
+                return self._ens_index
+
             # Format 1: Direct dict {(std, type): [items]} — filter only list values
             if isinstance(data, dict):
                 list_values = {k: v for k, v in data.items() if isinstance(v, list)}
@@ -141,18 +162,44 @@ class AutoValidator:
             return self._ens_index
 
     def _get_ens_examples(self, standard: str, item_type: str, limit: int = 10) -> List[Dict]:
-        """Получить примеры из ЕНС для стандарта и типа."""
+        """Получить примеры из ЕНС для стандарта и типа.
+
+        FIX 2026-05-25: добавлено fuzzy matching по стандарту (ОСТ1 → ОСТ 1).
+        """
         index = self._load_ens_index()
         canon_std = canonicalize_standard(standard)
-        key = (canon_std, item_type.upper())
-        if key not in index:
-            key = (canon_std, item_type)
-        if key not in index:
-            for k, items in index.items():
-                if k[0] == canon_std:
-                    return items[:limit]
-            return []
-        return index[key][:limit]
+        itype = item_type.strip().upper()
+
+        # Exact match
+        key = (canon_std, itype)
+        if key in index:
+            return index[key][:limit]
+
+        # Fuzzy: try without space in standard (ОСТ1 34507-80)
+        alt_std = canon_std.replace("ОСТ 1", "ОСТ1").replace("ГОСТ ", "ГОСТ")
+        key = (alt_std, itype)
+        if key in index:
+            return index[key][:limit]
+
+        # Fuzzy: try with space in standard (ОСТ1 → ОСТ 1)
+        alt_std2 = canon_std.replace("ОСТ1", "ОСТ 1").replace("ОСТ2", "ОСТ 2")
+        key = (alt_std2, itype)
+        if key in index:
+            return index[key][:limit]
+
+        # Partial match by standard only
+        for k, items in index.items():
+            if k[0] == canon_std or k[0] == alt_std or k[0] == alt_std2:
+                return items[:limit]
+
+        # Last resort: any key containing the standard
+        for k, items in index.items():
+            if canon_std in k[0] or alt_std in k[0]:
+                return items[:limit]
+
+        logger.warning("[AutoValidator] No ENS examples for %s/%s (canon=%s, keys=%d)",
+                       standard, item_type, canon_std, len(index))
+        return []
 
     def validate_mask(
         self,
@@ -230,7 +277,11 @@ class AutoValidator:
     ) -> Dict:
         """Проверить один пример ЕНС против regex.
 
-        FIX 2026-05-25: Added detailed DEBUG logging for match/no-match diagnosis.
+        FIX 2026-05-25:
+        1. Added detailed DEBUG logging for match/no-match diagnosis.
+        2. FIXED duplicate mismatches: each param checked exactly once.
+        3. FIXED _values_match: comma→dot normalization, numeric float compare,
+           coating token-based fuzzy match.
         """
         text = ex.get("полное_наименование", ex.get("наименование", ""))
         if not text:
@@ -259,11 +310,13 @@ class AutoValidator:
         }
 
         for param in required:
-            extracted_val = extracted.get(param)
-            expected_val = ex.get(param)
-
             if param in skip_params:
                 continue
+
+            extracted_val = extracted.get(param)
+            # Найти соответствие в example по имени параметра
+            best_exp_key, best_sim = self._find_expected_key(param, ex)
+            expected_val = ex.get(best_exp_key) if best_exp_key else None
 
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
@@ -271,42 +324,28 @@ class AutoValidator:
             if extracted_empty and expected_empty:
                 continue
             elif expected_empty and not extracted_empty:
-                continue
+                continue  # extra extracted is OK
             elif extracted_empty or extracted_val == "":
                 missing.append(param)
+                logger.debug("[AutoValidator] Missing param %s: expected=%r", param, expected_val)
                 continue
 
-            matched_map = {}
-            checked = set()
-            for ext_key, ext_val in extracted.items():
-                if ext_key in skip_params:
-                    continue
-                best_exp, best_sim = self._match_param_keys(ext_key, ex)
-                if best_exp and best_sim >= 0.5:
-                    matched_map[ext_key] = best_exp
-                    checked.add(best_exp)
-
-            for ext_key, exp_key in matched_map.items():
-                ext_val = extracted.get(ext_key)
-                exp_val = ex.get(exp_key)
-                if ext_val is None or exp_val is None:
-                    continue
-                if not self._values_match(str(ext_val), str(exp_val)):
-                    mismatches.append({
-                        "param": ext_key,
-                        "expected": exp_val,
-                        "extracted": ext_val,
-                    })
-                    logger.debug(
-                        "[AutoValidator] Mismatch %s: expected=%r extracted=%r",
-                        ext_key, exp_val, ext_val
-                    )
+            if not self._values_match(str(extracted_val), str(expected_val)):
+                mismatches.append({
+                    "param": param,
+                    "expected": expected_val,
+                    "extracted": extracted_val,
+                })
+                logger.debug(
+                    "[AutoValidator] Mismatch %s: expected=%r extracted=%r",
+                    param, expected_val, extracted_val
+                )
 
         success = len(missing) == 0 and len(mismatches) == 0
         if not success:
             logger.debug(
                 "[AutoValidator] Example failed: missing=%s mismatches=%s",
-                missing, mismatches
+                missing, [m["param"] for m in mismatches]
             )
         return {
             "success": success,
@@ -318,32 +357,81 @@ class AutoValidator:
 
     @staticmethod
     def _match_param_keys(ext_key: str, ex: Dict) -> Tuple[Optional[str], float]:
-        """Найти лучшее соответствие ключа extracted к ключам example."""
-        ext_lower = ext_key.lower().replace("_", "")
-        best_exp = None
+        """Найти лучшее соответствие ключа extracted к ключам example (legacy)."""
+        return AutoValidator._find_expected_key(ext_key, ex)
+
+    @staticmethod
+    def _find_expected_key(param: str, ex: Dict) -> Tuple[Optional[str], float]:
+        """Найти лучшее соответствие ключа param в ключах example.
+
+        FIX 2026-05-25: renamed from _match_param_keys, searches param→ex keys.
+        """
+        param_lower = param.lower().replace("_", "")
+        best_key = None
         best_sim = 0.0
         for exp_key in ex.keys():
             exp_lower = exp_key.lower().replace("_", "")
-            if ext_lower == exp_lower:
+            if param_lower == exp_lower:
                 return exp_key, 1.0
-            if ext_lower in exp_lower or exp_lower in ext_lower:
-                sim = max(len(ext_lower), len(exp_lower)) / max(len(ext_lower), len(exp_lower))
+            if param_lower in exp_lower or exp_lower in param_lower:
+                sim = min(len(param_lower), len(exp_lower)) / max(len(param_lower), len(exp_lower))
                 if sim > best_sim:
                     best_sim = sim
-                    best_exp = exp_key
+                    best_key = exp_key
         # Mapping для нтд_1
-        if ext_lower in ("нтд1", "нтд_1"):
-            for k in ["стандарт", "нтд", "standard"]:
+        if param_lower in ("нтд1", "нтд_1", "стандарт", "standard"):
+            for k in ["стандарт", "нтд", "нтд_1", "standard"]:
                 if k in ex:
                     return k, 1.0
-        return best_exp, best_sim
+        # Mapping для тип_изделия
+        if param_lower in ("типизделия", "тип_изделия", "наименование_типа"):
+            for k in ["наименование_типа", "тип_изделия", "тип"]:
+                if k in ex:
+                    return k, 1.0
+        return best_key, best_sim
 
     @staticmethod
     def _values_match(val1: str, val2: str) -> bool:
-        """Сравнить два значения с нормализацией."""
-        v1 = str(val1).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
-        v2 = str(val2).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
-        return v1 == v2 or v1 in v2 or v2 in v1
+        """Сравнить два значения с нормализацией.
+
+        FIX 2026-05-25:
+        - comma→dot normalization (0,1 ↔ 0.1)
+        - numeric float comparison
+        - coating token-based fuzzy match (Хим.Фос.прм ⊆ Хим.Фос.хр.прм)
+        """
+        v1_raw = str(val1).strip()
+        v2_raw = str(val2).strip()
+        v1 = v1_raw.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+        v2 = v2_raw.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+
+        # Exact / substring
+        if v1 == v2 or v1 in v2 or v2 in v1:
+            return True
+
+        # Numeric: try float comparison
+        try:
+            f1 = float(v1)
+            f2 = float(v2)
+            return abs(f1 - f2) < 0.001
+        except (ValueError, TypeError):
+            pass
+
+        # Coating / composite: token-based fuzzy match
+        t1 = set(v1.split("."))
+        t2 = set(v2.split("."))
+        if t1 and t2:
+            intersection = t1 & t2
+            # If most tokens match (allow 1-2 missing)
+            if len(intersection) >= max(1, len(t1 | t2) - 2):
+                return True
+            # If extracted is mostly contained in expected
+            if len(t1 - t2) <= 1 and len(intersection) >= len(t1) * 0.5:
+                return True
+            # If expected is mostly contained in extracted
+            if len(t2 - t1) <= 1 and len(intersection) >= len(t2) * 0.5:
+                return True
+
+        return False
 
     @staticmethod
     def _is_value_in_name(val: str, name: str) -> bool:
