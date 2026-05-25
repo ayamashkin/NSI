@@ -731,6 +731,12 @@ class LLMMaskGenerator:
         FIX 2026-05-25: Fallback когда json.loads/yaml не справляются с
         невалидными JSON escapes (\\s, \\w, \\d от LLM).
         """
+        logger.debug("[LLM] _extract_json_fields called, text len=%d", len(text))
+        """Извлечь pattern/params/required из JSON-like текста через regex.
+
+        FIX 2026-05-25: Fallback когда json.loads/yaml не справляются с
+        невалидными JSON escapes (\\s, \\w, \\d от LLM).
+        """
         # pattern: извлекаем строку между "pattern": "..."
         # Используем (?:(?!"\s*[},]).)* для non-greedy до закрывающей кавычки
         pat_match = re.search(
@@ -938,9 +944,12 @@ class LLMMaskGenerator:
 
         # --- STRATEGY 6: Regex-based field extraction (ultimate fallback) ---
         if data is None:
+            logger.debug("[LLM] Trying _extract_json_fields fallback...")
             data = self._extract_json_fields(text)
             if data:
-                logger.debug("[LLM] Parsed via regex field extraction")
+                logger.info("[LLM] Parsed via regex field extraction for %s/%s", standard, item_type)
+            else:
+                logger.debug("[LLM] _extract_json_fields returned None")
 
         # --- Validate and build result ---
         if data is None or not isinstance(data, dict):
@@ -1035,11 +1044,14 @@ class LLMMaskGenerator:
         required = [p for p in required if p in params]
 
         # 4. Удалить пустые опциональные группы (?P<name>)? из pattern
-        pattern = re.sub(r"\(\?P<[^>]+>\)\?", "", pattern)
+        try:
+            pattern = re.sub(r"\(\?P<[^>]+>\)\?", "", pattern)
+        except re.error:
+            pass  # ignore regex errors in cleanup
 
         # 5. Исправить двойные обратные слеши: \\d+ → \d+
-        pattern = pattern.replace("\\\\", "\\")
-        logger.debug("[LLMMaskGenerator] Sanitized: fixed double backslashes")
+        # NOTE: Не делаем replace("\\", "\") — это ломает \\s → s
+        # Двойные слеши уже обработаны в _extract_json_fields
 
         # 6. Исправить двоеточие в character class: [:-\s] → [-\s]
         pattern = re.sub(r"\[:", "[", pattern)
