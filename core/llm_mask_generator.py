@@ -23,6 +23,8 @@
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
+
+LAST_FIX: 2026-05-22 19:11 UTC+3 — yaml fallback + debug logging added.
 """
 
 import json
