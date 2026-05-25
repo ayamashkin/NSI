@@ -1,5 +1,7 @@
-# =============================================================================
-# FILE: core/llm_mask_generator.py
+"""
+LLM Mask Generator Module
+Generates regex masks using LLM with ENS examples context.
+"""
 # =============================================================================
 # FIX 2026-05-22 14:04 UTC+3:
 # 1. RESTORED ENS examples injection into prompt.
@@ -13,12 +15,6 @@
 #    JSON and unquoted keys (fixes "Expecting property name enclosed in double quotes").
 # 4. ADDED debug logging of raw LLM response for diagnostics.
 # =============================================================================
-"""
-LLM Mask Generator Module
-Generates regex masks using LLM with ENS examples context.
-
-LAST_FIX: 2026-05-22 19:11 UTC+3 — yaml fallback + debug logging added.
-"""
 
 import json
 import logging
@@ -35,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MaskGenerationResult:
-    """Результат генерации маски."""
+    """Результат генерации маски.
+
+    FIX 2026-05-25: Добавлен __getitem__ для совместимости с cli.py,
+    который обращается к mask['pattern'], mask['params'] и т.д.
+    """
     pattern: str = ""
     params: List[str] = field(default_factory=list)
     required: List[str] = field(default_factory=list)
@@ -47,6 +47,14 @@ class MaskGenerationResult:
     temperature: float = 0.0
     tokens_prompt: int = 0
     tokens_completion: int = 0
+
+    def __getitem__(self, key: str) -> Any:
+        """Dict-like access for cli.py compatibility: mask['pattern'] etc."""
+        return getattr(self, key)
+
+    def __contains__(self, key: str) -> bool:
+        """Support 'in' operator: 'pattern' in mask."""
+        return hasattr(self, key)
 
 
 class LLMMaskGenerator:
