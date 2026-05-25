@@ -162,37 +162,101 @@ class LLMMaskGenerator:
             lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
         return "\n".join(lines) if lines else "(нет параметров)"
 
+    @staticmethod
+    def _is_value_in_name(val: str, name: str) -> bool:
+        """Проверить, что значение параметра присутствует в строке номенклатуры.
+
+        FIX 2026-05-25: Fuzzy matching для float (16.0 → 16) и покрытий
+        (Кд3.фос.окс → Кд, Кд.фос).
+        """
+        if not val or not name:
+            return False
+        val_str = str(val).strip()
+        name_lower = name.lower()
+
+        # Точное совпадение (case-insensitive)
+        if val_str.lower() in name_lower:
+            return True
+
+        # Для float с .0: 16.0 матчит 16 в строке
+        if '.' in val_str and val_str.endswith('.0'):
+            int_part = val_str[:-2]
+            if int_part and int_part.lower() in name_lower:
+                return True
+
+        # Для покрытий с цифровым суффиксом: Кд3.фос.окс матчит Кд, Кд.фос, Кд.фос.окс
+        if '.' in val_str:
+            parts = val_str.split('.')
+            # Полный путь без последней цифровой части
+            if parts[-1].replace(',', '').isdigit() and len(parts) > 1:
+                without_last = '.'.join(parts[:-1])
+                if without_last.lower() in name_lower:
+                    return True
+            # Первая буквенная часть
+            if parts[0] and not parts[0].replace(',', '').replace('.', '').isdigit():
+                if parts[0].lower() in name_lower:
+                    return True
+
+        return False
+
     def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
         """Форматировать ENS-примеры для вставки в промпт.
 
-        FIX 2026-05-25: Убраны заголовок и статистика — они есть в template.
-        Возвращаем только сами примеры.
+        FIX 2026-05-25:
+        1. Убран наименование_типа из видимых (дублирует тип_изделия).
+        2. Убран нтд_1 из каждого примера (загромождает, стандарт и так известен).
+        3. Добавлен fuzzy matching (_is_value_in_name) для float и покрытий.
+        4. Расширен check_keys всеми возможными видимыми параметрами.
+        5. Добавлена подсказка про структуру строки.
         """
         if not examples:
             return "(примеры отсутствуют)"
+
         lines = []
+        lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
+        lines.append("")
+
         for i, ex in enumerate(examples[:10], 1):
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
             visible = []
             hidden = []
-            check_keys = ["тип_изделия", "наименование_типа", "исполнение",
-                         "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
-                         "покрытие", "толщина_проката_стенки_полки",
-                         "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-                         "нтд_1", "нтд_2"]
+
+            # Полный набор параметров, которые могут быть видимыми в строке
+            check_keys = [
+                "тип_изделия", "исполнение",
+                "номинальный_диаметр_резьбы", "длина", "шаг_резьбы",
+                "покрытие", "толщина_покрытия",
+                "группа_класс_прочности", "класс_поле_допуска", "свойства",
+                "марка_материала", "марка_материала_1", "тип_резьбы",
+                "толщина_проката_стенки_полки",
+                "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+            ]
+
             for key in check_keys:
                 val = self._get_example_value(ex, key)
-                if val:
-                    val_str = val.strip()
-                    # нтд_1 всегда считаем видимым, если есть в данных
-                    if key == "нтд_1" and val_str:
-                        visible.append((key, val_str))
-                    elif val_str in name or val_str.lower() in name.lower():
+                if not val:
+                    continue
+                val_str = val.strip()
+
+                # наименование_типа — метаданные, не показываем как видимый параметр
+                if key == "наименование_типа":
+                    continue
+
+                # тип_изделия: проверяем по началу строки
+                if key == "тип_изделия":
+                    if name.lower().startswith(val_str.lower()):
                         visible.append((key, val_str))
                     else:
                         hidden.append((key, val_str))
+                    continue
+
+                if self._is_value_in_name(val_str, name):
+                    visible.append((key, val_str))
+                else:
+                    hidden.append((key, val_str))
+
             lines.append(f'{i}. Исходное: "{name}"')
             if visible:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v in visible])
@@ -201,6 +265,7 @@ class LLMMaskGenerator:
                 hid_str = ", ".join([f"{k}={v}" for k, v in hidden])
                 lines.append(f" Скрытые: {hid_str}")
             lines.append("")
+
         return "\n".join(lines)
 
     def _get_prompt_template(self) -> str:
@@ -785,7 +850,7 @@ class LLMMaskGenerator:
             logger.warning("[LLMMaskGenerator] Invalid pattern: %s", pattern[:50])
             return None
         pattern = self._fix_pattern(pattern, standard, item_type)
-        return MaskGenerationResult(
+        result = MaskGenerationResult(
             pattern=pattern,
             params=params,
             required=required,
@@ -798,6 +863,7 @@ class LLMMaskGenerator:
             tokens_prompt=tokens_prompt,
             tokens_completion=tokens_completion,
         )
+        return self._sanitize_mask_result(result)
 
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
         """Исправить типичные ошибки LLM в regex."""
@@ -822,3 +888,49 @@ class LLMMaskGenerator:
             pattern = pattern.replace("наименование_типа", "тип_изделия")
             logger.info("[LLMMaskGenerator] Fixed тип_изделия name")
         return pattern
+
+    def _sanitize_mask_result(self, result: MaskGenerationResult) -> MaskGenerationResult:
+        """Универсальная очистка маски от типичных LLM-ошибок.
+
+        FIX 2026-05-25: Не хардкод под стандарт, а универсальные правила:
+        1. Удалить наименование_типа, если есть тип_изделия.
+        2. Исправить опечатки в именах групп (тип_2изделия → тип_изделия).
+        3. Убедиться, что required ⊆ params.
+        4. Удалить пустые опциональные группы из pattern.
+        """
+        pattern = result.pattern
+        params = list(result.params)
+        required = list(result.required)
+
+        # 1. Удалить дублирующий наименование_типа
+        if "тип_изделия" in params and "наименование_типа" in params:
+            params.remove("наименование_типа")
+            if "наименование_типа" in required:
+                required.remove("наименование_типа")
+            # Удалить группу наименование_типа из pattern (с разделителем)
+            pattern = re.sub(r"\(\?P<наименование_типа>[^)]+\)(?:\s*[-\s]*)?", "", pattern)
+            logger.info("[LLMMaskGenerator] Sanitized: removed duplicate наименование_типа")
+
+        # 2. Исправить типичные опечатки
+        typo_fixes = {
+            "тип_2изделия": "тип_изделия",
+            "тип_изделия2": "тип_изделия",
+            "тип_изделеия": "тип_изделия",
+        }
+        for bad, good in typo_fixes.items():
+            if bad in params:
+                params = [good if p == bad else p for p in params]
+                required = [good if p == bad else p for p in required]
+                pattern = pattern.replace(f"(?P<{bad}>", f"(?P<{good}>")
+                logger.info("[LLMMaskGenerator] Sanitized: fixed typo %s → %s", bad, good)
+
+        # 3. required должен быть подмножеством params
+        required = [p for p in required if p in params]
+
+        # 4. Удалить пустые опциональные группы (?P<name>)? из pattern
+        pattern = re.sub(r"\(\?P<[^>]+>\)\?", "", pattern)
+
+        result.pattern = pattern
+        result.params = params
+        result.required = required
+        return result
