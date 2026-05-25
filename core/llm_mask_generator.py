@@ -536,6 +536,8 @@ class LLMMaskGenerator:
 
         Формат имени: {item_type}_{standard}_a{attempt}.txt
         Пример: Болт_ОСТ 1 31141-80_a1.txt
+
+        FIX 2026-05-25: Добавлен header с мета-информацией перед JSON-ответом.
         """
         base_dir = self._get_debug_dir()
         if not base_dir:
@@ -544,7 +546,20 @@ class LLMMaskGenerator:
             base_dir.mkdir(parents=True, exist_ok=True)
             fname = f"{item_type}_{standard}_a{attempt}.txt"
             path = base_dir / fname
-            path.write_text(response, encoding='utf-8')
+
+            svc, model, temp = self._resolve_service()
+            lines = [
+                f"# Тип изделия: {item_type}",
+                f"# Стандарт: {standard}",
+                f"# Провайдер: {svc or 'LLM'}",
+                f"# Модель: {model or 'unknown'}",
+                f"# Температура: {temp}",
+                f"# Время: {datetime.now().isoformat()}",
+                "# ==================================================",
+                "",
+                response,
+            ]
+            path.write_text("\n".join(lines), encoding="utf-8")
             logger.debug("[LLMMaskGenerator] Response saved to %s", path)
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to save response: %s", e)
@@ -752,7 +767,7 @@ class LLMMaskGenerator:
         except (ValueError, SyntaxError, TypeError) as e:
             logger.debug("[LLM] ast.literal_eval failed: %s", e)
 
-        # --- STRATEGY 2: YAML fallback (single quotes, unquoted keys) ---
+        # --- STRATEGY 2: Extract from raw field with markdown ---
         if data is None:
             try:
                 import yaml
@@ -762,8 +777,28 @@ class LLMMaskGenerator:
                         data = data["content"]
                         logger.debug("[LLM] Parsed via yaml.safe_load -> content")
                     elif "raw" in data and isinstance(data["raw"], str):
-                        text = data["raw"]
-                        logger.debug("[LLM] Parsed via yaml.safe_load -> raw, re-parsing")
+                        # raw содержит markdown-обёртку ```json\n{...}\n```
+                        raw_text = data["raw"]
+                        # Убираем markdown обёртку
+                        for prefix in ["```json", "```python", "```"]:
+                            if raw_text.startswith(prefix):
+                                raw_text = raw_text[len(prefix):].strip()
+                                break
+                        if raw_text.endswith("```"):
+                            raw_text = raw_text[:-3].strip()
+                        # Пробуем распарсить очищенный JSON
+                        try:
+                            data = json.loads(raw_text)
+                            logger.debug("[LLM] Parsed raw markdown JSON via json.loads")
+                        except json.JSONDecodeError:
+                            try:
+                                data = yaml.safe_load(raw_text)
+                                if isinstance(data, dict):
+                                    logger.debug("[LLM] Parsed raw markdown JSON via yaml")
+                                else:
+                                    data = None
+                            except Exception:
+                                data = None
                     else:
                         logger.debug("[LLM] Parsed via yaml.safe_load -> direct dict")
                 else:
@@ -950,6 +985,15 @@ class LLMMaskGenerator:
 
         # 4. Удалить пустые опциональные группы (?P<name>)? из pattern
         pattern = re.sub(r"\(\?P<[^>]+>\)\?", "", pattern)
+
+        # 5. Исправить двойные обратные слеши: \\d+ → \d+
+        pattern = pattern.replace("\\\\", "\\")
+        logger.debug("[LLMMaskGenerator] Sanitized: fixed double backslashes")
+
+        # 6. Исправить двоеточие в character class: [:-\s] → [-\s]
+        pattern = re.sub(r"\[:", "[", pattern)
+        pattern = re.sub(r":-", "-", pattern)
+        logger.debug("[LLMMaskGenerator] Sanitized: fixed colon in char class")
 
         result.pattern = pattern
         result.params = params
