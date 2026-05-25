@@ -7,13 +7,16 @@ Auth: API_KEY в заголовке Authorization: Bearer {API_KEY}
 Docs: https://demo6-fundres.dev.mts.ai/
 
 LAST_FIXES:
-  2026-05-20 2026-05-20 12:47 UTC+3 UTC+3 — chat_completion: возвращает tokens_prompt/tokens_completion
-    из data["usage"] (prompt_tokens/completion_tokens) для совместимости с
-    LLMMaskGenerator._call_llm и Excel-статистики.
-  2026-05-18 11:16 UTC+3 — _extract_json_from_text: поддержка markdown ```python + balanced braces
-  2026-05-18 10:35 UTC+3 — complete()/chat_completion() возвращают Dict[str, Any]
-                           (success, content, raw, error, model) для совместимости с LLMMaskGenerator
-  2026-05-07 13:30 UTC+3 — создание клиента по аналогии с mws_gpt
+ 2026-05-25 18:40 UTC+3 — chat_completion: добавлено поле "text" в возвращаемый dict
+ для совместимости с LLMMaskGenerator._call_llm (ранее _call_llm брал str(response),
+ что давало Python repr вместо сырого markdown JSON).
+ 2026-05-20 12:47 UTC+3 — chat_completion: возвращает tokens_prompt/tokens_completion
+ из data["usage"] (prompt_tokens/completion_tokens) для совместимости с
+ LLMMaskGenerator._call_llm и Excel-статистики.
+ 2026-05-18 11:16 UTC+3 — _extract_json_from_text: поддержка markdown ```python + balanced braces
+ 2026-05-18 10:35 UTC+3 — complete()/chat_completion() возвращают Dict[str, Any]
+ (success, content, raw, error, model) для совместимости с LLMMaskGenerator
+ 2026-05-07 13:30 UTC+3 — создание клиента по аналогии с mws_gpt
 """
 import json
 import logging
@@ -66,13 +69,12 @@ def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
                     brace_count += 1
                 elif ch == '}':
                     brace_count -= 1
-                    if brace_count == 0:
-                        candidate = text[pos:i+1]
-                        try:
-                            return json.loads(candidate)
-                        except json.JSONDecodeError:
-                            break  # пробуем следующий match
-        # если brace_count не 0 — не валидный JSON, идём дальше
+                if brace_count == 0:
+                    candidate = text[pos:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
 
     # Стратегия 3: Простой fallback — первый {...}
     simple = re.search(r'\{.*?\}', text, re.DOTALL)
@@ -128,7 +130,7 @@ class MTSAIClient(BaseLLMClient):
     def complete(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """
         Реализация abstract method из BaseLLMClient.
-        Возвращает Dict с полями: success, content, raw, error, model, tokens_prompt, tokens_completion
+        Возвращает Dict с полями: success, content, raw, text, error, model, tokens_prompt, tokens_completion
         (совместимо с LLMMaskGenerator._call_llm).
         """
         messages = [{"role": "user", "content": prompt}]
@@ -148,8 +150,9 @@ class MTSAIClient(BaseLLMClient):
         Returns:
             Dict[str, Any]: {
                 "success": bool,
-                "content": Any | None,   # распарсенный JSON (если есть)
+                "content": Any | None,  # распарсенный JSON (если есть)
                 "raw": str | None,       # сырой текст ответа
+                "text": str | None,      # alias для raw (совместимость с _call_llm)
                 "error": str | None,
                 "model": str,
                 "tokens_prompt": int | None,
@@ -204,6 +207,7 @@ class MTSAIClient(BaseLLMClient):
                 "success": True,
                 "content": parsed,
                 "raw": content,
+                "text": content,  # <-- FIX 2026-05-25: alias для _call_llm
                 "error": None,
                 "model": model,
                 "tokens_prompt": tokens_prompt,
@@ -216,6 +220,7 @@ class MTSAIClient(BaseLLMClient):
                 "success": False,
                 "content": None,
                 "raw": None,
+                "text": None,
                 "error": f"Timeout after {self.timeout}s",
                 "model": model,
                 "tokens_prompt": None,
@@ -227,6 +232,7 @@ class MTSAIClient(BaseLLMClient):
                 "success": False,
                 "content": None,
                 "raw": None,
+                "text": None,
                 "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}",
                 "model": model,
                 "tokens_prompt": None,
@@ -238,6 +244,7 @@ class MTSAIClient(BaseLLMClient):
                 "success": False,
                 "content": None,
                 "raw": None,
+                "text": None,
                 "error": str(e),
                 "model": model,
                 "tokens_prompt": None,
@@ -249,6 +256,7 @@ class MTSAIClient(BaseLLMClient):
                 "success": False,
                 "content": None,
                 "raw": None,
+                "text": None,
                 "error": str(e),
                 "model": model,
                 "tokens_prompt": None,

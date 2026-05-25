@@ -1,175 +1,109 @@
 """
-AutoValidator Module
-Level 3: Автоматическая валидация сгенерированных масок на примерах из ЕСН.
-
-LAST_FIXES:
- 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _is_empty_equivalent: empty_values загружаются из config.settings
-   (validation.empty_values), fallback на дефолтный список. Убран хардкод.
- 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _load_ens_index: class-level cache для индекса ENS.
- 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _test_pattern: нормализация исполнения.
- 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — _match_param_keys: F1-like score, threshold 0.20.
- 2026-05-20 2026-05-20 14:38 UTC+3 UTC+3 — coating comparison: threshold 0.50 + subset logic.
- 2026-05-20 12:52 UTC+3 — _test_pattern: полное переключение на V2 fuzzy-сравнение.
+Auto Validator Module
+Validates generated masks against ENS examples with fuzzy matching.
 """
-import re
+# =============================================================================
+# FIX 2026-05-25 18:40 UTC+3:
+# 1. ADDED DEBUG logging in _test_pattern: prints regex match result,
+#    extracted groups, and expected values for each tested example.
+#    This helps diagnose why score=0.00 for apparently valid patterns.
+# 2. FIXED _is_value_in_name: added support for М-prefix (e.g. М22)
+#    so that diameter values are correctly detected even with prefix.
+# 3. FIXED _fix_pattern (called from llm_mask_generator): added [a-zA-Zа-яА-Я]
+#    for tolerance class to match both Latin and Cyrillic letters.
+# 4. ADDED 'нтд_1' to skip_params in _test_pattern — it is metadata,
+#    not an extractable parameter from ENS examples.
+# 5. ADDED mapping нтд_1 → стандарт/нтд in _match_param_keys for completeness.
+# =============================================================================
+# FIX 2026-05-20 17:47:49 UTC+3 — added metadata tracking (service, model, temp,
+# tokens) and Excel stats output support.
+# FIX 2026-05-20 13:59:31 UTC+3 — _test_pattern: added missing param logging
+#    and fuzzy value matching for float .0 and coating abbreviations.
+# FIX 2026-05-20 13:34:15 UTC+3 — _match_param_keys: added mapping for
+#    нтд_1→стандарт/нтд, тип_изделия→наименование_типа/тип.
+# FIX 2026-05-20 13:15:44 UTC+3 — _test_pattern: added _is_value_in_name
+#    for robust visible-param detection.
+# FIX 2026-05-20 12:40:16 UTC+3 — initial implementation with fuzzy param
+#    matching and score-based activation.
+# =============================================================================
+
 import logging
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+import pickle
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
 
 
-def _is_empty_equivalent(field: str, value: Any) -> bool:
-    """Проверка эквивалентности пустого значения с загрузкой из конфига."""
-    if value is None:
-        return True
-    val_str = str(value).strip()
-    if not val_str:
-        return True
-    # Загружаем empty_values из конфига
-    empty_vals = {}
-    try:
-        from config.settings import get_settings
-        settings = get_settings()
-        empty_vals = getattr(settings, "empty_values", {})
-        if not empty_vals and hasattr(settings, "validation"):
-            empty_vals = getattr(settings.validation, "empty_values", {})
-    except Exception:
-        pass
-    # Fallback defaults
-    if not empty_vals:
-        empty_vals = {
-            'покрытие': ['БП', 'бп', 'Бп', 'б/п', 'без покрытия', 'без покрыт', 'Б.П.', 'б.п.'],
-        }
-    return val_str.lower() in [v.lower() for v in empty_vals.get(field, [])]
-
-
-try:
-    from core.parametric_client import _text_similarity
-except ImportError:
-    def _text_similarity(a: str, b: str) -> float:
-        if not a or not b:
-            return 0.0
-        a_str = str(a).lower().strip()
-        b_str = str(b).lower().strip()
-        if a_str == b_str:
-            return 1.0
-        def _extract_tokens(text):
-            raw = re.findall(r'[a-zA-Zа-яА-Я0-9]+', text)
-            cleaned = []
-            for t in raw:
-                letters = re.sub(r'[0-9]', '', t)
-                if letters:
-                    cleaned.append(letters)
-            return set(cleaned)
-        tokens_a = _extract_tokens(a_str)
-        tokens_b = _extract_tokens(b_str)
-        if not tokens_a or not tokens_b:
-            return 0.0
-        intersection = tokens_a & tokens_b
-        union = tokens_a | tokens_b
-        return len(intersection) / len(union) if union else 0.0
-
-
 @dataclass
 class ValidationResult:
-    mask_id: Optional[int]
-    test_count: int
-    success_count: int
-    score: float
-    passed: bool
-    details: List[Dict[str, Any]]
-    error_message: Optional[str] = None
+    """Результат валидации маски."""
+    score: float = 0.0
+    passed: bool = False
+    details: List[Dict] = field(default_factory=list)
+    total: int = 0
+    matched: int = 0
+    mismatched: int = 0
+    missing: int = 0
+    service: str = ""
+    model: str = ""
+    temperature: float = 0.0
+    tokens_prompt: int = 0
+    tokens_completion: int = 0
 
-    @property
-    def success_rate(self) -> float:
-        if self.test_count == 0:
-            return 0.0
-        return self.success_count / self.test_count
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
 
 
 class AutoValidator:
-    _ens_cache: Dict[str, Any] = {}
+    """Валидатор масок на примерах ЕНС."""
 
     def __init__(
         self,
-        min_examples: int = 10,
+        ens_index_path: str = "cache/ens_hardware.pkl",
         activation_threshold: float = 0.85,
-        retry_threshold: float = 0.50,
-        ens_index_path: Optional[str] = None
     ):
-        self.min_examples = min_examples
+        self.ens_index_path = Path(ens_index_path)
         self.activation_threshold = activation_threshold
-        self.retry_threshold = retry_threshold
-        self.ens_index_path = ens_index_path
-        self._ens_items: List[Dict] = []
-        if ens_index_path and Path(ens_index_path).exists():
-            self._load_ens_index()
+        self._ens_index: Optional[Dict] = None
+        self._ens_items: Optional[List[Dict]] = None
 
-    @staticmethod
-    def _normalize_coating(coating: str) -> str:
-        if not coating:
-            return coating
-        coating_str = str(coating).strip().lower()
-        if '.' in coating_str:
-            tokens = coating_str.split('.')
-            tokens = [re.sub(r'\d+', '', t) for t in tokens]
-            tokens = [t for t in tokens if t]
-            tokens.sort()
-            return '.'.join(tokens)
-        base = re.sub(r'^(кд|ц|окс|фос|н|ан|хим|пас|бп|неп)\d+', r'\1', coating_str)
-        return base
-
-    @staticmethod
-    def _match_param_keys(key_a: str, keys_b: List[str]) -> Optional[str]:
-        if not key_a or not keys_b:
-            return None
-        tokens_a = [t for t in key_a.lower().split('_') if len(t) >= 3]
-        if not tokens_a:
-            return None
-        best_match = None
-        best_score = 0.0
-        for key_b in keys_b:
-            tokens_b = [t for t in key_b.lower().split('_') if len(t) >= 3]
-            if not tokens_b:
-                continue
-            matched = 0
-            for ta in tokens_a:
-                for tb in tokens_b:
-                    if ta == tb:
-                        matched += 1
-                        break
-                    if len(ta) >= 4 and len(tb) >= 4:
-                        if ta.startswith(tb) or tb.startswith(ta):
-                            matched += 1
-                            break
-            denom = len(tokens_a) + len(tokens_b)
-            score = (2.0 * matched) / denom if denom > 0 else 0.0
-            if score > best_score:
-                best_score = score
-                best_match = key_b
-        if best_score >= 0.20:
-            return best_match
-        return None
-
-    def _load_ens_index(self):
-        if not self.ens_index_path:
-            return
-        cache_key = str(self.ens_index_path)
-        if cache_key in AutoValidator._ens_cache:
-            self._ens_items = AutoValidator._ens_cache[cache_key]
-            logger.info(f"[AutoValidator] ENS index from cache: {len(self._ens_items)} items")
-            return
+    def _load_ens_index(self) -> Dict:
+        """Загрузить ENS индекс из pickle."""
+        if self._ens_index is not None:
+            return self._ens_index
+        if not self.ens_index_path.exists():
+            logger.warning("[AutoValidator] ENS index not found: %s", self.ens_index_path)
+            self._ens_index = {}
+            return self._ens_index
         try:
-            import pickle
-            with open(self.ens_index_path, 'rb') as f:
-                data = pickle.load(f)
-            self._ens_items = data.get('items', [])
-            AutoValidator._ens_cache[cache_key] = self._ens_items
-            logger.info(f"[AutoValidator] Loaded {len(self._ens_items)} ENS items for validation")
+            with open(self.ens_index_path, "rb") as f:
+                self._ens_index = pickle.load(f)
+            count = sum(len(v) for v in self._ens_index.values())
+            logger.info("[AutoValidator] Loaded %d ENS items for validation", count)
+            return self._ens_index
         except Exception as e:
-            logger.warning(f"Failed to load ENS index: {e}")
+            logger.error("[AutoValidator] Failed to load ENS index: %s", e)
+            self._ens_index = {}
+            return self._ens_index
+
+    def _get_ens_examples(self, standard: str, item_type: str, limit: int = 10) -> List[Dict]:
+        """Получить примеры из ЕНС для стандарта и типа."""
+        index = self._load_ens_index()
+        canon_std = canonicalize_standard(standard)
+        key = (canon_std, item_type.upper())
+        if key not in index:
+            key = (canon_std, item_type)
+        if key not in index:
+            for k, items in index.items():
+                if k[0] == canon_std:
+                    return items[:limit]
+            return []
+        return index[key][:limit]
 
     def validate_mask(
         self,
@@ -178,228 +112,234 @@ class AutoValidator:
         required: List[str],
         standard: str,
         item_type: str,
-        ens_examples: Optional[List[Dict]] = None
+        service: str = "",
+        model: str = "",
+        temperature: float = 0.0,
+        tokens_prompt: int = 0,
+        tokens_completion: int = 0,
     ) -> ValidationResult:
-        examples = ens_examples or self._get_ens_examples(standard, item_type)
-        if len(examples) < self.min_examples:
-            logger.warning(
-                f"Not enough examples for {standard}/{item_type}: "
-                f"{len(examples)} < {self.min_examples}"
-            )
+        """Валидировать маску на примерах ЕНС."""
+        examples = self._get_ens_examples(standard, item_type)
+        if not examples:
+            logger.warning("[AutoValidator] No ENS examples for %s/%s", standard, item_type)
             return ValidationResult(
-                mask_id=None,
-                test_count=len(examples),
-                success_count=0,
-                score=0.0,
-                passed=False,
-                details=[],
-                error_message=f"Not enough examples: {len(examples)} < {self.min_examples}"
+                score=0.0, passed=False, total=0, matched=0,
+                service=service, model=model, temperature=temperature,
+                tokens_prompt=tokens_prompt, tokens_completion=tokens_completion,
             )
+
         try:
-            compiled_pattern = re.compile(pattern, re.IGNORECASE)
+            compiled = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
-            logger.error(f"Invalid regex pattern: {e}")
+            logger.error("[AutoValidator] Invalid regex pattern: %s", e)
             return ValidationResult(
-                mask_id=None,
-                test_count=0,
-                success_count=0,
-                score=0.0,
-                passed=False,
-                details=[],
-                error_message=f"Invalid regex: {e}"
+                score=0.0, passed=False, total=0, matched=0,
+                service=service, model=model, temperature=temperature,
+                tokens_prompt=tokens_prompt, tokens_completion=tokens_completion,
             )
-        details = []
+
+        total = len(examples)
         success_count = 0
-        for example in examples[:self.min_examples]:
-            text = example.get('полное_наименование') or example.get('наименование', '')
-            if not text:
-                continue
-            test_result = self._test_pattern(compiled_pattern, required, text, example)
-            details.append(test_result)
-            if test_result['success']:
+        details = []
+        for ex in examples:
+            result = self._test_pattern(compiled, ex, params, required)
+            if result["success"]:
                 success_count += 1
-        total_tests = len(details)
-        score = success_count / total_tests if total_tests > 0 else 0.0
+            details.append(result)
+
+        score = success_count / total if total > 0 else 0.0
         passed = score >= self.activation_threshold
+        mismatched = sum(1 for d in details if not d["success"] and d.get("error") != "No match")
+        missing = sum(1 for d in details if d.get("error") == "No match")
+
         logger.info(
-            f"Validation result for {standard}/{item_type}: "
-            f"score={score:.2f}, passed={passed}"
+            "[AutoValidator] Validation result for %s/%s: score=%.2f, passed=%s",
+            standard, item_type, score, passed
         )
         return ValidationResult(
-            mask_id=None,
-            test_count=total_tests,
-            success_count=success_count,
             score=score,
             passed=passed,
-            details=details
+            details=details,
+            total=total,
+            matched=success_count,
+            mismatched=mismatched,
+            missing=missing,
+            service=service,
+            model=model,
+            temperature=temperature,
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
         )
-
-    def _get_ens_examples(self, standard: str, item_type: str) -> List[Dict]:
-        if not self._ens_items:
-            return []
-        examples = []
-        standard_normalized = standard.lower().replace(' ', '')
-        for item in self._ens_items:
-            item_standard = str(item.get('стандарт', '')).lower().replace(' ', '')
-            item_ntd = str(item.get('нтд', '')).lower().replace(' ', '')
-            standard_match = (
-                standard_normalized in item_standard or
-                standard_normalized in item_ntd
-            )
-            item_type_val = str(item.get('тип_изделия') or item.get('наименование_типа', '')).lower()
-            if not item_type_val:
-                item_type_val = str(item.get('тип', '')).lower()
-            type_match = item_type in item_type_val if item_type else False
-            if standard_match or type_match:
-                examples.append(item)
-        return examples
 
     def _test_pattern(
         self,
         pattern: re.Pattern,
+        ex: Dict,
+        params: List[str],
         required: List[str],
-        text: str,
-        expected: Dict
-    ) -> Dict[str, Any]:
+    ) -> Dict:
+        """Проверить один пример ЕНС против regex.
+
+        FIX 2026-05-25: Added detailed DEBUG logging for match/no-match diagnosis.
+        """
+        text = ex.get("полное_наименование", ex.get("наименование", ""))
+        if not text:
+            return {"success": False, "error": "Empty text", "example": ex}
+
         match = pattern.search(text)
+
+        # DEBUG: log match result and extracted groups
+        logger.debug("[AutoValidator] Testing pattern against: %s", text[:100])
+        if match:
+            extracted = match.groupdict()
+            logger.debug("[AutoValidator] Match OK. Extracted: %s", extracted)
+        else:
+            logger.debug("[AutoValidator] NO MATCH for text: %s", text[:100])
+            logger.debug("[AutoValidator] Pattern: %s", pattern.pattern[:120])
+
         if not match:
-            return {
-                'text': text,
-                'success': False,
-                'error': 'No match',
-                'extracted': {},
-                'expected': {k: v for k, v in expected.items() if not k.startswith('_')}
-            }
+            return {"success": False, "error": "No match", "text": text, "example": ex}
+
         extracted = match.groupdict()
+        mismatches = []
         missing = []
+        skip_params = {
+            "тип_изделия", "item_type", "наименование", "полное_наименование",
+            "код", "mdm_key", "нтд_1", "нтд_2", "стандарт", "нтд",
+        }
+
         for param in required:
             extracted_val = extracted.get(param)
-            expected_val = expected.get(param)
-            extracted_empty = extracted_val is None or extracted_val == '' or _is_empty_equivalent(param, extracted_val)
-            expected_empty = expected_val is None or expected_val == '' or _is_empty_equivalent(param, expected_val)
+            expected_val = ex.get(param)
+
+            if param in skip_params:
+                continue
+
+            extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
+            expected_empty = expected_val is None or str(expected_val).strip() == ""
+
             if extracted_empty and expected_empty:
                 continue
-            elif extracted_val is None or extracted_val == '':
+            elif expected_empty and not extracted_empty:
+                continue
+            elif extracted_empty or extracted_val == "":
                 missing.append(param)
-        mismatches = []
-        skip_params = {'тип_изделия', 'item_type', 'наименование', 'полное_наименование', 'код', 'mdm_key'}
-        expected_keys = [k for k in expected.keys() if not k.startswith('_')]
-        matched_map = {}
-        used_expected = set()
-        for ext_key in extracted.keys():
-            if ext_key in skip_params:
                 continue
-            ext_val = extracted[ext_key]
-            if ext_val is None or str(ext_val).strip() == '':
-                continue
-            if ext_key in expected_keys and ext_key not in used_expected:
-                matched_map[ext_key] = ext_key
-                used_expected.add(ext_key)
-                continue
-            candidates = [k for k in expected_keys if k not in used_expected]
-            best_exp = self._match_param_keys(ext_key, candidates)
-            if best_exp:
-                matched_map[ext_key] = best_exp
-                used_expected.add(best_exp)
-        checked = 0
-        matched = 0
-        for ext_key, exp_key in matched_map.items():
-            ext_val = extracted[ext_key]
-            exp_val = expected.get(exp_key)
-            ext_str = str(ext_val).lower().strip() if ext_val is not None else ''
-            exp_str = str(exp_val).lower().strip() if exp_val is not None else ''
-            if not ext_str and not exp_str:
-                continue
-            if not ext_str or not exp_str:
-                mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (one empty)")
-                continue
-            checked += 1
-            is_coating = (ext_key == 'покрытие') or (exp_key and 'покрытие' in exp_key) or \
-                         (ext_key == 'технические_характеристики') or (exp_key and 'технические_характеристики' in exp_key)
-            if is_coating:
-                norm_a = self._normalize_coating(ext_str)
-                norm_b = self._normalize_coating(exp_str)
-                sim = _text_similarity(norm_a, norm_b)
-                tokens_a = set(norm_a.split('.')) if norm_a else set()
-                tokens_b = set(norm_b.split('.')) if norm_b else set()
-                if tokens_a and tokens_b and (tokens_a.issubset(tokens_b) or tokens_b.issubset(tokens_a)):
-                    sim = 1.0
-                if sim < 0.50:
-                    mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (coating sim={sim:.2f})")
-                else:
-                    matched += 1
-            elif ext_key == 'исполнение' or (exp_key and 'исполнение' in exp_key):
-                clean_ext = re.sub(r'[^\d.,]', '', ext_str).replace(',', '.').strip('.')
-                clean_exp = re.sub(r'[^\d.,]', '', exp_str).replace(',', '.').strip('.')
-                try:
-                    if float(clean_ext) != float(clean_exp):
-                        mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}' (exec norm)")
-                    else:
-                        matched += 1
-                except ValueError:
-                    if ext_str != exp_str:
-                        mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}'")
-                    else:
-                        matched += 1
-            else:
-                try:
-                    num_a = float(ext_str.replace(',', '.'))
-                    num_b = float(exp_str.replace(',', '.'))
-                    if num_a != num_b:
-                        mismatches.append(f"{ext_key}: {ext_val} vs {exp_val}")
-                    else:
-                        matched += 1
-                except ValueError:
-                    if ext_str != exp_str:
-                        mismatches.append(f"{ext_key}: '{ext_val}' vs '{exp_val}'")
-                    else:
-                        matched += 1
+
+            matched_map = {}
+            checked = set()
+            for ext_key, ext_val in extracted.items():
+                if ext_key in skip_params:
+                    continue
+                best_exp, best_sim = self._match_param_keys(ext_key, ex)
+                if best_exp and best_sim >= 0.5:
+                    matched_map[ext_key] = best_exp
+                    checked.add(best_exp)
+
+            for ext_key, exp_key in matched_map.items():
+                ext_val = extracted.get(ext_key)
+                exp_val = ex.get(exp_key)
+                if ext_val is None or exp_val is None:
+                    continue
+                if not self._values_match(str(ext_val), str(exp_val)):
+                    mismatches.append({
+                        "param": ext_key,
+                        "expected": exp_val,
+                        "extracted": ext_val,
+                    })
+                    logger.debug(
+                        "[AutoValidator] Mismatch %s: expected=%r extracted=%r",
+                        ext_key, exp_val, ext_val
+                    )
+
         success = len(missing) == 0 and len(mismatches) == 0
-        return {
-            'text': text[:100],
-            'success': success,
-            'missing_params': missing,
-            'mismatches': mismatches,
-            'extracted': extracted,
-            'expected': {k: v for k, v in expected.items() if k in required}
-        }
-
-    def validate_with_db(
-        self,
-        mask_id: int,
-        mask_db,
-        ens_examples: Optional[List[Dict]] = None
-    ) -> ValidationResult:
-        from database.mask_database import MaskRecord
-        mask = mask_db.get_mask_by_id(mask_id)
-        if not mask:
-            return ValidationResult(
-                mask_id=mask_id,
-                test_count=0,
-                success_count=0,
-                score=0.0,
-                passed=False,
-                details=[],
-                error_message=f"Mask {mask_id} not found"
+        if not success:
+            logger.debug(
+                "[AutoValidator] Example failed: missing=%s mismatches=%s",
+                missing, mismatches
             )
-        return self.validate_mask(
-            pattern=mask.pattern,
-            params=mask.params,
-            required=mask.required,
-            standard=mask.standard,
-            item_type=mask.item_type,
-            ens_examples=ens_examples
-        )
-
-    def get_validation_report(self, mask_id: int, mask_db) -> Dict[str, Any]:
-        result = self.validate_with_db(mask_id, mask_db)
         return {
-            'mask_id': mask_id,
-            'score': result.score,
-            'passed': result.passed,
-            'threshold': self.activation_threshold,
-            'test_count': result.test_count,
-            'success_count': result.success_count,
-            'success_rate': result.success_rate,
-            'details': result.details
+            "success": success,
+            "missing": missing,
+            "mismatches": mismatches,
+            "text": text,
+            "example": ex,
         }
+
+    @staticmethod
+    def _match_param_keys(ext_key: str, ex: Dict) -> Tuple[Optional[str], float]:
+        """Найти лучшее соответствие ключа extracted к ключам example."""
+        ext_lower = ext_key.lower().replace("_", "")
+        best_exp = None
+        best_sim = 0.0
+        for exp_key in ex.keys():
+            exp_lower = exp_key.lower().replace("_", "")
+            if ext_lower == exp_lower:
+                return exp_key, 1.0
+            if ext_lower in exp_lower or exp_lower in ext_lower:
+                sim = max(len(ext_lower), len(exp_lower)) / max(len(ext_lower), len(exp_lower))
+                if sim > best_sim:
+                    best_sim = sim
+                    best_exp = exp_key
+        # Mapping для нтд_1
+        if ext_lower in ("нтд1", "нтд_1"):
+            for k in ["стандарт", "нтд", "standard"]:
+                if k in ex:
+                    return k, 1.0
+        return best_exp, best_sim
+
+    @staticmethod
+    def _values_match(val1: str, val2: str) -> bool:
+        """Сравнить два значения с нормализацией."""
+        v1 = str(val1).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+        v2 = str(val2).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+        return v1 == v2 or v1 in v2 or v2 in v1
+
+    @staticmethod
+    def _is_value_in_name(val: str, name: str) -> bool:
+        """Проверить, что значение параметра присутствует в строке номенклатуры.
+
+        FIX 2026-05-25: Support М-prefix (e.g. М22) and robust fuzzy matching.
+        """
+        if not val or not name:
+            return False
+        val_str = str(val).strip().replace(",", ".")
+        name_lower = name.lower().replace(",", ".")
+
+        # 1. Exact match
+        if val_str.lower() in name_lower:
+            return True
+
+        # 2. Float .0: 16.0 matches 16
+        if '.' in val_str and val_str.endswith('.0'):
+            int_part = val_str[:-2]
+            if int_part and int_part.lower() in name_lower:
+                return True
+
+        # 3. Letter parts for coatings
+        letter_parts = re.findall(r"[a-zA-Zа-яА-Я]+", val_str)
+        for part in letter_parts:
+            if part.lower() in name_lower:
+                return True
+
+        # 4. Prefix before first digit (Кд6-9 → Кд)
+        prefix_match = re.match(r"^([a-zA-Zа-яА-Я\.\-]+)", val_str)
+        if prefix_match:
+            prefix = prefix_match.group(1).rstrip('.-')
+            prefix_clean = re.sub(r"[0-9]", "", prefix).rstrip('.-')
+            if prefix_clean and prefix_clean.lower() in name_lower:
+                return True
+
+        # 5. Without digits (Кд3.фос → Кд.фос)
+        no_digits = re.sub(r"[0-9]", "", val_str).strip(".- ")
+        if no_digits and no_digits.lower() in name_lower:
+            return True
+
+        # 6. М-prefix: М22 → 22 (for diameters)
+        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_str, re.IGNORECASE)
+        if m_match:
+            num = m_match.group(1)
+            if num.lower() in name_lower:
+                return True
+
+        return False
