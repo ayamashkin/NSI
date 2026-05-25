@@ -3,6 +3,19 @@ LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
 """
 # =============================================================================
+# FIX 2026-05-25 21:56 UTC+3 v4:
+# 1. ADDED _find_value_positions: возвращает список (start, end) для каждого match.
+#    Нормализации: exact, comma→dot, coatings prefix, М-prefix.
+#    НЕ использует float .0 → int (слишком агрессивно).
+#    НЕ использует numeric no-separator (5.8 → 58 может матчить неверно).
+# 2. FIXED _format_examples: жадный positional matching с occupied tracking.
+#    Один фрагмент строки = один параметр. Порядок = приоритет.
+# 3. ADDED SKIP_PARAMS: параметры-метаданные (толщина_покрытия, марка_материала
+#    и др.) никогда не считаются видимыми.
+# 4. FIXED _is_value_in_name: удаляет стандарт из строки перед проверкой
+#    (предотвращает false positive на числах из номера стандарта).
+# 5. FIXED _format_stats: принимает standard, использует positional matching.
+# =============================================================================
 # FIX 2026-05-25 18:40 UTC+3:
 # 1. FIXED _call_llm: now correctly extracts "raw" or "text" from dict response
 #    (MTSAIClient returns dict with "raw"/"text"/"content"; previously str(response)
@@ -225,22 +238,113 @@ class LLMMaskGenerator:
         "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
     }
 
+
+    @staticmethod
+    def _find_value_positions(val: str, name: str, param_key: str = "") -> List[Tuple[int, int]]:
+        """Найти все позиции вхождения значения в строку номенклатуры.
+
+        FIX 2026-05-25 v4:
+        - Возвращает список (start, end) для каждого match.
+        - Нормализации: exact, comma→dot, coatings prefix, М-prefix.
+        - НЕ использует float .0 → int (слишком агрессивно, 3.0 матчит исполнение 3).
+        - НЕ использует numeric no-separator (5.8 → 58 может матчить неверно).
+        """
+        if not val or not name:
+            return []
+
+        val_raw = str(val).strip()
+        val_str = val_raw.lower()
+        name_lower = name.lower()
+        matches = []
+
+        def _add_match(start: int, end: int):
+            # Проверить, что match не пересекается с существующими
+            for s, e in matches:
+                if start < e and end > s:
+                    return
+            matches.append((start, end))
+
+        # 1. Exact match (case-insensitive)
+        start = 0
+        while True:
+            pos = name_lower.find(val_str, start)
+            if pos < 0:
+                break
+            _add_match(pos, pos + len(val_str))
+            start = pos + 1
+
+        # 2. Comma→dot normalization (2,5 → 2.5)
+        if ',' in val_raw:
+            norm = val_raw.lower().replace(',', '.')
+            start = 0
+            while True:
+                pos = name_lower.find(norm, start)
+                if pos < 0:
+                    break
+                _add_match(pos, pos + len(norm))
+                start = pos + 1
+
+        # 3. Coatings / composite: token-based fuzzy
+        if param_key in ("покрытие", "coating", "покрытие_1") or \
+           re.search(r"[a-zA-Zа-яА-Я]", val_str):
+            tokens = re.split(r"[.\-]", val_str)
+            tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
+            for tok in tokens:
+                tok_lower = tok.lower()
+                start = 0
+                while True:
+                    pos = name_lower.find(tok_lower, start)
+                    if pos < 0:
+                        break
+                    _add_match(pos, pos + len(tok_lower))
+                    start = pos + 1
+            # Prefix match
+            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+            if prefix:
+                pref_lower = prefix.group(1).lower()
+                start = 0
+                while True:
+                    pos = name_lower.find(pref_lower, start)
+                    if pos < 0:
+                        break
+                    _add_match(pos, pos + len(pref_lower))
+                    start = pos + 1
+
+        # 4. М-prefix: М22 → 22
+        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
+        if m_match:
+            num = m_match.group(1).lower()
+            start = 0
+            while True:
+                pos = name_lower.find(num, start)
+                if pos < 0:
+                    break
+                _add_match(pos, pos + len(num))
+                start = pos + 1
+
+        # 5. Tolerance classes: 6g, 5Н (exact)
+        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_raw):
+            start = 0
+            while True:
+                pos = name_lower.find(val_str, start)
+                if pos < 0:
+                    break
+                _add_match(pos, pos + len(val_str))
+                start = pos + 1
+
+        return sorted(matches, key=lambda x: x[0])
+
     @staticmethod
     def _is_value_in_name(val: str, name: str, param_key: str = "", standard: str = "") -> bool:
         """Проверить, что значение параметра присутствует в строке номенклатуры.
 
-        FIX 2026-05-25 v3:
-        - Удаляем стандарт из строки перед проверкой (предотвращает false positive
-          на числах из номера стандарта, например толщина=3.0 матчит 31104).
-        - Покрытия: token-based fuzzy (Ц9.хр → Ц).
-        - Числа с разделителем: 5,8/5.8 ↔ 58.
-        - SKIP_PARAMS: параметры-метаданные никогда не считаются видимыми.
-        - Марка материала: только exact match.
+        FIX 2026-05-25 v4: обёртка над _find_value_positions.
+        - Metadata params (SKIP_PARAMS) всегда False.
+        - Удаляем стандарт из строки перед проверкой.
         """
         if not val or not name:
             return False
 
-        # Metadata params are never visible in the name
         if param_key in LLMMaskGenerator.SKIP_PARAMS:
             return False
 
@@ -254,55 +358,8 @@ class LLMMaskGenerator:
                 flags=re.IGNORECASE
             )
 
-        val_raw = str(val).strip()
-        val_str = val_raw.lower().replace(",", ".")
-        name_lower = name_clean.lower().replace(",", ".")
-
-        # 1. Exact / substring match
-        if val_str in name_lower:
-            return True
-
-        # 2. Numeric with decimal separator ↔ without (5.8 ↔ 58)
-        if re.match(r"^\d+[.,]\d+$", val_raw):
-            no_sep = re.sub(r"[.,]", "", val_str)
-            if no_sep in name_lower:
-                return True
-
-        # 3. Coatings / composite: token-based fuzzy match
-        if param_key in ("покрытие", "coating", "покрытие_1") or \
-           re.search(r"[a-zA-Zа-яА-Я]", val_str):
-            tokens = re.split(r"[.\-]", val_str)
-            tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
-            for tok in tokens:
-                if tok in name_lower:
-                    return True
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix and prefix.group(1) in name_lower:
-                return True
-
-        # 4. Material grade: strict exact match only
-        if param_key in ("марка_материала", "марка_материала_1", "материал"):
-            return val_str in name_lower
-
-        # 5. Float .0: 16.0 matches 16
-        if '.' in val_str and val_str.endswith('.0'):
-            int_part = val_str[:-2]
-            if int_part and int_part in name_lower:
-                return True
-
-        # 6. General: tolerance classes etc.
-        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
-            if val_str in name_lower:
-                return True
-
-        # 7. М-prefix: М22 → 22
-        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
-        if m_match:
-            num = m_match.group(1)
-            if num.lower() in name_lower:
-                return True
-
-        return False
+        positions = LLMMaskGenerator._find_value_positions(val, name_clean, param_key)
+        return len(positions) > 0
     @staticmethod
     def _select_representative_examples(examples: List[Dict], max_count: int = 10) -> List[Dict]:
         """Выбрать representative примеры, покрывающие максимум комбинаций параметров.
@@ -326,6 +383,7 @@ class LLMMaskGenerator:
                 flags=re.IGNORECASE
             )
             visible = set()
+            occupied = set()
             for key in ["тип_изделия", "исполнение", "толщина_проката_стенки_полки",
                         "номинальный_диаметр_резьбы", "шаг_резьбы",
                         "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
@@ -335,13 +393,19 @@ class LLMMaskGenerator:
                 if key in LLMMaskGenerator.SKIP_PARAMS:
                     continue
                 val = ex.get(key)
-                if val and str(val).strip():
-                    val_str = str(val).strip().lower()
-                    if key == "тип_изделия":
-                        if name.lower().startswith(val_str):
-                            visible.add(key)
-                    elif val_str in name_clean.lower():
+                if not val:
+                    continue
+                val_str = str(val).strip()
+                if key == "тип_изделия":
+                    if name_clean.lower().startswith(val_str.lower()):
                         visible.add(key)
+                    continue
+                positions = LLMMaskGenerator._find_value_positions(val_str, name_clean, param_key=key)
+                for start, end in positions:
+                    if not any(p in range(start, end) for p in occupied):
+                        visible.add(key)
+                        occupied.update(range(start, end))
+                        break
             return visible
 
         scored = [(ex, _visible_params(ex)) for ex in examples]
@@ -599,7 +663,7 @@ class LLMMaskGenerator:
         """
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
-        stats_text = self._format_stats(examples)
+        stats_text = self._format_stats(examples, standard)
 
         service, model, temperature = self._resolve_service()
 
@@ -619,10 +683,10 @@ class LLMMaskGenerator:
                 template = template.replace(placeholder, value)
 
         if "{params_list}" in template:
-            visible = self._extract_visible_params(examples)
+            visible = self._extract_visible_params(examples, standard)
             template = template.replace("{params_list}", json.dumps(visible, ensure_ascii=False))
         if "{required_list}" in template:
-            visible = self._extract_visible_params(examples)
+            visible = self._extract_visible_params(examples, standard)
             optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
             required = [p for p in visible if p not in optional]
             template = template.replace("{required_list}", json.dumps(required, ensure_ascii=False))
@@ -668,11 +732,10 @@ class LLMMaskGenerator:
         prompt = header + "\n" + template + task_section + format_section
         return prompt
 
-    def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
+    def _extract_visible_params(self, examples: List[Dict], standard: str = "") -> List[str]:
         """Извлечь список глобально видимых параметров из ENS-примеров.
 
-        FIX 2026-05-25 v3: union across all examples — параметр видим,
-        если присутствует хотя бы в одном примере.
+        FIX 2026-05-25 v4: union across all examples с positional matching.
         """
         if not examples:
             return ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
@@ -693,6 +756,14 @@ class LLMMaskGenerator:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
+            # Clean name: remove standard
+            name_clean = re.sub(
+                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
+                '',
+                name,
+                flags=re.IGNORECASE
+            )
+            occupied = set()
             for key in check_keys:
                 if key == "наименование_типа":
                     continue
@@ -701,11 +772,15 @@ class LLMMaskGenerator:
                     continue
                 val_str = val.strip()
                 if key == "тип_изделия":
-                    if name.lower().startswith(val_str.lower()):
+                    if name_clean.lower().startswith(val_str.lower()):
                         global_visible.add(key)
                     continue
-                if self._is_value_in_name(val_str, name, param_key=key):
-                    global_visible.add(key)
+                positions = self._find_value_positions(val_str, name_clean, param_key=key)
+                for start, end in positions:
+                    if not any(p in range(start, end) for p in occupied):
+                        global_visible.add(key)
+                        occupied.update(range(start, end))
+                        break
 
         # Обязательные поля
         global_visible.add("тип_изделия")
