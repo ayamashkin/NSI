@@ -166,36 +166,47 @@ class LLMMaskGenerator:
     def _is_value_in_name(val: str, name: str) -> bool:
         """Проверить, что значение параметра присутствует в строке номенклатуры.
 
-        FIX 2026-05-25: Fuzzy matching для float (16.0 → 16) и покрытий
-        (Кд3.фос.окс → Кд, Кд.фос).
+        FIX 2026-05-25: Robust fuzzy matching:
+        - float 16.0 → матчит 16
+        - покрытия Кд6-9.хр → матчит Кд, Кд.фос, Кд.фос.окс
+        - покрытия Ц9.хр → матчит Ц
+        - покрытия Ан.Окс.хр → матчит Ан, Окс, Ан.Окс
         """
         if not val or not name:
             return False
-        val_str = str(val).strip()
-        name_lower = name.lower()
+        val_str = str(val).strip().replace(",", ".")
+        name_lower = name.lower().replace(",", ".")
 
-        # Точное совпадение (case-insensitive)
+        # 1. Точное совпадение
         if val_str.lower() in name_lower:
             return True
 
-        # Для float с .0: 16.0 матчит 16 в строке
+        # 2. Для float с .0: 16.0 матчит 16
         if '.' in val_str and val_str.endswith('.0'):
             int_part = val_str[:-2]
             if int_part and int_part.lower() in name_lower:
                 return True
 
-        # Для покрытий с цифровым суффиксом: Кд3.фос.окс матчит Кд, Кд.фос, Кд.фос.окс
-        if '.' in val_str:
-            parts = val_str.split('.')
-            # Полный путь без последней цифровой части
-            if parts[-1].replace(',', '').isdigit() and len(parts) > 1:
-                without_last = '.'.join(parts[:-1])
-                if without_last.lower() in name_lower:
-                    return True
-            # Первая буквенная часть
-            if parts[0] and not parts[0].replace(',', '').replace('.', '').isdigit():
-                if parts[0].lower() in name_lower:
-                    return True
+        # 3. Для покрытий и других составных значений:
+        #    извлекаем все буквенные части и проверяем каждую
+        letter_parts = re.findall(r"[a-zA-Zа-яА-Я]+", val_str)
+        for part in letter_parts:
+            if part.lower() in name_lower:
+                return True
+
+        # 4. Префикс до первой цифры (Кд6-9 → Кд)
+        prefix_match = re.match(r"^([a-zA-Zа-яА-Я\.\-]+)", val_str)
+        if prefix_match:
+            prefix = prefix_match.group(1).rstrip('.-')
+            # Убираем цифры из префикса
+            prefix_clean = re.sub(r"[0-9]", "", prefix).rstrip('.-')
+            if prefix_clean and prefix_clean.lower() in name_lower:
+                return True
+
+        # 5. Проверка без цифр вообще (Кд3.фос → Кд.фос)
+        no_digits = re.sub(r"[0-9]", "", val_str).strip(".- ")
+        if no_digits and no_digits.lower() in name_lower:
+            return True
 
         return False
 
