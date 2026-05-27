@@ -2,7 +2,7 @@
 # Nomenclature Processor CLI
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
-# 2026-05-27 14:25:00 — Добавлена команда build-index с доменной архитектурой
+# 2026-05-27 17:00:00 — Добавлена команда build-index с доменной архитектурой
 # 2026-05-27 14:25:00 — generate-masks, batch, diagnose обновлены с --domain
 # 2026-05-27 14:25:00 — Добавлен --auto-domain для multi-domain сопоставления
 # 2026-05-27 14:25:00 — ens build-index теперь использует ENSIndexBuilder
