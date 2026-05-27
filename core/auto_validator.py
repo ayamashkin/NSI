@@ -270,7 +270,6 @@ class AutoValidator:
         required: List[str],
     ) -> Dict:
         """Check one ENS example against regex."""
-        # Support structured index: name in _meta
         meta = ex.get("_meta", {})
         text = meta.get("full_name", meta.get("name", ""))
         if not text:
@@ -285,12 +284,22 @@ class AutoValidator:
             logger.debug("[AutoValidator] Match OK. Extracted: %s", extracted)
         else:
             logger.debug("[AutoValidator] NO MATCH for text: %s", text[:100])
+            logger.debug("[AutoValidator] Pattern used: %s", pattern.pattern)
+            try:
+                partial = pattern.match(text)
+                if partial:
+                    logger.debug("[AutoValidator] Partial match up to: %s", partial.group())
+                else:
+                    logger.debug("[AutoValidator] No partial match — pattern fails at start")
+            except Exception:
+                pass
             return {"success": False, "error": "No match", "text": text, "example": ex}
 
         extracted = match.groupdict()
         mismatches = []
         missing = []
         skip_params = self._skip_params
+        debug_lines = []
 
         for param in required:
             if param in skip_params:
@@ -301,14 +310,20 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if extracted_empty and expected_empty:
+                debug_lines.append(f"  {param}: OK (both empty)")
                 continue
             elif expected_empty and not extracted_empty:
+                debug_lines.append(f"  {param}: OK (expected empty, extracted={extracted_val})")
                 continue
             elif extracted_empty or extracted_val == "":
                 missing.append(param)
+                debug_lines.append(f"  {param}: MISSING (expected={expected_val})")
                 continue
             if not self._values_match(str(extracted_val), str(expected_val)):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
+                debug_lines.append(f"  {param}: MISMATCH expected={expected_val} extracted={extracted_val}")
+            else:
+                debug_lines.append(f"  {param}: OK expected={expected_val} extracted={extracted_val}")
 
         optional_params = set(params) - set(required) - skip_params
         for param in optional_params:
@@ -318,15 +333,23 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if expected_empty:
+                debug_lines.append(f"  {param}: OK (expected empty, optional)")
                 continue
             if extracted_empty:
                 mismatches.append({"param": param, "expected": expected_val, "extracted": None})
+                debug_lines.append(f"  {param}: MISMATCH expected={expected_val} extracted=None (optional)")
                 continue
             if not self._values_match(str(extracted_val), str(expected_val)):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
+                debug_lines.append(f"  {param}: MISMATCH expected={expected_val} extracted={extracted_val} (optional)")
+            else:
+                debug_lines.append(f"  {param}: OK expected={expected_val} extracted={extracted_val} (optional)")
 
         success = len(missing) == 0 and len(mismatches) == 0
         if not success and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[AutoValidator] Validation details for: %s", text[:80])
+            for line in debug_lines:
+                logger.debug("[AutoValidator]%s", line)
             if missing:
                 logger.debug("[AutoValidator] Missing required params: %s", missing)
             if mismatches:
