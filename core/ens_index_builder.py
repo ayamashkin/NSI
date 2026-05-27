@@ -2,11 +2,11 @@
 # FILE: core/ens_index_builder.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-27 17:46:00 — Исправлено: поля наименование/код/тип/НТД исключены из visible_fields stats
+# 2026-05-27 17:46:00 — _meta-поля удаляются из field_meta ДО формирования stats (не попадают в regex)
+# 2026-05-27 17:46:00 — Добавлен _meta_field_names для определения полей, уходящих в _meta
 # 2026-05-27 14:10:00 — Создан построитель доменного индекса ENS
 # 2026-05-27 14:10:00 — Реализована нормализация заголовков и удаление skip_fields
-# 2026-05-27 14:10:00 — Добавлено автоопределение visible_count и twin_groups
-# 2026-05-27 14:10:00 — Реализовано удаление пустых/константных колонок
-# 2026-05-27 14:10:00 — Добавлена структура _meta + field_meta в индекс
 # =============================================================================
 """
 ENS Index Builder Module
@@ -173,32 +173,32 @@ class ENSIndexBuilder:
         click.echo(f"📊 {standard} / {item_type} — {total} примеров")
         click.echo(f"{'=' * 60}")
         click.echo(
-            f"  Полей в индексе: {len(field_meta)} (visible: {len(visible_fields)}, metadata: {len(metadata_fields)})")
+            f" Полей в индексе: {len(field_meta)} (visible: {len(visible_fields)}, metadata: {len(metadata_fields)})")
 
         if visible_fields:
-            click.echo(f"\n  📋 Видимые параметры (участвуют в regex):")
+            click.echo(f"\n 📋 Видимые параметры (участвуют в regex):")
             for f in visible_fields:
                 meta = field_meta.get(f, {})
                 vc = meta.get("visible_count", 0)
                 ratio = vc / total * 100 if total > 0 else 0
                 bar_len = int(ratio / 5)
                 bar = "█" * bar_len + "░" * (20 - bar_len)
-                click.echo(f"    {f:30s} {bar} {vc:3d}/{total} ({ratio:5.1f}%)  [{meta.get('original_name', f)[:40]}]")
+                click.echo(f" {f:30s} {bar} {vc:3d}/{total} ({ratio:5.1f}%) [{meta.get('original_name', f)[:40]}]")
 
         if metadata_fields:
-            click.echo(f"\n  🔒 Метаданные (retain + meta_fields):")
+            click.echo(f"\n 🔒 Метаданные (retain + meta_fields):")
             for f in metadata_fields:
                 meta = field_meta.get(f, {})
                 vc = meta.get("visible_count", 0)
-                click.echo(f"    {f:30s} visible={vc}/{total}  [{meta.get('original_name', f)[:40]}]")
+                click.echo(f" {f:30s} visible={vc}/{total} [{meta.get('original_name', f)[:40]}]")
 
         if meaningful_twins:
-            click.echo(f"\n  👯 Близнецы (twin_groups):")
+            click.echo(f"\n 👯 Близнецы (twin_groups):")
             for group in meaningful_twins:
-                click.echo(f"    {' = '.join(group)}  → canonical: {group[0]}")
+                click.echo(f" {' = '.join(group)} → canonical: {group[0]}")
         elif twin_groups:
             giant = [g for g in twin_groups if len(g) > 5]
-            click.echo(f"\n  ⚠️  Обнаружены giant twin_clusters: {len(giant)} (полей > 5, скорее всего пустые поля)")
+            click.echo(f"\n ⚠️ Обнаружены giant twin_clusters: {len(giant)} (полей > 5, скорее всего пустые поля)")
 
         click.echo(f"{'=' * 60}")
 
@@ -217,14 +217,14 @@ class ENSIndexBuilder:
         return None
 
     def _build_standard_type(
-            self,
-            standard: str,
-            item_type: str,
-            examples: List[Dict],
-            name_col: str,
-            code_col: Optional[str],
-            full_name_col: Optional[str],
-            type_col: str,
+        self,
+        standard: str,
+        item_type: str,
+        examples: List[Dict],
+        name_col: str,
+        code_col: Optional[str],
+        full_name_col: Optional[str],
+        type_col: str,
     ) -> Optional[Dict]:
         """Построить запись индекса для пары (стандарт, тип)."""
         if not examples:
@@ -331,8 +331,8 @@ class ENSIndexBuilder:
                     if "наименование" in k.lower() and "полное" not in k.lower():
                         name = str(ex.get(k, ""))
                         break
-                if not name and full_name_col:
-                    name = str(ex.get(self.domain.canonicalize_field_name(full_name_col), ""))
+            if not name and full_name_col:
+                name = str(ex.get(self.domain.canonicalize_field_name(full_name_col), ""))
             if not name:
                 continue
             for k, v in ex.items():
@@ -378,19 +378,40 @@ class ENSIndexBuilder:
                     resolved[k] = v
             resolved_examples.append(resolved)
 
+        # === ИСПРАВЛЕНИЕ: определяем поля, которые уйдут в _meta ===
+        # Эти поля не должны участвовать в visible_fields / field_meta для regex
+        meta_field_names: Set[str] = set()
+        # meta_fields из домена
+        for mf in self.domain.meta_fields:
+            meta_field_names.add(self.domain.canonicalize_field_name(mf))
+        # Ключевые служебные колонки
+        meta_field_names.add(self.domain.canonicalize_field_name(name_col))
+        if code_col:
+            meta_field_names.add(self.domain.canonicalize_field_name(code_col))
+        if full_name_col:
+            meta_field_names.add(self.domain.canonicalize_field_name(full_name_col))
+        meta_field_names.add(self.domain.canonicalize_field_name(type_col))
+        # Также любые canonical имена, содержащие "наименование" (кроме тех что уже учтены)
+        for can in list(canonical_map.values()):
+            if "наименование" in can.lower() or can.lower() in ("стандарт", "нтд", "нтд_1", "standard"):
+                meta_field_names.add(can)
+
         # 8. Сформировать _meta + field_meta (только для значимых полей)
         # Собираем множество canonical имён ВСЕХ удалённых полей
         dropped_canonical: Set[str] = set()
         for orig in all_fields:
             can = canonical_map.get(orig, orig)
             if (orig in fields_to_drop or
-                    can in safe_constant or
-                    can in invisible_fields):
+                can in safe_constant or
+                can in invisible_fields):
                 dropped_canonical.add(can)
 
         field_meta: Dict[str, Dict] = {}
         for orig, can in canonical_map.items():
             if can in dropped_canonical:
+                continue
+            # ПРОПУСКАЕМ поля, которые уйдут в _meta — они не участвуют в regex
+            if can in meta_field_names:
                 continue
             # visible_count для этого поля
             vc = visible_counts.get(can, 0)

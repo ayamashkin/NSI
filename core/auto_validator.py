@@ -2,11 +2,11 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-27 17:46:00 — Убран хардкод skip_params, теперь читается из DomainConfig
+# 2026-05-27 17:46:00 — _build_skip_params формирует набор из meta_fields + retain_fields + skip_fields домена
+# 2026-05-27 17:46:00 — Добавлен _norm_field_name для нормализации имён полей
+# 2026-05-27 17:46:00 — Fallback на базовый набор только если доменный конфиг недоступен
 # 2026-05-27 14:20:00 — Добавлена поддержка доменных индексов ens_{domain}.pkl
-# 2026-05-27 14:20:00 — _get_ens_examples теперь принимает domain и ищет в структурированном индексе
-# 2026-05-27 14:20:00 — Добавлен multi-domain fallback: перебор всех ens_*.pkl
-# 2026-05-27 14:20:00 — Обновлен _test_pattern для работы с _meta-структурой индекса
-# 2026-05-27 14:20:00 — Удалена зависимость от плоского списка items в пользу иерархии
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -58,6 +58,52 @@ class AutoValidator:
         self.domain = domain
         self._domain_index: Optional[Dict] = None
         self._all_domain_indices: Optional[Dict[str, Dict]] = None
+        self._skip_params = self._build_skip_params()
+
+    @staticmethod
+    def _norm_field_name(name: str) -> str:
+        """Нормализация имени поля для сравнения."""
+        return re.sub(r"[^\wа-яА-Я]", "", str(name).lower().strip())
+
+    def _build_skip_params(self) -> set:
+        """Сформировать набор пропускаемых параметров из доменного конфига.
+
+        Использует meta_fields, retain_fields и skip_fields из доменного YAML.
+        Эти поля не участвуют в regex-парсинге (либо метаданные, либо служебные).
+        """
+        base = {
+            "код", "mdm_key", "id",
+            "автор_последнего_изменения", "дата_последнего_изменения",
+        }
+        if not self.domain:
+            logger.warning("[AutoValidator] No domain specified, using fallback skip_params")
+            return base | {
+                "тип_изделия", "item_type", "наименование", "полное_наименование",
+                "нтд_1", "нтд_2", "стандарт", "нтд",
+                "марка_материала", "марка_материала_1", "толщина_покрытия", "наличие_бп",
+            }
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            # meta_fields и retain_fields не видны в наименовании (не в regex)
+            # skip_fields уже удалены из индекса, но на всякий случай включаем
+            skip = set(cfg.skip_fields) | set(cfg.meta_fields) | set(cfg.retain_fields)
+            skip_normalized = {self._norm_field_name(f) for f in skip}
+            # Добавляем канонические имена, которые точно не извлекаются regex
+            skip_normalized |= {
+                "тип_изделия", "item_type", "наименование", "полное_наименование",
+                "нтд_1", "нтд_2", "стандарт", "нтд",
+            }
+            logger.info("[AutoValidator] skip_params built from domain '%s': %d fields",
+                        self.domain, len(skip_normalized))
+            return base | skip_normalized
+        except Exception as e:
+            logger.warning("[AutoValidator] Failed to load domain config for skip_params: %s", e)
+            return base | {
+                "тип_изделия", "item_type", "наименование", "полное_наименование",
+                "нтд_1", "нтд_2", "стандарт", "нтд",
+                "марка_материала", "марка_материала_1", "толщина_покрытия", "наличие_бп",
+            }
 
     def _load_domain_index(self, path: Optional[str] = None) -> Dict:
         target = Path(path) if path else self.ens_index_path
@@ -73,9 +119,9 @@ class AutoValidator:
                     if isinstance(first_type, dict) and "examples" in first_type:
                         logger.info("[AutoValidator] Loaded structured domain index from %s", target)
                         return data
-            # Legacy flat format fallback
-            logger.info("[AutoValidator] Loaded legacy index from %s", target)
-            return self._legacy_load(data)
+                # Legacy flat format fallback
+                logger.info("[AutoValidator] Loaded legacy index from %s", target)
+                return self._legacy_load(data)
         except Exception as e:
             logger.error("[AutoValidator] Failed to load ENS index %s: %s", target, e)
             return {}
@@ -241,12 +287,7 @@ class AutoValidator:
         extracted = match.groupdict()
         mismatches = []
         missing = []
-        skip_params = {
-            "тип_изделия", "item_type", "наименование", "полное_наименование",
-            "код", "mdm_key", "нтд_1", "нтд_2", "стандарт", "нтд",
-            "марка_материала", "марка_материала_1", "толщина_покрытия",
-            "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
-        }
+        skip_params = self._skip_params
 
         for param in required:
             if param in skip_params:
@@ -372,7 +413,7 @@ class AutoValidator:
             no_sep = re.sub(r"[.,]", "", val_str)
             if no_sep in name_lower:
                 return True
-        if param_key in ("покрытие", "coating", "покрытие_1") or re.search(r"[a-zA-Zа-яА-Я]", val_str):
+        if re.search(r"[a-zA-Zа-яА-Я]", val_str):
             tokens = re.split(r"[.\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
             for tok in tokens:
