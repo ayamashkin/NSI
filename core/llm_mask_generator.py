@@ -8,12 +8,6 @@
 #    полей (например, длина_изделия/l для длины, шаг/шаг_резьбы_1 для шага
 #    резьбы), что расширяет coverage и позволяет LLM видеть все параметры.
 # =============================================================================
-# FIX 2026-05-27 10:37 UTC+3:
-# 2. _is_value_in_name и _find_value_positions: для числовых значений добавлена
-#    проверка границ слова (word boundaries), чтобы "8" не считалось видимым
-#    внутри "88", "10" внутри "100" и т.д. Это предотвращает ложные positive
-#    при определении видимости параметров.
-# =============================================================================
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
@@ -215,16 +209,6 @@ class LLMMaskGenerator:
         name_lower = name_clean.lower().replace(",", ".")
 
         if val_str in name_lower:
-            # FIX 2026-05-27: для чисел проверяем границы слова,
-            # чтобы "8" не считалось видимым внутри "88" или "100"
-            if re.match(r"^\d+([.,]\d+)?$", val_str):
-                for m in re.finditer(re.escape(val_str), name_lower):
-                    start, end = m.start(), m.end()
-                    left_is_digit = start > 0 and name_lower[start-1].isdigit()
-                    right_is_digit = end < len(name_lower) and name_lower[end].isdigit()
-                    if not left_is_digit and not right_is_digit:
-                        return True
-                return False
             return True
 
         if re.match(r"^\d+[.,]\d+$", val_raw):
@@ -275,14 +259,7 @@ class LLMMaskGenerator:
             idx = name_lower.find(val_str, start)
             if idx == -1:
                 break
-            # FIX 2026-05-27: для чисел проверяем границы слова
-            if re.match(r"^\d+([.,]\d+)?$", val_str):
-                left_is_digit = idx > 0 and name_lower[idx-1].isdigit()
-                right_is_digit = (idx + len(val_str)) < len(name_lower) and name_lower[idx + len(val_str)].isdigit()
-                if not left_is_digit and not right_is_digit:
-                    positions.append((idx, idx + len(val_str)))
-            else:
-                positions.append((idx, idx + len(val_str)))
+            positions.append((idx, idx + len(val_str)))
             start = idx + 1
         return positions
 
@@ -355,7 +332,15 @@ class LLMMaskGenerator:
         return selected
 
     def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
-        """Форматировать ENS-примеры для вставки в промпт."""
+        """Форматировать ENS-примеры для вставки в промпт.
+
+        FIX 2026-05-27 11:15 UTC+3:
+        3. Добавлена проверка однозначности: если в примере два параметра имеют
+           одинаковое значение (например, номинальный_диаметр_резьбы=10 и
+           наружный_диаметр=10), пример считается неоднозначным и не участвует
+           в определении global_visible. Для "близнецов" (параметры, всегда
+           дублирующиеся во всех неоднозначных примерах) выбирается один.
+        """
         if not examples:
             return "(примеры отсутствуют)"
 
@@ -372,25 +357,77 @@ class LLMMaskGenerator:
             "марка_материала", "марка_материала_1", "тип_резьбы",
         ]
 
-        global_visible = set()
-        for ex in examples:
+        # --- Шаг 1: определить видимые параметры с проверкой однозначности ---
+        def _get_visible_for_example(ex: Dict) -> Dict[str, str]:
+            """Вернуть {key: value} видимых параметров для примера."""
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
-                continue
+                return {}
+            visible = {}
             for key in check_keys:
-                if key == "наименование_типа":
+                if key in LLMMaskGenerator.SKIP_PARAMS:
+                    continue
+                if key == "тип_изделия":
+                    val = self._get_example_value(ex, key)
+                    if val and name.lower().startswith(str(val).strip().lower()):
+                        visible[key] = str(val).strip()
                     continue
                 val = self._get_example_value(ex, key)
                 if not val:
                     continue
-                val_str = val.strip()
-                if key == "тип_изделия":
-                    if name.lower().startswith(val_str.lower()):
-                        global_visible.add(key)
-                    continue
+                val_str = str(val).strip()
                 if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
-                    global_visible.add(key)
+                    visible[key] = val_str
+            return visible
 
+        unambiguous = []   # [(ex, {key: val})]
+        ambiguous = []     # [(ex, {key: val})]
+
+        for ex in examples:
+            vis = _get_visible_for_example(ex)
+            values = list(vis.values())
+            if len(values) != len(set(values)):
+                ambiguous.append((ex, vis))
+            else:
+                unambiguous.append((ex, vis))
+
+        # global_visible из однозначных примеров
+        global_visible = set()
+        for ex, vis in unambiguous:
+            global_visible.update(vis.keys())
+
+        # --- Шаг 2: обработка "близнецов" ---
+        twin_pairs = []
+        if ambiguous:
+            dup_stats = {}  # (k1, k2) -> count
+            for ex, vis in ambiguous:
+                val_to_keys = {}
+                for k, v in vis.items():
+                    val_to_keys.setdefault(v, []).append(k)
+                for v, keys in val_to_keys.items():
+                    if len(keys) >= 2:
+                        for i in range(len(keys)):
+                            for j in range(i + 1, len(keys)):
+                                pair = tuple(sorted([keys[i], keys[j]]))
+                                dup_stats[pair] = dup_stats.get(pair, 0) + 1
+
+            for pair, count in dup_stats.items():
+                if count == len(ambiguous):
+                    twin_pairs.append(pair)
+
+        keys_to_remove = set()
+        for k1, k2 in twin_pairs:
+            idx1 = check_keys.index(k1) if k1 in check_keys else 999
+            idx2 = check_keys.index(k2) if k2 in check_keys else 999
+            keep, remove = (k1, k2) if idx1 < idx2 else (k2, k1)
+            global_visible.add(keep)
+            keys_to_remove.add(remove)
+
+        global_visible -= keys_to_remove
+        global_visible.add("тип_изделия")
+        global_visible.add("нтд_1")
+
+        # --- Шаг 3: формирование примеров для промпта ---
         lines = []
         lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
         lines.append("")
@@ -402,8 +439,21 @@ class LLMMaskGenerator:
             if not name:
                 continue
 
-            visible = []
-            missing = []
+            vis = _get_visible_for_example(ex)
+
+            # Определяем неоднозначные ключи в этом примере
+            val_to_keys = {}
+            for k, v in vis.items():
+                val_to_keys.setdefault(v, []).append(k)
+            ambiguous_keys = set()
+            for v, keys in val_to_keys.items():
+                if len(keys) >= 2:
+                    for k in keys:
+                        ambiguous_keys.add(k)
+
+            visible_list = []
+            missing_list = []
+            ambiguous_list = []
 
             for key in check_keys:
                 if key not in global_visible:
@@ -411,40 +461,47 @@ class LLMMaskGenerator:
 
                 val = self._get_example_value(ex, key)
                 if key == "тип_изделия":
-                    if val:
-                        visible.append((key, val.strip(), 0))
+                    if val and name.lower().startswith(str(val).strip().lower()):
+                        visible_list.append((key, str(val).strip(), 0))
                     else:
-                        missing.append(key)
+                        missing_list.append(key)
                     continue
 
-                if val:
-                    val_str = val.strip()
-                    if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
-                        pos = name.lower().find(val_str.lower())
-                        if pos < 0:
-                            m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
-                            if m:
-                                pos = name.lower().find(m.group().lower())
-                        if pos < 0:
-                            pos = 999
-                        visible.append((key, val_str, pos))
-                    else:
-                        missing.append(key)
-                else:
-                    missing.append(key)
+                if not val:
+                    missing_list.append(key)
+                    continue
 
-            visible.sort(key=lambda x: x[2])
+                val_str = str(val).strip()
+                is_in_name = self._is_value_in_name(val_str, name, param_key=key, standard=standard)
+
+                if key in ambiguous_keys:
+                    ambiguous_list.append((key, val_str))
+                elif is_in_name:
+                    pos = name.lower().find(val_str.lower())
+                    if pos < 0:
+                        m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
+                        if m:
+                            pos = name.lower().find(m.group().lower())
+                    if pos < 0:
+                        pos = 999
+                    visible_list.append((key, val_str, pos))
+                else:
+                    missing_list.append(key)
+
+            visible_list.sort(key=lambda x: x[2])
 
             lines.append(f'{i}. Исходное: "{name}"')
-            if visible:
-                vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible])
+            if visible_list:
+                vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible_list])
                 lines.append(f"   Видимые: {vis_str}")
-            if missing:
-                lines.append(f"   Отсутствуют: {', '.join(missing)}")
+            if ambiguous_list:
+                amb_str = " ".join([f"(?P<{k}>{v})" for k, v in ambiguous_list])
+                lines.append(f"   Неоднозначные: {amb_str}")
+            if missing_list:
+                lines.append(f"   Отсутствуют: {', '.join(missing_list)}")
             lines.append("")
 
         return "\n".join(lines)
-
     def _get_prompt_template(self) -> str:
         """Загрузить шаблон промпта."""
         if self.settings and hasattr(self.settings, "mask_generation"):
