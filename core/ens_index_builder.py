@@ -1,14 +1,17 @@
 # =============================================================================
-# ENS Index Builder Module
-# Строит структурированный доменный индекс из Excel-файла ЕНС.
-#
+# FILE: core/ens_index_builder.py
+# REPO: https://github.com/ayamashkin/NSI
+# LAST 5 CHANGES (UTC+3):
 # 2026-05-27 14:10:00 — Создан построитель доменного индекса ENS
 # 2026-05-27 14:10:00 — Реализована нормализация заголовков и удаление skip_fields
 # 2026-05-27 14:10:00 — Добавлено автоопределение visible_count и twin_groups
 # 2026-05-27 14:10:00 — Реализовано удаление пустых/константных колонок
 # 2026-05-27 14:10:00 — Добавлена структура _meta + field_meta в индекс
 # =============================================================================
-
+"""
+ENS Index Builder Module
+Строит структурированный доменный индекс из Excel-файла ЕНС.
+"""
 import logging
 import click
 import pickle
@@ -149,8 +152,8 @@ class ENSIndexBuilder:
     def _print_group_stats(self, standard: str, item_type: str, built: Dict) -> None:
         """Вывести статистику по сформированной группе (стандарт, тип).
 
-        Показывает ТОЛЬКО значимые поля (visible > 0 или retain/meta).
-        Поля с visible_count == 0, не входящие в retain/meta, скрыты.
+        Показывает ТОЛЬКО поля, реально присутствующие в индексе (field_meta).
+        Все удалённые (пустые, константные, невидимые) поля исключены.
         """
         stats = built.get("stats", {})
         field_meta = built.get("field_meta", {})
@@ -163,7 +166,7 @@ class ENSIndexBuilder:
         # Фильтруем twin_groups: показываем только осмысленные (не giant clusters)
         meaningful_twins = [
             g for g in twin_groups
-            if len(g) <= 5  # giant clusters (>5 полей) — скорее всего артефакт
+            if len(g) <= 5
         ]
 
         click.echo(f"\n{'=' * 60}")
@@ -194,7 +197,6 @@ class ENSIndexBuilder:
             for group in meaningful_twins:
                 click.echo(f"    {' = '.join(group)}  → canonical: {group[0]}")
         elif twin_groups:
-            # Сообщаем о giant clusters без деталей
             giant = [g for g in twin_groups if len(g) > 5]
             click.echo(f"\n  ⚠️  Обнаружены giant twin_clusters: {len(giant)} (полей > 5, скорее всего пустые поля)")
 
@@ -377,15 +379,32 @@ class ENSIndexBuilder:
             resolved_examples.append(resolved)
 
         # 8. Сформировать _meta + field_meta (только для значимых полей)
+        # Собираем множество canonical имён ВСЕХ удалённых полей
+        dropped_canonical: Set[str] = set()
+        for orig in all_fields:
+            can = canonical_map.get(orig, orig)
+            if (orig in fields_to_drop or
+                    can in safe_constant or
+                    can in invisible_fields):
+                dropped_canonical.add(can)
+
         field_meta: Dict[str, Dict] = {}
         for orig, can in canonical_map.items():
-            if can in safe_constant or can in invisible_fields or can in fields_to_drop:
+            if can in dropped_canonical:
+                continue
+            # visible_count для этого поля
+            vc = visible_counts.get(can, 0)
+            is_meta = can in self.domain.meta_fields or can in self.domain.retain_fields
+            # Пропускаем поля, которые:
+            # - не видны (vc == 0) И
+            # - не являются метаданными (retain/meta)
+            if vc == 0 and not is_meta:
                 continue
             field_meta[can] = {
                 "original_name": orig,
-                "visible_count": visible_counts.get(can, 0),
+                "visible_count": vc,
                 "total_count": total_count,
-                "is_metadata": can in self.domain.meta_fields or can in self.domain.retain_fields,
+                "is_metadata": is_meta,
             }
 
         visible_fields = sorted([k for k in field_meta if not field_meta[k]["is_metadata"]])
