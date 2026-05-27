@@ -372,11 +372,17 @@ class LLMMaskGenerator:
         if not examples:
             return "(примеры отсутствуют)"
 
-        display_examples = self._select_representative_examples(examples, max_count=10)
         twin_groups = self._get_twin_groups(standard, item_type)
-        unambiguous, _ = self._filter_unambiguous(examples, twin_groups, standard=standard)
+        unambiguous, ambiguous = self._filter_unambiguous(examples, twin_groups, standard=standard)
         required, optional = self._get_global_visible(unambiguous)
         global_visible = required | optional
+
+        # Используем ТОЛЬКО однозначные примеры для отображения в промпте
+        unambiguous_examples = [ex for ex, _ in unambiguous]
+        display_examples = self._select_representative_examples(unambiguous_examples, max_count=10)
+        logger.info(
+            "[LLMMaskGenerator] Format examples: %d unambiguous, %d ambiguous, %d display",
+            len(unambiguous_examples), len(ambiguous), len(display_examples))
 
         lines = []
         lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
@@ -836,8 +842,33 @@ class LLMMaskGenerator:
         client_type = type(client).__name__
         logger.debug("[LLMMaskGenerator] Calling %s with model=%s temp=%s", client_type, model, temperature)
         text = None
-        try:
-            if hasattr(client, "chat") or hasattr(client, "generate"):
+
+        # --- Стратегия 1: chat_completion (MTSAIClient, OpenAI-compatible) ---
+        if hasattr(client, "chat_completion"):
+            try:
+                messages = [{"role": "user", "content": prompt}]
+                response = client.chat_completion(messages=messages, model=model, temperature=temperature)
+                if isinstance(response, dict):
+                    text = response.get("text") or response.get("raw") or response.get("content")
+                    tokens_prompt = response.get("tokens_prompt", 0) or 0
+                    tokens_completion = response.get("tokens_completion", 0) or 0
+                    if text and len(text) > 10:
+                        logger.debug("[LLMMaskGenerator] %s.chat_completion returned text (len=%d)", client_type, len(text))
+                        return {
+                            "text": text,
+                            "model": model,
+                            "tokens_prompt": tokens_prompt,
+                            "tokens_completion": tokens_completion,
+                        }
+                    else:
+                        logger.debug("[LLMMaskGenerator] %s.chat_completion returned empty text, keys=%s",
+                                     client_type, list(response.keys()))
+            except Exception as e:
+                logger.debug("[LLMMaskGenerator] %s.chat_completion failed: %s", client_type, e)
+
+        # --- Стратегия 2: chat / generate (legacy clients) ---
+        if text is None and (hasattr(client, "chat") or hasattr(client, "generate")):
+            try:
                 method = getattr(client, "chat", None) or getattr(client, "generate", None)
                 messages = [{"role": "user", "content": prompt}]
                 try:
@@ -860,7 +891,6 @@ class LLMMaskGenerator:
                                 text = str(choice)
                     if not text:
                         text = response.get("text", "") or response.get("content", "")
-                    # DEBUG: показать ключи, если текст всё ещё пустой
                     if not text:
                         logger.debug("[LLMMaskGenerator] %s returned dict with keys: %s", client_type, list(response.keys()))
                 elif hasattr(response, "text"):
@@ -881,15 +911,32 @@ class LLMMaskGenerator:
                     }
                 else:
                     logger.warning("[LLMMaskGenerator] %s returned empty/short text: %r", client_type, text[:50] if text else None)
-        except Exception as e:
-            logger.warning("[LLMMaskGenerator] %s call failed: %s", client_type, e)
+            except Exception as e:
+                logger.warning("[LLMMaskGenerator] %s chat/generate failed: %s", client_type, e)
+
+        # --- Стратегия 3: complete (BaseLLMClient) ---
+        if text is None and hasattr(client, "complete"):
             try:
-                if hasattr(client, "complete"):
-                    response = client.complete(prompt, model=model, temperature=temperature)
-                    if response and len(str(response)) > 10:
-                        return {"text": str(response), "model": model, "tokens_prompt": 0, "tokens_completion": 0}
-            except Exception as e2:
-                logger.debug("[LLMMaskGenerator] complete() failed: %s", e2)
+                response = client.complete(prompt, model=model, temperature=temperature)
+                if isinstance(response, dict):
+                    text = response.get("text") or response.get("raw") or response.get("content") or str(response)
+                    tokens_prompt = response.get("tokens_prompt", 0) or 0
+                    tokens_completion = response.get("tokens_completion", 0) or 0
+                else:
+                    text = str(response)
+                    tokens_prompt = 0
+                    tokens_completion = 0
+                if text and len(text) > 10:
+                    logger.debug("[LLMMaskGenerator] %s.complete returned text (len=%d)", client_type, len(text))
+                    return {
+                        "text": text,
+                        "model": model,
+                        "tokens_prompt": tokens_prompt,
+                        "tokens_completion": tokens_completion,
+                    }
+            except Exception as e:
+                logger.debug("[LLMMaskGenerator] %s.complete failed: %s", client_type, e)
+
         logger.error("[LLMMaskGenerator] All LLM call methods failed for %s", client_type)
         return None
 
