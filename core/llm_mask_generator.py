@@ -474,8 +474,31 @@ class LLMMaskGenerator:
         return "\n".join(lines)
 
     def _get_prompt_template(self) -> str:
-        """Получить базовый шаблон промпта (с плейсхолдерами)."""
-        # 1. Пробуем базовый шаблон из settings
+        """Получить шаблон промпта: доменный приоритет, затем базовый."""
+        # 1. Доменный шаблон по соглашению (полный шаблон для домена)
+        domain_paths = [
+            f"prompts/templates/mask_generation_{self.domain}.txt",
+            f"prompts/mask_generation_{self.domain}.txt",
+        ]
+        for path in domain_paths:
+            p = Path(path)
+            if p.exists():
+                logger.info("[LLMMaskGenerator] Using domain prompt: %s", p)
+                return p.read_text(encoding="utf-8")
+
+        # 2. Путь из DomainConfig
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            if cfg.prompt_template:
+                p = Path(cfg.prompt_template)
+                if p.exists():
+                    logger.info("[LLMMaskGenerator] Using domain prompt from config: %s", p)
+                    return p.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.debug("[LLMMaskGenerator] Domain config not found: %s", e)
+
+        # 3. Базовый шаблон из settings
         if self.settings and hasattr(self.settings, "mask_generation"):
             mg = self.settings.mask_generation
             template_path = getattr(mg, "prompt_template", "")
@@ -484,7 +507,7 @@ class LLMMaskGenerator:
                 if p.exists():
                     return p.read_text(encoding="utf-8")
 
-        # 2. Fallback на базовые пути
+        # 4. Fallback на базовые пути
         for path in [
             "prompts/templates/mask_generation.txt",
             "prompts/mask_generation.txt",
@@ -495,34 +518,6 @@ class LLMMaskGenerator:
                 return p.read_text(encoding="utf-8")
 
         return self._default_template()
-
-    def _get_domain_examples_text(self) -> str:
-        """Получить доменные примеры паттернов (фрагмент для {domain_examples})."""
-        # 1. Пробуем путь из DomainConfig
-        try:
-            from core.domain_config import DomainConfig
-            cfg = DomainConfig.load(self.domain)
-            if cfg.prompt_template:
-                p = Path(cfg.prompt_template)
-                if p.exists():
-                    logger.info("[LLMMaskGenerator] Using domain examples: %s", p)
-                    return p.read_text(encoding="utf-8")
-        except Exception as e:
-            logger.debug("[LLMMaskGenerator] Domain config prompt_template not found: %s", e)
-
-        # 2. Пробуем соглашение об именовании
-        domain_paths = [
-            f"prompts/templates/mask_generation_{self.domain}.txt",
-            f"prompts/mask_generation_{self.domain}.txt",
-        ]
-        for path in domain_paths:
-            p = Path(path)
-            if p.exists():
-                logger.info("[LLMMaskGenerator] Using domain examples: %s", p)
-                return p.read_text(encoding="utf-8")
-
-        logger.info("[LLMMaskGenerator] No domain examples found for '%s', using empty", self.domain)
-        return ""
 
     def _default_template(self) -> str:
         return r"""Ты — эксперт по техническим стандартам ГОСТ/ОСТ/ТУ и регулярным выражениям Python 3 (re модуль).
@@ -627,13 +622,11 @@ class LLMMaskGenerator:
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
         stats_text = self._format_stats(examples, standard)
-        domain_examples = self._get_domain_examples_text()
         service, model, temperature = self._resolve_service()
 
         replacements = {
             "{examples_text}": examples_text,
             "{stats_text}": stats_text,
-            "{domain_examples}": domain_examples,
             "{item_type}": item_type,
             "{standard}": standard,
             "{provider}": service or "LLM",
@@ -644,19 +637,6 @@ class LLMMaskGenerator:
         for placeholder, value in replacements.items():
             if placeholder in template:
                 template = template.replace(placeholder, value)
-
-        # ЗАЩИТА: если {examples_text} не был заменён (нет в шаблоне) — вставляем принудительно
-        if "{examples_text}" in template:
-            # Вставляем перед === ЖЁСТКИЕ ЗАПРЕТЫ === или === ПРАВИЛА ===
-            insert_marker = "=== ЖЁСТКИЕ ЗАПРЕТЫ ==="
-            if insert_marker in template:
-                template = template.replace(
-                    insert_marker,
-                    f"=== ПРИМЕРЫ ИЗ ЕНС ===\n\n{examples_text}\n\n=== СТАТИСТИКА ПАРАМЕТРОВ ===\n\n{stats_text}\n\n" + insert_marker
-                )
-            else:
-                template = template.replace("{examples_text}", examples_text)
-                template = template.replace("{stats_text}", stats_text)
 
         if "{params_list}" in template:
             visible = self._extract_visible_params(examples)
@@ -1007,9 +987,17 @@ class LLMMaskGenerator:
         tokens_completion: int = 0,
     ) -> Optional[MaskGenerationResult]:
         if not text:
+            logger.debug("[LLMMaskGenerator] _parse_mask_response: empty text")
             return None
+
+        # Нормализация переносов строк (Windows → Unix)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        logger.debug("[LLMMaskGenerator] _parse_mask_response: text len=%d", len(text))
+
         data = None
         candidate = None
+
+        # Этап 1: ast.literal_eval
         try:
             import ast
             parsed = ast.literal_eval(text)
@@ -1020,8 +1008,11 @@ class LLMMaskGenerator:
                     text = parsed["raw"]
                 else:
                     data = parsed
-        except (ValueError, SyntaxError, TypeError):
-            pass
+                logger.debug("[LLMMaskGenerator] Parsed via ast.literal_eval")
+        except (ValueError, SyntaxError, TypeError) as e:
+            logger.debug("[LLMMaskGenerator] ast.literal_eval failed: %s", e)
+
+        # Этап 2: yaml
         if data is None:
             try:
                 import yaml
@@ -1044,8 +1035,14 @@ class LLMMaskGenerator:
                                 data = yaml.safe_load(raw_text)
                             except Exception:
                                 data = None
-            except Exception:
-                pass
+                    else:
+                        logger.debug("[LLMMaskGenerator] Parsed via yaml")
+                else:
+                    data = None
+            except Exception as e:
+                logger.debug("[LLMMaskGenerator] yaml failed: %s", e)
+
+        # Этап 3: markdown code block
         if data is None:
             for prefix in ["```json", "```python", "```"]:
                 start = text.find(prefix)
@@ -1054,16 +1051,25 @@ class LLMMaskGenerator:
                     end = text.find("```", start)
                     if end >= 0:
                         candidate = text[start:end].strip()
-                        break
+                    else:
+                        candidate = text[start:].strip()
+                    break
             if candidate:
                 try:
                     data = json.loads(candidate)
-                except json.JSONDecodeError:
-                    try:
-                        import yaml
-                        data = yaml.safe_load(candidate)
-                    except Exception:
-                        pass
+                    logger.debug("[LLMMaskGenerator] Parsed via json.loads from markdown")
+                except json.JSONDecodeError as e:
+                    logger.debug("[LLMMaskGenerator] json.loads from markdown failed: %s", e)
+                    # Пробуем найти JSON-объект внутри candidate
+                    json_match = re.search(r"\{.*\}", candidate, re.DOTALL)
+                    if json_match:
+                        try:
+                            data = json.loads(json_match.group())
+                            logger.debug("[LLMMaskGenerator] Parsed via regex JSON match inside markdown")
+                        except Exception as e2:
+                            logger.debug("[LLMMaskGenerator] regex JSON match failed: %s", e2)
+
+        # Этап 4: поиск JSON-объекта сканером скобок
         if data is None:
             for start_match in re.finditer(r"(?m)^[ \t]*\{", text):
                 pos = start_match.start()
@@ -1074,21 +1080,22 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == '\\' and not escape:
+                    if ch == "\\" and not escape:
                         escape = True
                         continue
                     if ch == '"' and not escape:
                         in_string = not in_string
                         continue
                     if not in_string:
-                        if ch == '{':
+                        if ch == "{":
                             brace_count += 1
-                        elif ch == '}':
+                        elif ch == "}":
                             brace_count -= 1
                             if brace_count == 0:
                                 candidate = text[pos:i + 1]
                                 try:
                                     data = json.loads(candidate)
+                                    logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
                                 except json.JSONDecodeError:
                                     try:
                                         import yaml
@@ -1098,30 +1105,67 @@ class LLMMaskGenerator:
                                 break
                 if data is not None:
                     break
+
+        # Этап 5: fallback — прямое извлечение pattern из текста
         if data is None:
-            json_match = re.search(r"\{.*?\}", text, re.DOTALL)
-            if json_match:
-                candidate = json_match.group()
+            logger.debug("[LLMMaskGenerator] Trying direct pattern extraction from text")
+            pattern_match = re.search(r'"pattern"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+            if pattern_match:
+                raw_pattern = pattern_match.group(1)
+                # Исправляем невалидные JSON escapes (\d, \s, \w и т.д. → \\d, \\s)
+                fixed = re.sub(r"(?<!\\)\\([dDsSwWbBAZ])", r"\\\\\1", raw_pattern)
                 try:
-                    data = json.loads(candidate)
-                except json.JSONDecodeError:
-                    try:
-                        import yaml
-                        data = yaml.safe_load(candidate)
-                    except Exception:
-                        pass
+                    pattern = json.loads(f'"{fixed}"')
+                except Exception:
+                    pattern = fixed.replace('\\\\', '\\').replace('\\"', '"')
+                params = re.findall(r"\?P<([^>]+)>", pattern)
+                optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
+                required = [p for p in params if p not in optional]
+                logger.info(
+                    "[LLMMaskGenerator] Extracted pattern directly: %d params, %d required",
+                    len(params), len(required))
+                data = {
+                    "pattern": pattern,
+                    "params": params,
+                    "required": required,
+                }
+
         if data is None or not isinstance(data, dict):
+            logger.warning(
+                "[LLMMaskGenerator] Could not extract any data from response (len=%d). Preview: %r",
+                len(text), text[:200])
             return None
+
         pattern = data.get("pattern", "")
         params = data.get("params", [])
         required = data.get("required", [])
-        if not pattern or not pattern.startswith("^") or not pattern.endswith("$"):
+
+        if not pattern:
+            logger.warning("[LLMMaskGenerator] No pattern in extracted data")
             return None
+
+        if not pattern.startswith("^") or not pattern.endswith("$"):
+            logger.warning("[LLMMaskGenerator] Pattern missing anchors: %s", pattern[:80])
+            return None
+
         pattern = self._fix_pattern(pattern, standard, item_type)
         try:
             re.compile(pattern, re.IGNORECASE)
-        except re.error:
+        except re.error as e:
+            logger.warning("[LLMMaskGenerator] Pattern compile error: %s — %s", e, pattern[:80])
             return None
+
+        # Fallback: извлечь params из pattern, если пустые
+        if not params:
+            params = re.findall(r"\?P<([^>]+)>", pattern)
+            logger.debug("[LLMMaskGenerator] Extracted params from pattern: %s", params)
+
+        # Fallback: derive required из params
+        if not required:
+            optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
+            required = [p for p in params if p not in optional]
+            logger.debug("[LLMMaskGenerator] Derived required from params: %s", required)
+
         result = MaskGenerationResult(
             pattern=pattern, params=params, required=required,
             standard=standard, item_type=item_type, raw_response=text,
