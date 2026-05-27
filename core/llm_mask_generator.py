@@ -2,11 +2,18 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
-# FIX 2026-05-25 20:26 UTC+3:
-# 1. _select_representative_examples/_visible_params: заменен ex.get(key) на
-#    self._get_example_value(ex, key). Теперь учитываются альтернативные имена
-#    полей (например, длина_изделия/l для длины, шаг/шаг_резьбы_1 для шага
-#    резьбы), что расширяет coverage и позволяет LLM видеть все параметры.
+# FIX 2026-05-27 14:38 UTC+3:
+# 1. Добавлена централизованная проверка однозначности параметров:
+#    метод _get_example_visible_params проверяет, что значения параметров
+#    в наименовании не дублируются (нет двух параметров с одинаковым значением).
+# 2. Добавлен _resolve_twin_pairs: если параметры всегда дублируются во всех
+#    неоднозначных примерах, выбирается один (по порядку в check_keys),
+#    остальные исключаются из глобально видимых.
+# 3. Обновлены _format_stats, _extract_visible_params,
+#    _select_representative_examples: теперь используют общую логику
+#    однозначности и обработки близнецов.
+# 4. _format_examples переиспользует _get_example_visible_params и
+#    _resolve_twin_pairs вместо вложенных функций.
 # =============================================================================
 """
 LLM Mask Generator Module
@@ -25,7 +32,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class MaskGenerationResult:
@@ -53,7 +59,6 @@ class MaskGenerationResult:
     def __contains__(self, key: str) -> bool:
         """Support 'in' operator: 'pattern' in mask."""
         return hasattr(self, key)
-
 
 class LLMMaskGenerator:
     """Генератор масок через LLM с ENS-примерами."""
@@ -127,7 +132,7 @@ class LLMMaskGenerator:
             "толщина_покрытия": ["толщина_покр", "покрытие_толщина"],
             "шаг_резьбы": ["шаг", "шаг_резьбы_1"],
             "длина": ["длина_изделия", "l"],
-            "номинальный_диаметр_резьбы": ["номинальный_диаметр"],  # FIX 2026-05-27: убраны "диаметр"/"d" — в ENS это часто наружный диаметр, что приводит к семантическому смешению с номинальным диаметром резьбы
+            "номинальный_диаметр_резьбы": ["номинальный_диаметр"], # FIX 2026-05-27: убраны "диаметр"/"d" — в ENS это часто наружный диаметр, что приводит к семантическому смешению с номинальным диаметром резьбы
         }
 
         for alt in alt_map.get(key, []):
@@ -136,44 +141,147 @@ class LLMMaskGenerator:
                 return str(val).strip()
         return None
 
+    CHECK_KEYS = [
+        "тип_изделия", "исполнение",
+        "толщина_проката_стенки_полки",
+        "номинальный_диаметр_резьбы", "шаг_резьбы",
+        "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
+        "длина",
+        "покрытие", "толщина_покрытия",
+        "группа_класс_прочности", "класс_поле_допуска", "свойства",
+        "марка_материала", "марка_материала_1", "тип_резьбы",
+    ]
+
+    SKIP_PARAMS = {
+        "марка_материала", "марка_материала_1", "толщина_покрытия",
+        "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
+    }
+
+    def _get_example_visible_params(
+        self,
+        ex: Dict,
+        standard: str = "",
+        check_keys: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        """Вернуть {key: value} видимых параметров для одного примера.
+
+        FIX 2026-05-27: Централизованная проверка однозначности.
+        Если два параметра имеют одинаковое значение — оба помечаются
+        как неоднозначные, но метод возвращает ВСЕ видимые параметры.
+        Проверка однозначности делается на уровне агрегатора.
+        """
+        if check_keys is None:
+            check_keys = self.CHECK_KEYS
+
+        name = ex.get("наименование", ex.get("полное_наименование", ""))
+        if not name:
+            return {}
+
+        visible: Dict[str, str] = {}
+        for key in check_keys:
+            if key in LLMMaskGenerator.SKIP_PARAMS:
+                continue
+            if key == "тип_изделия":
+                val = self._get_example_value(ex, key)
+                if val and name.lower().startswith(str(val).strip().lower()):
+                    visible[key] = str(val).strip()
+                continue
+
+            val = self._get_example_value(ex, key)
+            if not val:
+                continue
+            val_str = str(val).strip()
+            if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
+                visible[key] = val_str
+        return visible
+
+    def _resolve_twin_pairs(
+        self,
+        ambiguous: List[Tuple[Dict, Dict[str, str]]],
+        check_keys: Optional[List[str]] = None,
+    ) -> Tuple[set, set]:
+        """Обработка "близнецов" — параметров, всегда дублирующихся.
+
+        Returns:
+            (keys_to_keep, keys_to_remove)
+        """
+        if check_keys is None:
+            check_keys = self.CHECK_KEYS
+
+        if not ambiguous:
+            return set(), set()
+
+        dup_stats: Dict[Tuple[str, str], int] = {}
+        for ex, vis in ambiguous:
+            val_to_keys: Dict[str, List[str]] = {}
+            for k, v in vis.items():
+                val_to_keys.setdefault(v, []).append(k)
+            for v, keys in val_to_keys.items():
+                if len(keys) >= 2:
+                    for i in range(len(keys)):
+                        for j in range(i + 1, len(keys)):
+                            pair = tuple(sorted([keys[i], keys[j]]))
+                            dup_stats[pair] = dup_stats.get(pair, 0) + 1
+
+        twin_pairs = []
+        for pair, count in dup_stats.items():
+            if count == len(ambiguous):
+                twin_pairs.append(pair)
+
+        keys_to_remove = set()
+        keys_to_keep = set()
+        for k1, k2 in twin_pairs:
+            idx1 = check_keys.index(k1) if k1 in check_keys else 999
+            idx2 = check_keys.index(k2) if k2 in check_keys else 999
+            keep, remove = (k1, k2) if idx1 < idx2 else (k2, k1)
+            keys_to_keep.add(keep)
+            keys_to_remove.add(remove)
+
+        return keys_to_keep, keys_to_remove
+
     def _format_stats(self, examples: List[Dict], standard: str = "") -> str:
-        """Форматировать статистику глобально видимых параметров для вставки в промпт."""
+        """Форматировать статистику глобально видимых параметров для вставки в промпт.
+
+        FIX 2026-05-27: Теперь использует _get_example_visible_params и
+        _resolve_twin_pairs. Неоднозначные примеры пропускаются при подсчёте.
+        """
         if not examples:
             return "(нет данных)"
 
-        check_keys = [
-            "тип_изделия", "исполнение",
-            "толщина_проката_стенки_полки",
-            "номинальный_диаметр_резьбы", "шаг_резьбы",
-            "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-            "длина",
-            "покрытие", "толщина_покрытия",
-            "группа_класс_прочности", "класс_поле_допуска", "свойства",
-            "марка_материала", "марка_материала_1", "тип_резьбы",
-        ]
+        check_keys = self.CHECK_KEYS
+        unambiguous = []
+        ambiguous = []
 
-        param_counts = {}
         for ex in examples:
-            name = ex.get("наименование", ex.get("полное_наименование", ""))
-            if not name:
-                continue
-            name_clean = re.sub(
-                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
-                '',
-                name,
-                flags=re.IGNORECASE
-            )
-            for key in check_keys:
-                if key in LLMMaskGenerator.SKIP_PARAMS:
-                    continue
-                if key == "тип_изделия":
+            vis = self._get_example_visible_params(ex, standard=standard, check_keys=check_keys)
+            values = list(vis.values())
+            if len(values) != len(set(values)):
+                ambiguous.append((ex, vis))
+            else:
+                unambiguous.append((ex, vis))
+
+        # global_visible из однозначных примеров
+        global_visible = set()
+        for ex, vis in unambiguous:
+            global_visible.update(vis.keys())
+
+        # Обработка близнецов
+        keep, remove = self._resolve_twin_pairs(ambiguous, check_keys=check_keys)
+        global_visible |= keep
+        global_visible -= remove
+        global_visible.add("тип_изделия")
+        global_visible.add("нтд_1")
+
+        # Подсчёт только по однозначным примерам + resolved twins
+        param_counts = {}
+        for ex, vis in unambiguous:
+            for key in vis:
+                if key in global_visible:
                     param_counts[key] = param_counts.get(key, 0) + 1
-                    continue
-                val = self._get_example_value(ex, key)
-                if not val:
-                    continue
-                val_str = val.strip()
-                if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
+        # Для resolved twins добавляем count из ambiguous тоже
+        for ex, vis in ambiguous:
+            for key in vis:
+                if key in global_visible and key not in remove:
                     param_counts[key] = param_counts.get(key, 0) + 1
 
         total = len(examples)
@@ -181,11 +289,6 @@ class LLMMaskGenerator:
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
             lines.append(f"  {key}: {count} из {total} ({count/total*100:.0f}%)")
         return "\n".join(lines) if lines else "(нет параметров)"
-
-    SKIP_PARAMS = {
-        "марка_материала", "марка_материала_1", "толщина_покрытия",
-        "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
-    }
 
     @staticmethod
     def _is_value_in_name(val: str, name: str, param_key: str = "", standard: str = "") -> bool:
@@ -266,45 +369,27 @@ class LLMMaskGenerator:
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
         """Выбрать representative примеры, покрывающие максимум комбинаций параметров.
 
-        FIX 2026-05-25 20:26: в _visible_params заменен ex.get(key) на
-        self._get_example_value(ex, key), чтобы учитывать альтернативные имена
-        полей (длина_изделия, шаг_резьбы_1 и т.д.).
+        FIX 2026-05-27: _visible_params теперь использует _get_example_visible_params
+        и проверяет однозначность. Параметры с дублирующимися значениями не добавляются
+        в coverage, чтобы не искажать выбор representative examples.
         """
         if len(examples) <= max_count:
             return examples
 
+        check_keys = self.CHECK_KEYS
+
         def _visible_params(ex: Dict) -> set:
-            name = ex.get("наименование", ex.get("полное_наименование", ""))
-            if not name:
-                return set()
-            name_clean = re.sub(
-                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
-                '',
-                name,
-                flags=re.IGNORECASE
-            )
-            visible = set()
-            for key in ["тип_изделия", "исполнение", "толщина_проката_стенки_полки",
-                        "номинальный_диаметр_резьбы", "шаг_резьбы",
-                        "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-                        "длина", "покрытие", "толщина_покрытия",
-                        "группа_класс_прочности", "класс_поле_допуска", "свойства",
-                        "марка_материала", "марка_материала_1", "тип_резьбы"]:
-                if key in LLMMaskGenerator.SKIP_PARAMS:
-                    continue
-                # FIX 2026-05-25 20:26: используем _get_example_value для учета альтернативных имен
-                val = self._get_example_value(ex, key)
-                if not val:
-                    continue
-                val_str = str(val).strip()
-                if key == "тип_изделия":
-                    if name.lower().startswith(val_str.lower()):
-                        visible.add(key)
-                    continue
-                positions = LLMMaskGenerator._find_value_positions(val_str, name_clean, param_key=key)
-                if positions:
-                    visible.add(key)
-            return visible
+            vis = self._get_example_visible_params(ex, standard="", check_keys=check_keys)
+            # Удаляем неоднозначные ключи (те, у которых значение дублируется)
+            val_to_keys: Dict[str, List[str]] = {}
+            for k, v in vis.items():
+                val_to_keys.setdefault(v, []).append(k)
+            ambiguous_keys = set()
+            for v, keys in val_to_keys.items():
+                if len(keys) >= 2:
+                    for k in keys:
+                        ambiguous_keys.add(k)
+            return {k for k in vis if k not in ambiguous_keys}
 
         scored = [(ex, _visible_params(ex)) for ex in examples]
         scored.sort(key=lambda x: -len(x[1]))
@@ -334,57 +419,22 @@ class LLMMaskGenerator:
     def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
         """Форматировать ENS-примеры для вставки в промпт.
 
-        FIX 2026-05-27 11:15 UTC+3:
-        3. Добавлена проверка однозначности: если в примере два параметра имеют
-           одинаковое значение (например, номинальный_диаметр_резьбы=10 и
-           наружный_диаметр=10), пример считается неоднозначным и не участвует
-           в определении global_visible. Для "близнецов" (параметры, всегда
-           дублирующиеся во всех неоднозначных примерах) выбирается один.
+        FIX 2026-05-27: Переиспользует _get_example_visible_params и _resolve_twin_pairs.
+        Неоднозначные примеры пропускаются при определении global_visible.
+        Для "близнецов" (параметры, всегда дублирующиеся) выбирается один.
         """
         if not examples:
             return "(примеры отсутствуют)"
 
         display_examples = self._select_representative_examples(examples, max_count=10)
+        check_keys = self.CHECK_KEYS
 
-        check_keys = [
-            "тип_изделия", "исполнение",
-            "толщина_проката_стенки_полки",
-            "номинальный_диаметр_резьбы", "шаг_резьбы",
-            "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-            "длина",
-            "покрытие", "толщина_покрытия",
-            "группа_класс_прочности", "класс_поле_допуска", "свойства",
-            "марка_материала", "марка_материала_1", "тип_резьбы",
-        ]
-
-        # --- Шаг 1: определить видимые параметры с проверкой однозначности ---
-        def _get_visible_for_example(ex: Dict) -> Dict[str, str]:
-            """Вернуть {key: value} видимых параметров для примера."""
-            name = ex.get("наименование", ex.get("полное_наименование", ""))
-            if not name:
-                return {}
-            visible = {}
-            for key in check_keys:
-                if key in LLMMaskGenerator.SKIP_PARAMS:
-                    continue
-                if key == "тип_изделия":
-                    val = self._get_example_value(ex, key)
-                    if val and name.lower().startswith(str(val).strip().lower()):
-                        visible[key] = str(val).strip()
-                    continue
-                val = self._get_example_value(ex, key)
-                if not val:
-                    continue
-                val_str = str(val).strip()
-                if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
-                    visible[key] = val_str
-            return visible
-
-        unambiguous = []   # [(ex, {key: val})]
-        ambiguous = []     # [(ex, {key: val})]
+        # --- Шаг 1: разделить на однозначные и неоднозначные ---
+        unambiguous = []
+        ambiguous = []
 
         for ex in examples:
-            vis = _get_visible_for_example(ex)
+            vis = self._get_example_visible_params(ex, standard=standard, check_keys=check_keys)
             values = list(vis.values())
             if len(values) != len(set(values)):
                 ambiguous.append((ex, vis))
@@ -396,34 +446,10 @@ class LLMMaskGenerator:
         for ex, vis in unambiguous:
             global_visible.update(vis.keys())
 
-        # --- Шаг 2: обработка "близнецов" ---
-        twin_pairs = []
-        if ambiguous:
-            dup_stats = {}  # (k1, k2) -> count
-            for ex, vis in ambiguous:
-                val_to_keys = {}
-                for k, v in vis.items():
-                    val_to_keys.setdefault(v, []).append(k)
-                for v, keys in val_to_keys.items():
-                    if len(keys) >= 2:
-                        for i in range(len(keys)):
-                            for j in range(i + 1, len(keys)):
-                                pair = tuple(sorted([keys[i], keys[j]]))
-                                dup_stats[pair] = dup_stats.get(pair, 0) + 1
-
-            for pair, count in dup_stats.items():
-                if count == len(ambiguous):
-                    twin_pairs.append(pair)
-
-        keys_to_remove = set()
-        for k1, k2 in twin_pairs:
-            idx1 = check_keys.index(k1) if k1 in check_keys else 999
-            idx2 = check_keys.index(k2) if k2 in check_keys else 999
-            keep, remove = (k1, k2) if idx1 < idx2 else (k2, k1)
-            global_visible.add(keep)
-            keys_to_remove.add(remove)
-
-        global_visible -= keys_to_remove
+        # --- Шаг 2: обработка близнецов ---
+        keep, remove = self._resolve_twin_pairs(ambiguous, check_keys=check_keys)
+        global_visible |= keep
+        global_visible -= remove
         global_visible.add("тип_изделия")
         global_visible.add("нтд_1")
 
@@ -439,10 +465,10 @@ class LLMMaskGenerator:
             if not name:
                 continue
 
-            vis = _get_visible_for_example(ex)
+            vis = self._get_example_visible_params(ex, standard=standard, check_keys=check_keys)
 
             # Определяем неоднозначные ключи в этом примере
-            val_to_keys = {}
+            val_to_keys: Dict[str, List[str]] = {}
             for k, v in vis.items():
                 val_to_keys.setdefault(v, []).append(k)
             ambiguous_keys = set()
@@ -482,8 +508,8 @@ class LLMMaskGenerator:
                         m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
                         if m:
                             pos = name.lower().find(m.group().lower())
-                    if pos < 0:
-                        pos = 999
+                        if pos < 0:
+                            pos = 999
                     visible_list.append((key, val_str, pos))
                 else:
                     missing_list.append(key)
@@ -502,6 +528,7 @@ class LLMMaskGenerator:
             lines.append("")
 
         return "\n".join(lines)
+
     def _get_prompt_template(self) -> str:
         """Загрузить шаблон промпта."""
         if self.settings and hasattr(self.settings, "mask_generation"):
@@ -515,23 +542,35 @@ class LLMMaskGenerator:
                     return content
                 else:
                     logger.warning("[LLMMaskGenerator] prompt_template path not found: %s", template_path)
-        for path in [
-            "prompts/templates/mask_generation.txt",
-            "prompts/mask_generation.txt",
-            "config/mask_generation.txt",
-        ]:
-            p = Path(path)
-            if p.exists():
-                logger.info("[LLMMaskGenerator] Loaded prompt template from fallback %s", path)
-                return p.read_text(encoding="utf-8")
-        logger.warning("[LLMMaskGenerator] No template file found, using default")
-        return self._default_template()
+            for path in [
+                "prompts/templates/mask_generation.txt",
+                "prompts/mask_generation.txt",
+                "config/mask_generation.txt",
+            ]:
+                p = Path(path)
+                if p.exists():
+                    logger.info("[LLMMaskGenerator] Loaded prompt template from fallback %s", path)
+                    return p.read_text(encoding="utf-8")
+            logger.warning("[LLMMaskGenerator] No template file found, using default")
+            return self._default_template()
 
     def _default_template(self) -> str:
         r"""Default template with v3 rules."""
         return r"""Ты — эксперт по техническим стандартам ГОСТ/ОСТ/ТУ и регулярным выражениям Python 3 (re модуль).
 
-### === ЖЁСТКИЕ ЗАПРЕТЫ (нарушение = брак) ===
+=== ЗАДАЧА ===
+
+Создай regex-паттерн с named groups (?P<name>...) для извлечения параметров из строки номенклатуры.
+
+=== ПРИМЕРЫ ИЗ ЕНС ===
+
+{examples_text}
+
+=== СТАТИСТИКА ПАРАМЕТРОВ ===
+
+{stats_text}
+
+=== ЖЁСТКИЕ ЗАПРЕТЫ (нарушение = брак) ===
 
 1. **ТОЛЬКО ВИДИМЫЕ ПАРАМЕТРЫ**. Named group создаётся ТОЛЬКО если значение реально присутствует в исходной строке номенклатуры.
 2. **ИМЯ ГРУППЫ ТИПА ИЗДЕЛИЯ — СТРОГО `тип_изделия`**. Не `наименование_типа`, не `тип`, не `вид`. Только `тип_изделия`.
@@ -540,37 +579,66 @@ class LLMMaskGenerator:
 5. **НЕТ `standard` в `required`**. `standard` — метаданные, не извлекается из строки.
 6. **НЕТ `толщина_покрытия` в regex**, если в строке нет явного числа толщины.
 
-### === ПРАВИЛА РАЗДЕЛИТЕЛЕЙ ===
+=== ПРАВИЛА РАЗДЕЛИТЕЛЕЙ ===
+
 7. Разделители между параметрами: `[-\s]+` (тире, пробел, таб). Не используй `\s*` — оно не матчит тире!
 8. Десятичная точка/запятая: `(?:[.,]\d+)?` только внутри числовой группы. Пример: `\d+(?:[.,]\d+)?` для 12.5.
 
-### === КИРИЛЛИЦА В REGEX ===
+=== КИРИЛЛИЦА В REGEX ===
+
 9. **Шаг резьбы**: используй `[xXхХ×]` (включая кириллические х/Х и × U+00D7). Пример: `M12х1.5` должно матчиться.
 10. **Покрытие**: `[\w.]+` матчит кириллицу (включая "ОСТ"!). Поэтому покрытие должно строго предшествовать `нтд_1` в паттерне, или использовать негативный lookahead `(?!\w)`.
+11. **Класс допуска/прочности**: используй `[a-zA-Zа-яА-Я]+` вместо `[a-z]+` — в номенклатуре могут быть кириллические буквы (6г, 6Н).
 
-### === СТРУКТУРА ПАТТЕРНА ===
-11. Порядок групп: `тип_изделия` → `исполнение` (опц.) → числовые параметры → `покрытие` → `нтд_1`.
-12. Полная строка: `^...$` обязательно.
-13. Имена групп ≤30 символов, только [a-zA-Zа-яА-Я0-9_].
-14. **ЗАПРЕЩЕНЫ nested named groups**: `(?P(?P...))` — НЕВАЛИДНЫ в Python re. Используй `(?:...)` для вложенных групп.
+=== СТРУКТУРА ПАТТЕРНА ===
 
-### === ПРАВИЛО ТОЧКИ ===
-15. Точка `.` в номенклатуре:
-   - ДЕСЯТИЧНАЯ: если дробная часть имеет смысл (12.5 мм).
-   - РАЗДЕЛИТЕЛЬ: если после точки ровно 2 цифры-кода (100.58 → длина=100, группа=58).
-   - **ПРАВИЛО**: при сомнении разделяй: `(?P<длина>\d+)\.(?P<группа>\d+)` вместо `(?P<длина>\d+(?:[.,]\d+)?)`.
+12. Порядок групп: `тип_изделия` → `исполнение` (опц.) → числовые параметры → `покрытие` → `нтд_1`.
+13. Полная строка: `^...$` обязательно.
+14. Имена групп ≤30 символов, только [a-zA-Zа-яА-Я0-9_].
+15. **ЗАПРЕЩЕНЫ nested named groups**: `(?P<name>(?P<name2>...))` — НЕВАЛИДНЫ в Python re. Используй `(?:...)` для вложенных групп.
+16. **ЗАПРЕЩЕНЫ unbalanced parentheses**: каждая `(` должна иметь парную `)`.
 
-### === КРИТИЧНО: ФОРМАТ НТД_1 ===
-16. **Группа `нтд_1` ДОЛЖНА матчить ПОЛНОЕ название стандарта** из заголовка этого промпта.
-   - Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `(?P<нтд_1>ОСТ\s*1\s*33049-80)`
-   - Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)` или `(?P<нтд_1>ГОСТ\s*7795-70)`
-   - **ЗАПРЕЩЕНО** использовать `\d+` вместо `ОСТ`/`ГОСТ` — это сломает парсинг.
-17. **Пример правильного pattern для ОСТ 1 33049-80 / Гайка**:
+=== ПРАВИЛО ТОЧКИ ===
+
+17. Точка `.` в номенклатуре:
+    - ДЕСЯТИЧНАЯ: если дробная часть имеет смысл (12.5 мм).
+    - РАЗДЕЛИТЕЛЬ: если после точки ровно 2 цифры-кода (100.58 → длина=100, группа=58).
+    - **ПРАВИЛО**: при сомнении разделяй: `(?P<длина>\d+)\.(?P<группа>\d+)` вместо `(?P<длина>\d+(?:[.,]\d+)?)`.
+
+=== КРИТИЧНО: ФОРМАТ НТД_1 ===
+
+18. **Группа `нтд_1` ДОЛЖНА матчить ПОЛНОЕ название стандарта** из заголовка этого промпта.
+    - Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `(?P<нтд_1>ОСТ\s*1\s*33049-80)`
+    - Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)` или `(?P<нтд_1>ГОСТ\s*7795-70)`
+    - **ЗАПРЕЩЕНО** использовать `\d+` вместо `ОСТ`/`ГОСТ` — это сломает парсинг.
+
+=== ПРАВИЛО ОПЦИОНАЛЬНЫХ ПАРАМЕТРОВ ===
+
+В примерах ниже параметры помечены как:
+- Видимые: (?P<name>value) — присутствуют в этом примере
+- Отсутствуют: name1, name2 — есть в других примерах, но не в этом
+
+Если параметр "Отсутствует" в части примеров — он ОПЦИОНАЛЬНЫЙ.
+Используй (?P<name>...)? для опциональных параметров.
+
+=== ПРИМЕРЫ ПРАВИЛЬНЫХ ПАТТЕРНОВ ===
+
+**ОСТ 1 33049-80 / Гайка** (без шага, без исполнения):
 ```
-^(?P<тип_изделия>Гайка)\s*(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?\s*[-\s]+(?P<покрытие>[\w.]+)\s*[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
+^(?P<тип_изделия>Гайка)[-\s]+(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
 ```
 
-### === ФОРМАТ ОТВЕТА ===
+**ГОСТ 7795-70 / Болт** (с классом допуска, длиной, покрытием):
+```
+^(?P<тип_изделия>Болт)[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_поле_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)?[-\s]*(?P<нтд_1>ГОСТ\s*7795-70)$
+```
+
+**ОСТ 1 31133-80 / Болт** (с исполнением, покрытием):
+```
+^(?P<тип_изделия>Болт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
+```
+
+=== ФОРМАТ ОТВЕТА ===
 
 ```json
 {
@@ -583,7 +651,7 @@ class LLMMaskGenerator:
 - `params`: ВСЕ named group имена (только видимые в строке).
 - `required`: обязательные параметры (все кроме опциональных: исполнение, шаг_резьбы).
 
-### === ПРОВЕРКА ПЕРЕД ОТВЕТОМ ===
+=== ПРОВЕРКА ПЕРЕД ОТВЕТОМ ===
 
 Перед выводом JSON проверь:
 - [ ] Все группы из `params` реально видны в примерах?
@@ -591,10 +659,11 @@ class LLMMaskGenerator:
 - [ ] `standard` НЕТ в `required`?
 - [ ] `исполнение` есть только если в примерах есть `(N)`?
 - [ ] Шаг резьбы использует `[xXхХ×]`?
-- [ ] Покрытие не перехватывает `ОСТ`?
+- [ ] Покрытие не перехватывает `ОСТ`/`ГОСТ`?
 - [ ] `нтд_1` содержит полное название стандарта (`ОСТ 1 XXXXX-80` или `ГОСТ XXXX-XX`), а НЕ `\d+`?
 - [ ] `^` и `$` присутствуют?
-- [ ] НЕТ nested named groups `(?P(?P ...))`?
+- [ ] НЕТ nested named groups `(?P<a>(?P<b>...))`?
+- [ ] НЕТ unbalanced parentheses?
 - [ ] Pattern компилируется в Python re без ошибок?
 
 === СТРОГОЕ СООТВЕТСТВИЕ ===
@@ -673,40 +742,33 @@ class LLMMaskGenerator:
         return prompt
 
     def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
-        """Извлечь список глобально видимых параметров из ENS-примеров."""
+        """Извлечь список глобально видимых параметров из ENS-примеров.
+
+        FIX 2026-05-27: Теперь использует _get_example_visible_params и
+        _resolve_twin_pairs. Неоднозначные примеры пропускаются.
+        """
         if not examples:
             return ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
 
-        check_keys = [
-            "тип_изделия", "исполнение",
-            "толщина_проката_стенки_полки",
-            "номинальный_диаметр_резьбы", "шаг_резьбы",
-            "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-            "длина",
-            "покрытие", "толщина_покрытия",
-            "группа_класс_прочности", "класс_поле_допуска", "свойства",
-            "марка_материала", "марка_материала_1", "тип_резьбы",
-        ]
+        check_keys = self.CHECK_KEYS
+        unambiguous = []
+        ambiguous = []
+
+        for ex in examples:
+            vis = self._get_example_visible_params(ex, standard="", check_keys=check_keys)
+            values = list(vis.values())
+            if len(values) != len(set(values)):
+                ambiguous.append((ex, vis))
+            else:
+                unambiguous.append((ex, vis))
 
         global_visible = set()
-        for ex in examples:
-            name = ex.get("наименование", ex.get("полное_наименование", ""))
-            if not name:
-                continue
-            for key in check_keys:
-                if key == "наименование_типа":
-                    continue
-                val = self._get_example_value(ex, key)
-                if not val:
-                    continue
-                val_str = val.strip()
-                if key == "тип_изделия":
-                    if name.lower().startswith(val_str.lower()):
-                        global_visible.add(key)
-                    continue
-                if self._is_value_in_name(val_str, name, param_key=key):
-                    global_visible.add(key)
+        for ex, vis in unambiguous:
+            global_visible.update(vis.keys())
 
+        keep, remove = self._resolve_twin_pairs(ambiguous, check_keys=check_keys)
+        global_visible |= keep
+        global_visible -= remove
         global_visible.add("тип_изделия")
         global_visible.add("нтд_1")
         return list(global_visible)
@@ -989,6 +1051,7 @@ class LLMMaskGenerator:
         pattern = pattern.replace('\\"', '"')
         pattern = pattern.replace('\\n', '\n')
         pattern = pattern.replace('\\t', ' ')
+        pattern = pattern.replace('\t', ' ')
 
         params = _find_array(text, '"params"')
         required = _find_array(text, '"required"')
@@ -1129,8 +1192,8 @@ class LLMMaskGenerator:
                                 except Exception:
                                     pass
                             break
-                if data is not None:
-                    break
+                    if data is not None:
+                        break
 
         if data is None:
             json_match = re.search(r"\{.*?\}", text, re.DOTALL)
@@ -1205,14 +1268,14 @@ class LLMMaskGenerator:
         """Исправить типичные ошибки LLM в regex."""
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(
-                r"\(\?P<нтд_1>\d+[^\)]*\)",
+                r"\(?P<нтд_1>\d+[^\)]*\)",
                 f"(?P<нтд_1>{re.escape(standard)})",
                 pattern
             )
             logger.info("[LLMMaskGenerator] Fixed нтд_1 for ОСТ standard")
         if "ГОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(
-                r"\(\?P<нтд_1>\d+[^\)]*\)",
+                r"\(?P<нтд_1>\d+[^\)]*\)",
                 f"(?P<нтд_1>{re.escape(standard)})",
                 pattern
             )
@@ -1225,8 +1288,8 @@ class LLMMaskGenerator:
             logger.info("[LLMMaskGenerator] Fixed тип_изделия name")
 
         nested_fix = re.sub(
-            r'\(\?P<([^>]+)>\(\(\?P<[^>]+>[^)]+\)\)',
-            lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\(\?P<[^>]+>", "(?:", m.group(2))}))',
+            r'\(?P<([^>]+)>\((\(?P<[^>]+>[^)]+\)\)',
+            lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\(?P<[^>]+>", "(?:", m.group(2))}))',
             pattern
         )
         if nested_fix != pattern:
@@ -1236,8 +1299,8 @@ class LLMMaskGenerator:
         max_iter = 5
         for _ in range(max_iter):
             new_pattern = re.sub(
-                r'\(\?P<([^>]+)>\(([^()]*\(\?P<[^)]+\)[^()]*)\)',
-                lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\(\?P<[^>]+>", "(?:", m.group(2))}))',
+                r'\(?P<([^>]+)>\(([^()]*\(?P<[^)]+\)[^()]*)\)',
+                lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\(?P<[^>]+>", "(?:", m.group(2))}))',
                 pattern
             )
             if new_pattern == pattern:
@@ -1259,13 +1322,13 @@ class LLMMaskGenerator:
                 logger.info("[LLMMaskGenerator] Sanitized: removed metadata param %s", sp)
             if sp in required:
                 required.remove(sp)
-            pattern = re.sub(rf'\(\?P<{re.escape(sp)}>[^)]+\)\??', '', pattern)
+            pattern = re.sub(rf'\(?P<{re.escape(sp)}>[^)]+\)\??', '', pattern)
 
         if "тип_изделия" in params and "наименование_типа" in params:
             params.remove("наименование_типа")
             if "наименование_типа" in required:
                 required.remove("наименование_типа")
-            pattern = re.sub(r"\(\?P<наименование_типа>[^)]+\)(?:\s*[-\s]*)?", "", pattern)
+            pattern = re.sub(r"\(?P<наименование_типа>[^)]+\)(?:\s*[-\s]*)?", "", pattern)
             logger.info("[LLMMaskGenerator] Sanitized: removed duplicate наименование_типа")
 
         typo_fixes = {
@@ -1283,7 +1346,7 @@ class LLMMaskGenerator:
         required = [p for p in required if p in params]
 
         try:
-            pattern = re.sub(r"\(\?P<[^>]+>\)\?", "", pattern)
+            pattern = re.sub(r"\(?P<[^>]+>\)\?", "", pattern)
         except re.error:
             pass
 
