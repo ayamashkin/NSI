@@ -370,6 +370,7 @@ class LLMMaskGenerator:
         item_type: str,
         unambiguous: List[Tuple[Dict, Dict[str, str]]],
         global_visible: set,
+        twin_groups: List[List[str]],
     ) -> str:
         if not examples or not unambiguous:
             return "(примеры отсутствуют)"
@@ -623,7 +624,7 @@ class LLMMaskGenerator:
         unambiguous, ambiguous = self._filter_unambiguous(examples, twin_groups, standard=standard)
         required, optional = self._get_global_visible(unambiguous)
         global_visible = (required | optional) - self._SKIP_META_PARAMS
-        examples_text = self._format_examples(examples, standard, item_type, unambiguous, global_visible)
+        examples_text = self._format_examples(examples, standard, item_type, unambiguous, global_visible, twin_groups)
         stats_text = self._format_stats(unambiguous, global_visible)
         service, model, temperature = self._resolve_service()
 
