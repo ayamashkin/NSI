@@ -305,25 +305,22 @@ class LLMMaskGenerator:
 
     def _format_stats(
         self,
-        examples: List[Dict],
-        standard: str = "",
+        unambiguous: List[Tuple[Dict, Dict[str, str]]],
+        global_visible: set,
     ) -> str:
-        if not examples:
+        if not unambiguous:
             return "(нет данных)"
-        twin_groups = self._get_twin_groups(standard, examples[0].get("_meta", {}).get("item_type", ""))
-        unambiguous, _ = self._filter_unambiguous(examples, twin_groups, standard=standard)
-        required, optional = self._get_global_visible(unambiguous)
-        global_visible = required | optional
         param_counts: Dict[str, int] = {}
         for ex, vis in unambiguous:
             for key in vis:
                 if key in global_visible:
                     param_counts[key] = param_counts.get(key, 0) + 1
-        total = len(examples)
+        total = len(unambiguous)
         lines = []
+        lines.append(f"(по {total} однозначным примерам)")
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
             lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
-        return "\n".join(lines) if lines else "(нет параметров)"
+        return "\n".join(lines) if len(lines) > 1 else "(нет параметров)"
 
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
         if len(examples) <= max_count:
@@ -363,26 +360,27 @@ class LLMMaskGenerator:
                         break
         return selected
 
+    # Параметры, которые никогда не должны появляться в "Параметры из ЕНС"
+    _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2"}
+
     def _format_examples(
         self,
         examples: List[Dict],
         standard: str,
         item_type: str,
+        unambiguous: List[Tuple[Dict, Dict[str, str]]],
+        global_visible: set,
     ) -> str:
-        if not examples:
+        if not examples or not unambiguous:
             return "(примеры отсутствуют)"
-
-        twin_groups = self._get_twin_groups(standard, item_type)
-        unambiguous, ambiguous = self._filter_unambiguous(examples, twin_groups, standard=standard)
-        required, optional = self._get_global_visible(unambiguous)
-        global_visible = required | optional
 
         # Используем ТОЛЬКО однозначные примеры для отображения в промпте
         unambiguous_examples = [ex for ex, _ in unambiguous]
         display_examples = self._select_representative_examples(unambiguous_examples, max_count=10)
+        total_unambiguous = len(unambiguous_examples)
         logger.info(
-            "[LLMMaskGenerator] Format examples: %d unambiguous, %d ambiguous, %d display",
-            len(unambiguous_examples), len(ambiguous), len(display_examples))
+            "[LLMMaskGenerator] Format examples: %d displayed (of %d unambiguous)",
+            len(display_examples), total_unambiguous)
 
         lines = []
         lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
@@ -620,8 +618,13 @@ class LLMMaskGenerator:
     def _build_prompt(self, standard: str, item_type: str, examples: List[Dict],
                       name: str = "", standard_info: Any = None) -> str:
         template = self._get_prompt_template()
-        examples_text = self._format_examples(examples, standard, item_type)
-        stats_text = self._format_stats(examples, standard)
+        # Вычисляем всё один раз
+        twin_groups = self._get_twin_groups(standard, item_type)
+        unambiguous, ambiguous = self._filter_unambiguous(examples, twin_groups, standard=standard)
+        required, optional = self._get_global_visible(unambiguous)
+        global_visible = (required | optional) - self._SKIP_META_PARAMS
+        examples_text = self._format_examples(examples, standard, item_type, unambiguous, global_visible)
+        stats_text = self._format_stats(unambiguous, global_visible)
         service, model, temperature = self._resolve_service()
 
         replacements = {
