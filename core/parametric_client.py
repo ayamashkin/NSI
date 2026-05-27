@@ -45,7 +45,7 @@ def _get_matching_config():
     global _matching_config
     if _matching_config is None:
         try:
-            from config.settings import get_settings
+            from core.settings import get_settings
             _matching_config = get_settings().matching
             logger.debug("[MATCHING] Loaded from settings.matching")
         except Exception as e:
@@ -108,7 +108,7 @@ def _get_empty_equivalent_values() -> set:
         if _empty_values_cache is not None:
             return _empty_values_cache
         try:
-            from config.settings import get_settings
+            from core.settings import get_settings
             settings = get_settings()
             empty_values = settings.empty_values
             all_values = set()

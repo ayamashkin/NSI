@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 
 # Импортируем из существующей системы
-from config.settings import get_settings, PromptConfig
+from core.settings import get_settings, PromptConfig
 from utils.excel_loader import NomenclatureItem
 from core.database import DatabaseManager
 

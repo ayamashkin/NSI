@@ -45,7 +45,7 @@ def _get_matching_config():
     global _matching_config
     if _matching_config is None:
         try:
-            from config.settings import get_settings
+            from core.settings import get_settings
             _matching_config = get_settings().matching
             logger.debug("[MATCHING] Loaded from settings.matching")
         except Exception as e:
@@ -597,7 +597,7 @@ class AutomatedParametricProcessor:
                 return self._coating_rules_cache
 
             try:
-                from config.settings import get_settings
+                from core.settings import get_settings
                 settings = get_settings()
                 coating_rules = getattr(settings, 'coating_rules', None)
                 if coating_rules:

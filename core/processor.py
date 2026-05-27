@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict, Any, Callable
 from tqdm import tqdm
 
-from config.settings import get_settings, PromptConfig
+from core.settings import get_settings, PromptConfig
 from utils.excel_loader import  NomenclatureItem
 from core.database import DatabaseManager
 

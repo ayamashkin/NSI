@@ -21,7 +21,7 @@ from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 
 from utils.standard_utils import canonicalize_standard
-from config.settings import setup_logging
+from core.settings import setup_logging
 from core.domain_config import DomainConfig
 from core.ens_index_builder import ENSIndexBuilder
 
@@ -86,7 +86,7 @@ def cli(ctx, config):
 @cli.command()
 def prompts():
     """Вывод списка доступных промптов"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     settings = get_settings()
     click.echo("📋 Доступные промпты:")
     for pid, cfg in settings.prompts.items():
@@ -106,7 +106,7 @@ def prompts():
 @click.pass_context
 def process(ctx, input_file, prompt, auto, workers, force):
     """Обработка номенклатуры через LLM (legacy mode)"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     from core.database import DatabaseManager
     from core.processor import NomenclatureProcessor, load_excel_items
     from utils.excel_loader import ExcelLoader
@@ -143,7 +143,7 @@ def process(ctx, input_file, prompt, auto, workers, force):
 @click.option('--include-full-request', is_flag=True, help='Включить full_request')
 def export(output, structure, prompt, status, include_raw, include_full_request):
     """Экспорт результатов в JSON"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     from core.database import DatabaseManager
     settings = get_settings()
     db = DatabaseManager(settings.database.path)
@@ -161,7 +161,7 @@ def export(output, structure, prompt, status, include_raw, include_full_request)
 @cli.command()
 def stats():
     """Статистика обработки в БД"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     from core.database import DatabaseManager
     settings = get_settings()
     db = DatabaseManager(settings.database.path)
@@ -183,7 +183,7 @@ def stats():
 @click.option('--prompt', '-p', help='Фильтр по ID промпта')
 def errors(limit, prompt):
     """Показать ошибки обработки"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     from core.database import DatabaseManager
     settings = get_settings()
     db = DatabaseManager(settings.database.path)
@@ -202,7 +202,7 @@ def errors(limit, prompt):
 @click.argument('text')
 def detect(text):
     """Определить категорию номенклатуры"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     settings = get_settings()
     click.echo(f"🔍 Анализ: {text}")
     for pid, cfg in settings.prompts.items():
@@ -225,7 +225,7 @@ def detect(text):
 @click.option('--api', 'api_name', help='Название API')
 def models(api_name):
     """Вывод списка моделей API"""
-    from config.settings import get_settings
+    from core.settings import get_settings
     settings = get_settings()
     services = [api_name] if api_name else list(settings.api.keys())
     for service in services:
@@ -349,7 +349,7 @@ def process_parametric(text, db, ens_index, llm, domain):
     """Обработка одной номенклатуры параметрическим методом"""
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
-    from config.settings import get_settings
+    from core.settings import get_settings
     llm_clients = {}
     settings = get_settings()
     if llm:
@@ -409,7 +409,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     from tqdm import tqdm
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
-    from config.settings import get_settings
+    from core.settings import get_settings
     # Автоопределение пути к индексу из доменного конфига
     if not ens_index and domain and not auto_domain:
         cfg = DomainConfig.load(domain)
@@ -635,7 +635,7 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
     from core.quality_analyzer import QualityAnalyzer
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
-    from config.settings import get_settings
+    from core import get_settings
     settings = get_settings()
     include_details = None
     try:
@@ -693,7 +693,7 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
     from core.mask_database import MaskDatabase
     from core.automated_processor import AutomatedParametricProcessor
     from core.parametric_client import ParametricENSClient
-    from config.settings import get_settings
+    from core.settings import get_settings
     settings = get_settings()
     include_details = None
     try:
@@ -813,7 +813,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
     from core.mask_database import MaskDatabase, MaskRecord
     from core.llm_mask_generator import LLMMaskGenerator
     from core.auto_validator import AutoValidator
-    from config.settings import get_settings
+    from core.settings import get_settings
     from pathlib import Path
     import pickle
     # Автоопределение пути к индексу из доменного конфига

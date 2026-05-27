@@ -11,7 +11,7 @@
 # FIX 2026-05-22 09:36 UTC+3:
 # 1. Fixed SQL schema syntax (created_at, last_used, pattern_hash).
 # 2. Added created_at update on INSERT (CURRENT_TIMESTAMP).
-# 3. Uses config.settings.DatabaseConfig.path for DB path.
+# 3. Uses core.settings.DatabaseConfig.path for DB path.
 # 4. Fixed regex typos (Y,\. -> [,\.]).
 # 5. Fixed fix_gost_7795 pattern (removed leading \\n, fixed item_type).
 # =============================================================================
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def get_db_path():
     """Find the mask database file via settings or fallback."""
     try:
-        from config.settings import get_settings
+        from core.settings import get_settings
         settings = get_settings()
         db_path = settings.database.path
         if Path(db_path).exists():
