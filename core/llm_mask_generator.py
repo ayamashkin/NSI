@@ -127,7 +127,7 @@ class LLMMaskGenerator:
             "толщина_покрытия": ["толщина_покр", "покрытие_толщина"],
             "шаг_резьбы": ["шаг", "шаг_резьбы_1"],
             "длина": ["длина_изделия", "l"],
-            "номинальный_диаметр_резьбы": ["диаметр", "d", "номинальный_диаметр"],
+            "номинальный_диаметр_резьбы": ["номинальный_диаметр"],  # FIX 2026-05-27: убраны "диаметр"/"d" — в ENS это часто наружный диаметр, что приводит к семантическому смешению с номинальным диаметром резьбы
         }
 
         for alt in alt_map.get(key, []):
@@ -905,7 +905,7 @@ class LLMMaskGenerator:
         if not raw_pattern:
             return None
 
-        pattern = raw_pattern.replace('\\\', '\')
+        pattern = raw_pattern.replace(r'\\', '\\')
         pattern = pattern.replace('\\"', '"')
         pattern = pattern.replace('\\n', '\n')
         pattern = pattern.replace('\\t', ' ')

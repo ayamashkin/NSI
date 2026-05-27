@@ -231,7 +231,7 @@ cd nomenclature-processor
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # или
-.venv\Scriptsctivate   # Windows
+.venv\Scripts\Activate   # Windows
 
 # Установка зависимостей
 pip install -r requirements.txt
