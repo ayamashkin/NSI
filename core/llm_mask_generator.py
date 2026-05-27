@@ -2,10 +2,10 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-27 21:15:00 — FIX: _extract_json_fields now decodes JSON string escapes via json.loads
-# 2026-05-27 21:15:00 — Removed broken chr(92)*3 replacement and double-slash fixes
-# 2026-05-27 21:15:00 — _parse_mask_response: unified JSON decoding for all extraction paths
-# 2026-05-27 18:15:00 — FIX SyntaxError: r'\\\' -> safe chr(92)*3
+# 2026-05-27 21:52:00 — Упрощён промпт: 6 правил вместо 18, убраны избыточные секции
+# 2026-05-27 21:52:00 — _default_template сокращён до критичных правил + примеры
+# 2026-05-27 21:15:00 — FIX: _extract_json_fields декодирует JSON escapes через json.loads
+# 2026-05-27 21:15:00 — _build_meta_groups_rules для подстановки meta-групп из домена
 # 2026-05-27 18:15:00 — Added domain prompt_template support
 # =============================================================================
 """
@@ -113,7 +113,6 @@ class LLMMaskGenerator:
         """Get examples from domain index."""
         entry = self._get_index_entry(standard, item_type)
         if not entry:
-            # Fallback: legacy validator
             validator = self._get_validator()
             if validator:
                 try:
@@ -139,20 +138,14 @@ class LLMMaskGenerator:
         return {}
 
     def _get_visible_params_from_index(self, standard: str, item_type: str) -> Tuple[set, set]:
-        """Get required/optional from index (visible_fields).
-
-        Returns only parameters actually present in visible_fields of the index.
-        Does NOT artificially add нтд_1 or тип_изделия — they are handled separately.
-        """
+        """Get required/optional from index (visible_fields)."""
         entry = self._get_index_entry(standard, item_type)
         if not entry:
             return set(), set()
         stats = entry.get("stats", {})
         visible = set(stats.get("visible_fields", []))
-        # metadata fields do not participate in regex
         metadata = set(stats.get("metadata_fields", []))
         visible = visible - metadata - self.SKIP_PARAMS
-        # Split into required (visible in >=85%) and optional
         total = stats.get("total", 0)
         if total == 0:
             return visible, set()
@@ -185,7 +178,6 @@ class LLMMaskGenerator:
 
     @staticmethod
     def _is_value_in_name(val: str, name: str, param_key: str = "", standard: str = "") -> bool:
-        """Check that parameter value is present in the nomenclature string."""
         if not val or not name:
             return False
         if param_key in {"марка_материала", "толщина_покрытия", "наличие_бп",
@@ -235,7 +227,6 @@ class LLMMaskGenerator:
         twin_groups: List[List[str]],
         standard: str = "",
     ) -> Tuple[List[Tuple[Dict, Dict[str, str]]], List[Tuple[Dict, Dict[str, str]]]]:
-        """Split examples into unambiguous and ambiguous."""
         unambiguous = []
         ambiguous = []
         for ex in examples:
@@ -252,7 +243,6 @@ class LLMMaskGenerator:
                     continue
                 if self._is_value_in_name(str(v), name, param_key=k, standard=standard):
                     vis[k] = str(v)
-            # resolve twins
             twin_map = {}
             for group in twin_groups:
                 can = group[0]
@@ -280,11 +270,6 @@ class LLMMaskGenerator:
         unambiguous: List[Tuple[Dict, Dict[str, str]]],
         threshold: float = 0.85,
     ) -> Tuple[set, set]:
-        """Determine globally visible parameters from unambiguous examples.
-
-        Does NOT artificially add нтд_1 or тип_изделия.
-        These parameters are handled separately in the regex template.
-        """
         if not unambiguous:
             return set(), set()
         total = len(unambiguous)
@@ -316,10 +301,10 @@ class LLMMaskGenerator:
                     param_counts[key] = param_counts.get(key, 0) + 1
         total = len(unambiguous)
         lines = []
-        lines.append(f"(based on {total} unambiguous examples)")
+        lines.append(f"(по {total} однозначным примерам)")
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
-            lines.append(f" {key}: {count} of {total} ({count/total*100:.0f}%)")
-        return "\n".join(lines) if len(lines) > 1 else "(no parameters)"
+            lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
+        return "\n".join(lines) if len(lines) > 1 else "(нет параметров)"
 
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
         if len(examples) <= max_count:
@@ -359,7 +344,6 @@ class LLMMaskGenerator:
                         break
         return selected
 
-    # Parameters that must never appear in "Parameters from ENS"
     _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2"}
 
     def _format_examples(
@@ -371,7 +355,7 @@ class LLMMaskGenerator:
         global_visible: set,
     ) -> str:
         if not examples or not unambiguous:
-            return "(no examples)"
+            return "(нет примеров)"
 
         unambiguous_examples = [ex for ex, _ in unambiguous]
         display_examples = self._select_representative_examples(unambiguous_examples, max_count=10)
@@ -381,10 +365,10 @@ class LLMMaskGenerator:
             len(display_examples), total_unambiguous)
 
         lines = []
-        lines.append(f"Structure: <{item_type}> [execution] <parameters> <coating> {standard}")
+        lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
         lines.append("")
         display_params = sorted(global_visible)
-        lines.append(f"Parameters participating in the name: {', '.join(display_params)}")
+        lines.append(f"Параметры, участвующие в наименовании: {', '.join(display_params)}")
         lines.append("")
 
         twin_groups = self._get_twin_groups(standard, item_type)
@@ -454,41 +438,18 @@ class LLMMaskGenerator:
 
             visible_list.sort(key=lambda x: x[2])
 
-            lines.append(f'{i}. Source: "{name}"')
+            lines.append(f'{i}. Исходное: "{name}"')
             if visible_list:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible_list])
-                lines.append(f" Visible: {vis_str}")
+                lines.append(f" Видимые: {vis_str}")
             if ambiguous_list:
                 amb_str = " ".join([f"(?P<{k}>{v})" for k, v in ambiguous_list])
-                lines.append(f" Ambiguous: {amb_str}")
+                lines.append(f" Неоднозначные: {amb_str}")
             if missing_list:
-                lines.append(f" Missing: {', '.join(missing_list)}")
+                lines.append(f" Отсутствуют: {', '.join(missing_list)}")
             lines.append("")
 
         return "\n".join(lines)
-
-
-    def _build_meta_groups_rules(self, standard: str) -> str:
-        """Build meta groups description from domain config."""
-        try:
-            from core.domain_config import DomainConfig
-            cfg = DomainConfig.load(self.domain)
-            groups = cfg.meta_regex_groups
-        except Exception:
-            groups = ["тип_изделия", "нтд_1"]
-        lines = []
-        for g in groups:
-            if g == "тип_изделия":
-                lines.append(f"- `{g}` всегда добавляется в начало паттерна (имя изделия: Болт, Гайка, Шайба...)")
-            elif g == "нтд_1":
-                lines.append(f"- `{g}` всегда добавляется в конец паттерна (стандарт: ГОСТ 7798-70, ОСТ 1 31133-80...)")
-            else:
-                lines.append(f"- `{g}` — техническая regex-группа")
-        lines.append("")
-        lines.append("Они НЕ должны появляться в списке "Параметры из ЕНС" и НЕ должны учитываться")
-        lines.append("в статистике заполнения — они не являются полями базы данных.")
-        return "
-".join(lines)
 
     def _get_prompt_template(self) -> str:
         """Get prompt template: domain priority, then base."""
@@ -533,102 +494,102 @@ class LLMMaskGenerator:
         return self._default_template()
 
     def _default_template(self) -> str:
-        return r"""You are an expert in GOST/OST/TU technical standards and Python 3 regular expressions (re module).
+        return r"""Ты — эксперт по регулярным выражениям Python 3 (re модуль).
 
-=== TASK ===
+=== ЗАДАЧА ===
 
-Create a regex pattern with named groups (?P<name>...) for extracting parameters from a nomenclature string.
+Создай regex-паттерн с named groups (?P<name>...) для извлечения параметров из строки номенклатуры.
 
-=== EXAMPLES FROM ENS ===
+Стандарт: {standard}
+Тип изделия: {item_type}
+
+=== ВИДИМЫЕ ПАРАМЕТРЫ ИЗ ЕНС ===
+
+{params_list}
+
+=== ПРИМЕРЫ НОМЕНКЛАТУРЫ ===
 
 {examples_text}
 
-=== PARAMETER STATISTICS ===
+=== ПРАВИЛА (только 6 штук) ===
 
-{stats_text}
+1. **Разделители — строго `[-\s]+`**. Между ЛЮБЫМИ параметрами используй `[-\s]+` (тире ИЛИ пробел). НИКОГДА не используй `\s+` отдельно — оно не ловит тире.
+2. **Порядок групп**: `тип_изделия` → `исполнение` (если есть в примерах) → числовые параметры → `покрытие` → `нтд_1`.
+3. **Исполнение опциональное**: `(?:\(?(?P<исполнение>\d+)\)?)?` — только если в примерах есть `(N)`.
+4. **Покрытие**: `[\w.]+` (включает точки и кириллицу). Должно стоять ДО `нтд_1`.
+5. **НТД_1**: полное название стандарта. Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)`. Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
+6. **Полная строка**: `^...$` обязательно. НЕТ nested named groups `(?P<a>(?P<b>...))`.
 
-=== HARD PROHIBITIONS (violation = reject) ===
+=== ПРИМЕРЫ ПРАВИЛЬНЫХ ПАТТЕРНОВ ===
 
-1. **ONLY VISIBLE PARAMETERS**. Named group is created ONLY if the value is actually present in the source nomenclature string.
-2. **PRODUCT TYPE GROUP NAME — STRICTLY `тип_изделия`**. Not `наименование_типа`, not `тип`, not `вид`. Only `тип_изделия`.
-3. **NO `исполнение` GROUP**, if there are no variants with `(N)` or `N-` after the product type in the examples. If execution exists — optional group `(?:\(?(?P<исполнение>\d+)\)?)?`.
-4. **NO `технические_характеристики` as a separate group**. If the string contains only coating (Бп, Кд, Хим.Пас) — use only `покрытие`.
-5. **NO `standard` in `required`**. `standard` is metadata, not extracted from the string.
-6. **NO `толщина_покрытия` in regex**, if there is no explicit coating thickness number in the string.
+**ОСТ 1 31133-80 / Болт** (с исполнением, покрытием):
+```
+^(?P<тип_изделия>Болт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
+```
 
-=== DELIMITER RULES ===
+**ОСТ 1 33049-80 / Гайка** (без шага, без исполнения):
+```
+^(?P<тип_изделия>Гайка)[-\s]+(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
+```
 
-7. Parameter delimiters: `[-\s]+` (hyphen, space, tab). Do not use `\s*` — it does not match hyphens!
-8. Decimal point/comma: `(?:[.,]\d+)?` only inside numeric group. Example: `\d+(?:[.,]\d+)?` for 12.5.
+**ГОСТ 7798-70 / Болт** (с классом допуска, длиной, покрытием):
+```
+^(?P<тип_изделия>Болт)[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_поле_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)?[-\s]*(?P<нтд_1>ГОСТ\s*7798-70)$
+```
 
-=== CYRILLIC IN REGEX ===
+**ГОСТ 7795-70 / Болт** (длина.группа.код: 45.46.019):
+```
+^(?P<тип_изделия>Болт)[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_поле_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+)\.(?P<группа_прочности>\d+)\.(?P<код_покрытия>\d+)[-\s]*(?P<нтд_1>ГОСТ\s*7795-70)$
+```
 
-9. **Thread pitch**: use `[xXхХ×]` (including Cyrillic х/Х and × U+00D7). Example: `M12х1.5` must match.
-10. **Coating**: `[\w.]+` matches Cyrillic (including "ОСТ"!). Therefore coating must strictly precede `нтд_1` in the pattern, or use negative lookahead `(?!\w)`.
-11. **Tolerance class / Strength class**: use `[a-zA-Zа-яА-Я]+` instead of `[a-z]+` — nomenclature may contain Cyrillic letters (6г, 6Н).
+**ОСТ 1 34507-80 / Шайба** (толщина — ном. диаметр — наружный диаметр):
+```
+^(?P<тип_изделия>Шайба)[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)[-\s]+(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]*(?P<нтд_1>ОСТ\s*1\s*34507-80)$
+```
 
-=== PATTERN STRUCTURE ===
+**Винт ОСТ 1 31502-80 / Винт** (с исполнением, покрытием):
+```
+^(?P<тип_изделия>Винт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31502-80)$
+```
 
-12. Group order: `тип_изделия` -> `исполнение` (opt.) -> numeric parameters -> `покрытие` -> `нтд_1`.
-13. Full string: `^...$` mandatory.
-14. Group names ≤30 characters, only [a-zA-Zа-яА-Я0-9_].
-15. **FORBIDDEN nested named groups**: `(?P<name>(?P<name2>...))` — INVALID in Python re. Use `(?:...)` for nested groups.
-16. **FORBIDDEN unbalanced parentheses**: each `(` must have a matching `)`.
+**Винт ОСТ 1 31503-80 / Винт** (без исполнения, с покрытием):
+```
+^(?P<тип_изделия>Винт)[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31503-80)$
+```
 
-=== DOT RULE ===
+=== ФОРМАТ ОТВЕТА ===
 
-17. Dot `.` in nomenclature:
-    - DECIMAL: if fractional part makes sense (12.5 mm).
-    - SEPARATOR: if exactly 2 digit-codes follow the dot (100.58 -> length=100, group=58).
-    - **RULE**: when in doubt, split: `(?P<длина>\d+)\.(?P<группа>\d+)` instead of `(?P<длина>\d+(?:[.,]\d+)?)`.
-
-=== CRITICAL: НТД_1 FORMAT ===
-
-18. **Group `нтд_1` MUST match the FULL standard name** from the header of this prompt.
-    - For ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` or `(?P<нтд_1>ОСТ\s*1\s*33049-80)`
-    - For ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)` or `(?P<нтд_1>ГОСТ\s*7795-70)`
-    - **FORBIDDEN** to use `\d+` instead of `ОСТ`/`ГОСТ` — this breaks parsing.
-
-=== OPTIONAL PARAMETERS RULE ===
-
-In the examples below parameters are marked as:
-- Visible: (?P<name>value) — present in this example
-- Missing: name1, name2 — present in other examples, but not in this one
-
-If a parameter is "Missing" in some examples — it is OPTIONAL.
-Use (?P<...>)? for optional parameters.
-
-=== FORMAT ANSWER ===
+Выведи ТОЛЬКО JSON, без markdown, без объяснений:
 
 ```json
 {
   "pattern": "^...$",
-  "params": ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1", "шаг_резьбы"],
-  "required": ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
+  "params": ["тип_изделия", "..."],
+  "required": ["тип_изделия", "..."]
 }
 ```
+"""
 
-- `params`: ALL named group names (only visible in the string).
-- `required`: mandatory parameters (all except optional: исполнение, шаг_резьбы).
-
-=== PRE-ANSWER CHECK ===
-
-Before outputting JSON check:
-- [ ] All groups from `params` are actually visible in the examples?
-- [ ] `тип_изделия` is first and mandatory?
-- [ ] `standard` is NOT in `required`?
-- [ ] `исполнение` exists only if there is `(N)` in the examples?
-- [ ] Thread pitch uses `[xXхХ×]`?
-- [ ] Coating does not capture `ОСТ`/`ГОСТ`?
-- [ ] `нтд_1` contains the full standard name (`ОСТ 1 XXXXX-80` or `ГОСТ XXXX-XX`), NOT `\d+`?
-- [ ] `^` and `$` are present?
-- [ ] NO nested named groups `(?P<...>(?P<...>...))`?
-- [ ] NO unbalanced parentheses?
-- [ ] Pattern compiles in Python re without errors?
-
-=== STRICT COMPLIANCE ===
-
-Output ONE JSON object. No comments, markdown, explanations — only JSON."""
+    def _build_meta_groups_rules(self, standard: str) -> str:
+        """Build meta groups description from domain config."""
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            groups = cfg.meta_regex_groups
+        except Exception:
+            groups = ["тип_изделия", "нтд_1"]
+        lines = []
+        for g in groups:
+            if g == "тип_изделия":
+                lines.append(f"- `{g}` всегда добавляется в начало паттерна (имя изделия: Болт, Гайка, Шайба...)")
+            elif g == "нтд_1":
+                lines.append(f"- `{g}` всегда добавляется в конец паттерна (стандарт: ГОСТ 7798-70, ОСТ 1 31133-80...)")
+            else:
+                lines.append(f"- `{g}` — техническая regex-группа")
+        lines.append("")
+        lines.append('Они НЕ должны появляться в списке "Параметры из ЕНС" и НЕ должны учитываться')
+        lines.append("в статистике заполнения — они не являются полями базы данных.")
+        return "\n".join(lines)
 
     def _build_prompt(self, standard: str, item_type: str, examples: List[Dict],
                       name: str = "", standard_info: Any = None) -> str:
@@ -665,23 +626,23 @@ Output ONE JSON object. No comments, markdown, explanations — only JSON."""
         if "{required_list}" in template:
             visible = self._extract_visible_params(examples)
             optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
-            required = [p for p in visible if p not in optional]
-            template = template.replace("{required_list}", json.dumps(required, ensure_ascii=False))
+            req = [p for p in visible if p not in optional]
+            template = template.replace("{required_list}", json.dumps(req, ensure_ascii=False))
 
         has_task = "=== ЗАДАЧА ===" in template or "ЗАДАЧА:" in template.lower() or "=== TASK ===" in template
         has_format = "=== ФОРМАТ ОТВЕТА ===" in template or "```json" in template or "=== FORMAT ANSWER ===" in template
         task_section = ""
         if not has_task:
             task_section = f"""
-=== TASK ===
+=== ЗАДАЧА ===
 
-Create a regex pattern for standard {standard}, product type {item_type}.
-Use VISIBLE parameters from the examples above."""
+Создай regex-паттерн для стандарта {standard}, типа изделия {item_type}.
+Используй ВИДИМЫЕ параметры из примеров выше."""
         format_section = ""
         if not has_format:
             format_section = """
 
-=== FORMAT ANSWER ===
+=== ФОРМАТ ОТВЕТА ===
 
 ```json
 {
@@ -691,13 +652,13 @@ Use VISIBLE parameters from the examples above."""
 }
 ```
 
-Only JSON, no comments."""
-        header = f"""# Product type: {item_type}
-# Standard: {standard}
-# Provider: {service or 'LLM'}
-# Model: {model or 'unknown'}
-# Temperature: {temperature}
-# Time: {datetime.now().isoformat()}
+Только JSON, без комментариев."""
+        header = f"""# Тип изделия: {item_type}
+# Стандарт: {standard}
+# Провайдер: {service or 'LLM'}
+# Модель: {model or 'unknown'}
+# Температура: {temperature}
+# Время: {datetime.now().isoformat()}
 # =================================================="""
         prompt = header + "\n" + template + task_section + format_section
         return prompt
@@ -757,12 +718,12 @@ Only JSON, no comments."""
             if raw_content.endswith("```"):
                 raw_content = raw_content[:-3].strip()
             lines = [
-                f"# Product type: {item_type}",
-                f"# Standard: {standard}",
-                f"# Provider: {svc or 'LLM'}",
-                f"# Model: {model or 'unknown'}",
-                f"# Temperature: {temp}",
-                f"# Time: {datetime.now().isoformat()}",
+                f"# Тип изделия: {item_type}",
+                f"# Стандарт: {standard}",
+                f"# Провайдер: {svc or 'LLM'}",
+                f"# Модель: {model or 'unknown'}",
+                f"# Температура: {temp}",
+                f"# Время: {datetime.now().isoformat()}",
                 "# ==================================================",
                 "",
                 raw_content,
@@ -844,7 +805,6 @@ Only JSON, no comments."""
         logger.debug("[LLMMaskGenerator] Calling %s with model=%s temp=%s", client_type, model, temperature)
         text = None
 
-        # --- Strategy 1: chat_completion (MTSAIClient, OpenAI-compatible) ---
         if hasattr(client, "chat_completion"):
             try:
                 messages = [{"role": "user", "content": prompt}]
@@ -861,13 +821,9 @@ Only JSON, no comments."""
                             "tokens_prompt": tokens_prompt,
                             "tokens_completion": tokens_completion,
                         }
-                    else:
-                        logger.debug("[LLMMaskGenerator] %s.chat_completion returned empty text, keys=%s",
-                                     client_type, list(response.keys()))
             except Exception as e:
                 logger.debug("[LLMMaskGenerator] %s.chat_completion failed: %s", client_type, e)
 
-        # --- Strategy 2: chat / generate (legacy clients) ---
         if text is None and (hasattr(client, "chat") or hasattr(client, "generate")):
             try:
                 method = getattr(client, "chat", None) or getattr(client, "generate", None)
@@ -915,7 +871,6 @@ Only JSON, no comments."""
             except Exception as e:
                 logger.warning("[LLMMaskGenerator] %s chat/generate failed: %s", client_type, e)
 
-        # --- Strategy 3: complete (BaseLLMClient) ---
         if text is None and hasattr(client, "complete"):
             try:
                 response = client.complete(prompt, model=model, temperature=temperature)
