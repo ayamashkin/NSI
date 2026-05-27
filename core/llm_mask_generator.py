@@ -2,18 +2,19 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
-# FIX 2026-05-27 14:38 UTC+3:
-# 1. Добавлена централизованная проверка однозначности параметров:
-#    метод _get_example_visible_params проверяет, что значения параметров
-#    в наименовании не дублируются (нет двух параметров с одинаковым значением).
-# 2. Добавлен _resolve_twin_pairs: если параметры всегда дублируются во всех
-#    неоднозначных примерах, выбирается один (по порядку в check_keys),
-#    остальные исключаются из глобально видимых.
-# 3. Обновлены _format_stats, _extract_visible_params,
-#    _select_representative_examples: теперь используют общую логику
-#    однозначности и обработки близнецов.
-# 4. _format_examples переиспользует _get_example_visible_params и
-#    _resolve_twin_pairs вместо вложенных функций.
+# FIX 2026-05-27 16:04 UTC+3:
+# 1. Убран захардкоженный CHECK_KEYS. Теперь видимые параметры определяются
+#    автоматически из ВСЕХ полей примера ЕНС (кроме служебных).
+# 2. Добавлен SERVICE_FIELDS — поля, которые никогда не участвуют в наименовании.
+# 3. Добавлен FIELD_NAME_MAP — маппинг заголовков ENS → canonical имена.
+# 4. _auto_detect_visible: для каждого примера проверяет все поля, значения
+#    которых присутствуют в наименовании.
+# 5. _detect_twin_groups: автоматическое определение близнецов (параметры,
+#    значения которых всегда совпадают в примерах, где оба видны).
+# 6. _resolve_twins: замена близнецов на canonical name (первый по порядку).
+# 7. _filter_unambiguous: разделение на однозначные/неоднозначные примеры.
+# 8. _get_global_visible: параметры, видные в >=85% однозначных примеров.
+# 9. Обновлены _format_examples, _format_stats, _extract_visible_params.
 # =============================================================================
 """
 LLM Mask Generator Module
@@ -27,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from utils.standard_utils import canonicalize_standard
 
@@ -35,11 +36,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MaskGenerationResult:
-    """Результат генерации маски.
-
-    FIX 2026-05-25: Добавлен __getitem__ для совместимости с cli.py,
-    который обращается к mask['pattern'], mask['params'] и т.д.
-    """
+    """Результат генерации маски."""
     pattern: str = ""
     params: List[str] = field(default_factory=list)
     required: List[str] = field(default_factory=list)
@@ -53,15 +50,126 @@ class MaskGenerationResult:
     tokens_completion: int = 0
 
     def __getitem__(self, key: str) -> Any:
-        """Dict-like access for cli.py compatibility: mask['pattern'] etc."""
         return getattr(self, key)
 
     def __contains__(self, key: str) -> bool:
-        """Support 'in' operator: 'pattern' in mask."""
         return hasattr(self, key)
+
 
 class LLMMaskGenerator:
     """Генератор масок через LLM с ENS-примерами."""
+
+    # Поля ЕНС, которые никогда не участвуют в наименовании изделия
+    SERVICE_FIELDS = {
+        "Код", "Наименование", "Пометка удаления", "Базовая единица измерения",
+        "Вести учет по характеристикам", "Вид специальной приемки",
+        "Габаритные размеры, масса", "Гражданская продукция", "Заблокировано",
+        "Марка материала", "Наименование типа", "НТД", "НТД на материал",
+        "Обозначение, тип, артикул", "Полное наименование", "Свойства",
+        "Соответствие ТР ТС", "Специальная приемка", "Технические характеристики",
+        "Тип позиции", "Торговая марка", "ТР ТС", "Организация Корпорации",
+        "Автор", "Автор последнего изменения", "Дата последнего изменения",
+        "Дата создания", "Комментарий эксперта", "Наличие БП", "MDM Key",
+        "Ссылка", "Классификатор ЕНС", "Классификатор ЕНС: Код",
+        "ОКВЭД2", "ОКВЭД2: Код", "ОКПД2", "ОКПД2: Код",
+        "Единицы измерения", "Категория качества", "Торговая марка",
+    }
+
+    # Маппинг заголовков ENS → canonical имена параметров
+    FIELD_NAME_MAP = {
+        "Наружный диаметр (диаметр вписанного круга), сторона квадрата (стороны поперечного сечения)": "наружный_диаметр",
+        "Номинальный диаметр резьбы": "номинальный_диаметр_резьбы",
+        "Номинальный диаметр": "номинальный_диаметр_резьбы",
+        "Длина резьбы": "длина_резьбы",
+        "Шаг резьбы": "шаг_резьбы",
+        "Шаг второй резьбы": "шаг_второй_резьбы",
+        "Толщина (проката, стенки, полки)": "толщина_проката_стенки_полки",
+        "Группа (класс) прочности": "группа_класс_прочности",
+        "Класс (поле) допуска": "класс_поле_допуска",
+        "Класс (поле) допуска ввинчиваемого конца": "класс_допуска_ввинчиваемого_конца",
+        "Марка материала": "марка_материала",
+        "Марка материала_1": "марка_материала_1",
+        "Тип резьбы": "тип_резьбы",
+        "Покрытие": "покрытие",
+        "Толщина покрытия": "толщина_покрытия",
+        "Исполнение": "исполнение",
+        "Вариант исполнения": "исполнение",
+        "Длина": "длина",
+        "Длина общая (OAL)": "длина_общая",
+        "Длина ввинчиваемого конца": "длина_ввинчиваемого_конца",
+        "Внутренний диаметр (условный проход)": "внутренний_диаметр",
+        "Обозначение толщины покрытия": "толщина_покрытия",
+        "Цвет": "цвет",
+        "Свойства": "свойства",
+        "Твердость": "твердость",
+        "Ширина": "ширина",
+        "Высота": "высота",
+        "Толщина проката": "толщина_проката",
+        "Диаметр посадочного отверстия": "диаметр_посадочного_отверстия",
+        "Диаметр наружный (режущей части)": "диаметр_наружный",
+        "Диаметр цилиндра": "диаметр_цилиндра",
+        "Диаметр проволоки": "диаметр_проволоки",
+        "Расстояние между осями": "расстояние_между_осями",
+        "Расстояние между гранями": "расстояние_между_гранями",
+        "Число витков": "число_витков",
+        "Число шагов резьбы на дюйм": "число_шагов_на_дюйм",
+        "Тип круга (головки)": "тип_круга",
+        "Тип болта": "тип_болта",
+        "Тип шлица": "тип_шлица",
+        "Тип зуба": "тип_зуба",
+        "Климатическое исполнение": "климатическое_исполнение",
+        "Предельные отклонения": "предельные_отклонения",
+        "Состояние поверхности": "состояние_поверхности",
+        "Состояние материала": "состояние_материала",
+        "Состояние поставки металлопроката": "состояние_поставки",
+        "Форма поставки": "форма_поставки",
+        "Вид и сторона покрытия": "вид_покрытия",
+        "Лакокрасочное и полимерное покрытие": "лакокрасочное_покрытие",
+        "Давление": "давление",
+        "Радиус": "радиус",
+        "Уклон": "уклон",
+        "Наличие фаски": "наличие_фаски",
+        "Наличие отверстий": "наличие_отверстий",
+        "Класс (степень) точности": "класс_точности",
+        "Класс качества": "класс_качества",
+        "Каталожный номер": "каталожный_номер",
+        "Типоразмер": "типоразмер",
+        "Особые условия": "особые_условия",
+        "Конструкция": "конструкция",
+        "Серия (товара, изделия, продукта)": "серия",
+        "Марка (товара, изделия, продукта)": "марка",
+        "Обозначение болта": "обозначение_болта",
+        "Обозначение гайки": "обозначение_гайки",
+        "Обозначение винта": "обозначение_винта",
+        "Обозначение шайбы": "обозначение_шайбы",
+        "Обозначение заклепки": "обозначение_заклепки",
+        "Условное обозначение марки материала": "усл_обозначение_марки",
+        "Условное обозначение номера цвета": "усл_обозначение_цвета",
+        "Условное обозначение толщины": "усл_обозначение_толщины",
+        "Условное обозначение длины": "усл_обозначение_длины",
+        "Индекс диаметра": "индекс_диаметра",
+        "Обозначение диаметра корпуса": "диаметр_корпуса",
+        "Обозначение ширины фаски": "ширина_фаски",
+        "Обозначение размера \"под ключ\"": "размер_под_ключ",
+        "Обозначение длины резьбы": "длина_резьбы_обозначение",
+        "Способ изготовления": "способ_изготовления",
+        "Категория проката": "категория_проката",
+        "Направление резьбы": "направление_резьбы",
+        "Способ получения стали": "способ_получения_стали",
+        "Назначение материала": "назначение_материала",
+        "Шкала твердости": "шкала_твердости",
+        "Длина хвостовика": "длина_хвостовика",
+        "Комплектность": "комплектность",
+        "ВидПриемки": "вид_приемки",
+        "Температурный диапазон (выкипания, эксплуатации)": "температурный_диапазон",
+        "Категория размещения": "категория_размещения",
+        "Номинальный диаметр": "номинальный_диаметр",
+    }
+
+    SKIP_PARAMS = {
+        "марка_материала", "марка_материала_1", "толщина_покрытия",
+        "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
+    }
 
     def __init__(
         self,
@@ -110,178 +218,262 @@ class LLMMaskGenerator:
             logger.warning("[LLMMaskGenerator] Failed to load examples: %s", e)
         return []
 
-    @staticmethod
-    def _get_example_value(ex: Dict, key: str) -> Optional[str]:
-        """Получить значение из примера ЕНС с учётом маппинга полей."""
-        # Прямой доступ
-        val = ex.get(key)
-        if val is not None and str(val).strip():
-            return str(val).strip()
+    def _canonicalize_field_name(self, field: str) -> str:
+        """Преобразовать имя поля ENS в короткое canonical имя для regex."""
+        if field in self.FIELD_NAME_MAP:
+            return self.FIELD_NAME_MAP[field]
+        # Fallback: cleanup
+        name = re.sub(r'\s*\([^)]*\)\s*', ' ', field).strip()
+        name = name.lower().replace(" ", "_").replace(",", "_")
+        name = re.sub(r'_+', '_', name).strip('_')
+        # Сокращение длинных имен
+        if len(name) > 30:
+            # Удаляем повторяющиеся слова и артикли
+            name = re.sub(r'\b(di|de|la|le|et|du)\b', '', name)
+            name = re.sub(r'_+', '_', name).strip('_')
+        return name[:30]
 
-        # Альтернативные имена полей
-        alt_map = {
-            "нтд_1": ["стандарт", "нтд"],
-            "тип_изделия": ["наименование_типа", "тип"],
-            "исполнение": ["вариант_исполнения", "исполнение"],
-            "класс_поле_допуска": ["класс_допуска", "поле_допуска", "допуск"],
-            "группа_класс_прочности": ["группа_прочности", "класс_прочности", "прочность"],
-            "свойства": ["свойство", "код_свойств"],
-            "тип_резьбы": ["резьба", "вид_резьбы"],
-            "марка_материала": ["материал", "марка", "марка_материала_1"],
-            "марка_материала_1": ["марка_материала", "материал"],
-            "толщина_покрытия": ["толщина_покр", "покрытие_толщина"],
-            "шаг_резьбы": ["шаг", "шаг_резьбы_1"],
-            "длина": ["длина_изделия", "l"],
-            "номинальный_диаметр_резьбы": ["номинальный_диаметр"], # FIX 2026-05-27: убраны "диаметр"/"d" — в ENS это часто наружный диаметр, что приводит к семантическому смешению с номинальным диаметром резьбы
-        }
+    def _auto_detect_visible(self, ex: Dict, standard: str = "") -> Dict[str, str]:
+        """Автоопределение видимых параметров из ВСЕХ полей примера ЕНС.
 
-        for alt in alt_map.get(key, []):
-            val = ex.get(alt)
-            if val is not None and str(val).strip():
-                return str(val).strip()
-        return None
-
-    CHECK_KEYS = [
-        "тип_изделия", "исполнение",
-        "толщина_проката_стенки_полки",
-        "номинальный_диаметр_резьбы", "шаг_резьбы",
-        "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
-        "длина",
-        "покрытие", "толщина_покрытия",
-        "группа_класс_прочности", "класс_поле_допуска", "свойства",
-        "марка_материала", "марка_материала_1", "тип_резьбы",
-    ]
-
-    SKIP_PARAMS = {
-        "марка_материала", "марка_материала_1", "толщина_покрытия",
-        "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
-    }
-
-    def _get_example_visible_params(
-        self,
-        ex: Dict,
-        standard: str = "",
-        check_keys: Optional[List[str]] = None,
-    ) -> Dict[str, str]:
-        """Вернуть {key: value} видимых параметров для одного примера.
-
-        FIX 2026-05-27: Централизованная проверка однозначности.
-        Если два параметра имеют одинаковое значение — оба помечаются
-        как неоднозначные, но метод возвращает ВСЕ видимые параметры.
-        Проверка однозначности делается на уровне агрегатора.
+        Для каждого поля (кроме служебных) проверяем: присутствует ли его
+        значение в строке наименования. Возвращает {canonical_name: value}.
         """
-        if check_keys is None:
-            check_keys = self.CHECK_KEYS
-
         name = ex.get("наименование", ex.get("полное_наименование", ""))
         if not name:
             return {}
 
         visible: Dict[str, str] = {}
-        for key in check_keys:
-            if key in LLMMaskGenerator.SKIP_PARAMS:
+        for field, value in ex.items():
+            if field in self.SERVICE_FIELDS:
                 continue
-            if key == "тип_изделия":
-                val = self._get_example_value(ex, key)
-                if val and name.lower().startswith(str(val).strip().lower()):
-                    visible[key] = str(val).strip()
+            if value is None or str(value).strip() == "":
                 continue
-
-            val = self._get_example_value(ex, key)
-            if not val:
-                continue
-            val_str = str(val).strip()
-            if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
-                visible[key] = val_str
+            val_str = str(value).strip()
+            if self._is_value_in_name(val_str, name, param_key=field, standard=standard):
+                canonical = self._canonicalize_field_name(field)
+                # Не дублируем: если два поля маппятся на один canonical,
+                # оставляем первый найденный
+                if canonical not in visible:
+                    visible[canonical] = val_str
         return visible
 
-    def _resolve_twin_pairs(
+    def _detect_twin_groups(
         self,
-        ambiguous: List[Tuple[Dict, Dict[str, str]]],
-        check_keys: Optional[List[str]] = None,
-    ) -> Tuple[set, set]:
-        """Обработка "близнецов" — параметров, всегда дублирующихся.
+        examples: List[Dict],
+        threshold: float = 1.0,
+    ) -> List[List[str]]:
+        """Автоопределение групп близнецов.
+
+        Близнецы — параметры, значения которых ВСЕГДА совпадают в примерах,
+        где оба параметра видны в наименовании.
 
         Returns:
-            (keys_to_keep, keys_to_remove)
+            Список групп: [["a", "b", "c"], ["d", "e"]]
+            Первый элемент группы — canonical (приоритетный) параметр.
         """
-        if check_keys is None:
-            check_keys = self.CHECK_KEYS
+        # Собираем visible для всех примеров
+        all_visible = []
+        for ex in examples:
+            vis = self._auto_detect_visible(ex)
+            if vis:
+                all_visible.append(vis)
 
-        if not ambiguous:
-            return set(), set()
+        if not all_visible:
+            return []
 
-        dup_stats: Dict[Tuple[str, str], int] = {}
-        for ex, vis in ambiguous:
-            val_to_keys: Dict[str, List[str]] = {}
-            for k, v in vis.items():
-                val_to_keys.setdefault(v, []).append(k)
-            for v, keys in val_to_keys.items():
-                if len(keys) >= 2:
-                    for i in range(len(keys)):
-                        for j in range(i + 1, len(keys)):
-                            pair = tuple(sorted([keys[i], keys[j]]))
-                            dup_stats[pair] = dup_stats.get(pair, 0) + 1
+        # Статистика по парам: (a, b) -> [total_cooccurrence, matches]
+        pair_stats: Dict[Tuple[str, str], List[int]] = {}
 
-        twin_pairs = []
-        for pair, count in dup_stats.items():
-            if count == len(ambiguous):
-                twin_pairs.append(pair)
+        for vis in all_visible:
+            keys = sorted(vis.keys())
+            for i in range(len(keys)):
+                for j in range(i + 1, len(keys)):
+                    a, b = keys[i], keys[j]
+                    pair = (a, b)
+                    if pair not in pair_stats:
+                        pair_stats[pair] = [0, 0]
+                    pair_stats[pair][0] += 1
+                    if vis[a] == vis[b]:
+                        pair_stats[pair][1] += 1
 
-        keys_to_remove = set()
-        keys_to_keep = set()
-        for k1, k2 in twin_pairs:
-            idx1 = check_keys.index(k1) if k1 in check_keys else 999
-            idx2 = check_keys.index(k2) if k2 in check_keys else 999
-            keep, remove = (k1, k2) if idx1 < idx2 else (k2, k1)
-            keys_to_keep.add(keep)
-            keys_to_remove.add(remove)
+        # Фильтруем по threshold
+        twin_edges = []
+        for (a, b), (total, matches) in pair_stats.items():
+            if total > 0 and matches / total >= threshold:
+                twin_edges.append((a, b))
 
-        return keys_to_keep, keys_to_remove
+        # Транзитивное замыкание: объединяем связанные пары в группы
+        if not twin_edges:
+            return []
 
-    def _format_stats(self, examples: List[Dict], standard: str = "") -> str:
-        """Форматировать статистику глобально видимых параметров для вставки в промпт.
+        # Union-Find
+        parent: Dict[str, str] = {}
 
-        FIX 2026-05-27: Теперь использует _get_example_visible_params и
-        _resolve_twin_pairs. Неоднозначные примеры пропускаются при подсчёте.
+        def find(x: str) -> str:
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+
+        def union(x: str, y: str):
+            rx, ry = find(x), find(y)
+            if rx != ry:
+                parent[ry] = rx
+
+        for a, b in twin_edges:
+            union(a, b)
+
+        groups_map: Dict[str, List[str]] = {}
+        for node in parent:
+            root = find(node)
+            groups_map.setdefault(root, []).append(node)
+
+        # Сортируем группы: canonical = первый по частоте видимости
+        groups = []
+        for members in groups_map.values():
+            if len(members) >= 2:
+                # Сортируем по частоте появления в all_visible
+                freq = {m: sum(1 for vis in all_visible if m in vis) for m in members}
+                members_sorted = sorted(members, key=lambda m: -freq[m])
+                groups.append(members_sorted)
+
+        logger.info("[LLMMaskGenerator] Detected twin groups: %s", groups)
+        return groups
+
+    def _resolve_twins(
+        self,
+        visible: Dict[str, str],
+        twin_groups: List[List[str]],
+    ) -> Dict[str, str]:
+        """Заменить близнецов на canonical name.
+
+        Логика:
+        - Если в visible есть canonical — удаляем всех близнецов.
+        - Если canonical отсутствует, но есть близнец — подставляем canonical
+          со значением близнеца.
+        - Если несколько близнецов — берём первого по порядку в группе.
         """
-        if not examples:
-            return "(нет данных)"
+        resolved = dict(visible)
+        for group in twin_groups:
+            canonical = group[0]
+            twins = group[1:]
 
-        check_keys = self.CHECK_KEYS
+            # Если canonical уже есть — удаляем близнецов
+            if canonical in resolved:
+                for t in twins:
+                    if t in resolved:
+                        del resolved[t]
+                continue
+
+            # Иначе ищем первого видимого близнеца
+            twin_val = None
+            for t in twins:
+                if t in resolved:
+                    twin_val = resolved[t]
+                    del resolved[t]
+                    break
+
+            if twin_val is not None:
+                resolved[canonical] = twin_val
+
+        return resolved
+
+    def _filter_unambiguous(
+        self,
+        examples: List[Dict],
+        twin_groups: List[List[str]],
+        standard: str = "",
+    ) -> Tuple[List[Tuple[Dict, Dict[str, str]]], List[Tuple[Dict, Dict[str, str]]]]:
+        """Разделить примеры на однозначные и неоднозначные.
+
+        После разрешения близнецов проверяем: есть ли дублирующиеся values.
+        Если да — пример неоднозначный (исключается из global_visible).
+        """
         unambiguous = []
         ambiguous = []
 
         for ex in examples:
-            vis = self._get_example_visible_params(ex, standard=standard, check_keys=check_keys)
+            vis = self._auto_detect_visible(ex, standard=standard)
+            vis = self._resolve_twins(vis, twin_groups)
+
             values = list(vis.values())
             if len(values) != len(set(values)):
                 ambiguous.append((ex, vis))
             else:
                 unambiguous.append((ex, vis))
 
-        # global_visible из однозначных примеров
-        global_visible = set()
+        logger.info(
+            "[LLMMaskGenerator] Unambiguous: %d, Ambiguous: %d",
+            len(unambiguous), len(ambiguous)
+        )
+        return unambiguous, ambiguous
+
+    def _get_global_visible(
+        self,
+        unambiguous: List[Tuple[Dict, Dict[str, str]]],
+        threshold: float = 0.85,
+    ) -> Tuple[set, set]:
+        """Определить глобально видимые параметры из однозначных примеров.
+
+        Returns:
+            (required_params, optional_params)
+            required: видны в >= threshold примеров
+            optional: видны в >= 0.20 и < threshold примеров
+        """
+        if not unambiguous:
+            return {"тип_изделия", "нтд_1"}, set()
+
+        total = len(unambiguous)
+        param_counts: Dict[str, int] = {}
+
         for ex, vis in unambiguous:
-            global_visible.update(vis.keys())
+            for key in vis:
+                param_counts[key] = param_counts.get(key, 0) + 1
 
-        # Обработка близнецов
-        keep, remove = self._resolve_twin_pairs(ambiguous, check_keys=check_keys)
-        global_visible |= keep
-        global_visible -= remove
-        global_visible.add("тип_изделия")
-        global_visible.add("нтд_1")
+        required = set()
+        optional = set()
 
-        # Подсчёт только по однозначным примерам + resolved twins
-        param_counts = {}
+        for key, count in param_counts.items():
+            ratio = count / total
+            if ratio >= threshold:
+                required.add(key)
+            elif ratio >= 0.20:
+                optional.add(key)
+
+        # Всегда добавляем тип и стандарт
+        required.add("тип_изделия")
+        required.add("нтд_1")
+
+        logger.info(
+            "[LLMMaskGenerator] Global visible: required=%s, optional=%s",
+            sorted(required), sorted(optional)
+        )
+        return required, optional
+
+    def _format_stats(
+        self,
+        examples: List[Dict],
+        standard: str = "",
+        twin_groups: Optional[List[List[str]]] = None,
+    ) -> str:
+        """Форматировать статистику глобально видимых параметров для вставки в промпт."""
+        if not examples:
+            return "(нет данных)"
+
+        if twin_groups is None:
+            twin_groups = self._detect_twin_groups(examples)
+
+        unambiguous, _ = self._filter_unambiguous(examples, twin_groups, standard=standard)
+        required, optional = self._get_global_visible(unambiguous)
+        global_visible = required | optional
+
+        # Подсчёт только по однозначным примерам
+        param_counts: Dict[str, int] = {}
         for ex, vis in unambiguous:
             for key in vis:
                 if key in global_visible:
-                    param_counts[key] = param_counts.get(key, 0) + 1
-        # Для resolved twins добавляем count из ambiguous тоже
-        for ex, vis in ambiguous:
-            for key in vis:
-                if key in global_visible and key not in remove:
                     param_counts[key] = param_counts.get(key, 0) + 1
 
         total = len(examples)
@@ -295,7 +487,13 @@ class LLMMaskGenerator:
         """Проверить, что значение параметра присутствует в строке номенклатуры."""
         if not val or not name:
             return False
-        if param_key in LLMMaskGenerator.SKIP_PARAMS:
+
+        # Служебные параметры — skip
+        skip_canonical = {
+            "марка_материала", "марка_материала_1", "толщина_покрытия",
+            "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
+        }
+        if param_key in skip_canonical:
             return False
 
         name_clean = name
@@ -311,15 +509,18 @@ class LLMMaskGenerator:
         val_str = val_raw.lower().replace(",", ".")
         name_lower = name_clean.lower().replace(",", ".")
 
+        # Прямое вхождение
         if val_str in name_lower:
             return True
 
+        # Число с десятичной точкой: 1,5 → 1.5 и 15
         if re.match(r"^\d+[.,]\d+$", val_raw):
             no_sep = re.sub(r"[.,]", "", val_str)
             if no_sep in name_lower:
                 return True
 
-        if param_key in ("покрытие", "coating", "покрытие_1") or re.search(r"[a-zA-Zа-яА-Я]", val_str):
+        # Покрытие и текстовые значения: токенизация
+        if re.search(r"[a-zA-Zа-яА-Я]", val_str):
             tokens = re.split(r"[.\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
             for tok in tokens:
@@ -329,18 +530,18 @@ class LLMMaskGenerator:
             if prefix and prefix.group(1) in name_lower:
                 return True
 
-        if param_key in ("марка_материала", "марка_материала_1", "материал"):
-            return val_str in name_lower
-
+        # .0 → целое
         if '.' in val_str and val_str.endswith('.0'):
             int_part = val_str[:-2]
             if int_part and int_part in name_lower:
                 return True
 
+        # Число+буква: 6г, 6Н
         if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
             if val_str in name_lower:
                 return True
 
+        # M12 → 12
         m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
         if m_match:
             num = m_match.group(1)
@@ -367,20 +568,15 @@ class LLMMaskGenerator:
         return positions
 
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
-        """Выбрать representative примеры, покрывающие максимум комбинаций параметров.
-
-        FIX 2026-05-27: _visible_params теперь использует _get_example_visible_params
-        и проверяет однозначность. Параметры с дублирующимися значениями не добавляются
-        в coverage, чтобы не искажать выбор representative examples.
-        """
+        """Выбрать representative примеры, покрывающие максимум комбинаций параметров."""
         if len(examples) <= max_count:
             return examples
 
-        check_keys = self.CHECK_KEYS
-
+        # Определяем visible params для каждого примера (без twin resolution,
+        # но с исключением неоднозначных ключей)
         def _visible_params(ex: Dict) -> set:
-            vis = self._get_example_visible_params(ex, standard="", check_keys=check_keys)
-            # Удаляем неоднозначные ключи (те, у которых значение дублируется)
+            vis = self._auto_detect_visible(ex)
+            # Удаляем неоднозначные ключи (те, у которых value дублируется)
             val_to_keys: Dict[str, List[str]] = {}
             for k, v in vis.items():
                 val_to_keys.setdefault(v, []).append(k)
@@ -416,44 +612,33 @@ class LLMMaskGenerator:
                     len(selected), sorted(covered))
         return selected
 
-    def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
+    def _format_examples(
+        self,
+        examples: List[Dict],
+        standard: str,
+        item_type: str,
+    ) -> str:
         """Форматировать ENS-примеры для вставки в промпт.
 
-        FIX 2026-05-27: Переиспользует _get_example_visible_params и _resolve_twin_pairs.
-        Неоднозначные примеры пропускаются при определении global_visible.
-        Для "близнецов" (параметры, всегда дублирующиеся) выбирается один.
+        FIX 2026-05-27: Автоопределение видимых параметров из всех полей.
+        Близнецы разрешаются, неоднозначные примеры исключаются из global_visible.
         """
         if not examples:
             return "(примеры отсутствуют)"
 
         display_examples = self._select_representative_examples(examples, max_count=10)
-        check_keys = self.CHECK_KEYS
 
-        # --- Шаг 1: разделить на однозначные и неоднозначные ---
-        unambiguous = []
-        ambiguous = []
+        # Шаг 1: автоопределение близнецов
+        twin_groups = self._detect_twin_groups(examples)
 
-        for ex in examples:
-            vis = self._get_example_visible_params(ex, standard=standard, check_keys=check_keys)
-            values = list(vis.values())
-            if len(values) != len(set(values)):
-                ambiguous.append((ex, vis))
-            else:
-                unambiguous.append((ex, vis))
+        # Шаг 2: разделить на однозначные и неоднозначные
+        unambiguous, ambiguous = self._filter_unambiguous(examples, twin_groups, standard=standard)
 
-        # global_visible из однозначных примеров
-        global_visible = set()
-        for ex, vis in unambiguous:
-            global_visible.update(vis.keys())
+        # Шаг 3: глобально видимые параметры
+        required, optional = self._get_global_visible(unambiguous)
+        global_visible = required | optional
 
-        # --- Шаг 2: обработка близнецов ---
-        keep, remove = self._resolve_twin_pairs(ambiguous, check_keys=check_keys)
-        global_visible |= keep
-        global_visible -= remove
-        global_visible.add("тип_изделия")
-        global_visible.add("нтд_1")
-
-        # --- Шаг 3: формирование примеров для промпта ---
+        # Шаг 4: формирование примеров для промпта
         lines = []
         lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
         lines.append("")
@@ -465,7 +650,8 @@ class LLMMaskGenerator:
             if not name:
                 continue
 
-            vis = self._get_example_visible_params(ex, standard=standard, check_keys=check_keys)
+            vis = self._auto_detect_visible(ex, standard=standard)
+            vis = self._resolve_twins(vis, twin_groups)
 
             # Определяем неоднозначные ключи в этом примере
             val_to_keys: Dict[str, List[str]] = {}
@@ -481,23 +667,21 @@ class LLMMaskGenerator:
             missing_list = []
             ambiguous_list = []
 
-            for key in check_keys:
-                if key not in global_visible:
-                    continue
-
-                val = self._get_example_value(ex, key)
+            for key in sorted(global_visible):
                 if key == "тип_изделия":
+                    # Тип изделия — всегда первое слово
+                    val = ex.get("Наименование типа", ex.get("Наименование типа", ""))
                     if val and name.lower().startswith(str(val).strip().lower()):
                         visible_list.append((key, str(val).strip(), 0))
                     else:
                         missing_list.append(key)
                     continue
 
-                if not val:
+                if key not in vis:
                     missing_list.append(key)
                     continue
 
-                val_str = str(val).strip()
+                val_str = vis[key]
                 is_in_name = self._is_value_in_name(val_str, name, param_key=key, standard=standard)
 
                 if key in ambiguous_keys:
@@ -635,7 +819,7 @@ class LLMMaskGenerator:
 
 **ОСТ 1 31133-80 / Болт** (с исполнением, покрытием):
 ```
-^(?P<тип_изделия>Болт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
+^(?P<тип_изделия>Болт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
 ```
 
 === ФОРМАТ ОТВЕТА ===
@@ -742,35 +926,14 @@ class LLMMaskGenerator:
         return prompt
 
     def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
-        """Извлечь список глобально видимых параметров из ENS-примеров.
-
-        FIX 2026-05-27: Теперь использует _get_example_visible_params и
-        _resolve_twin_pairs. Неоднозначные примеры пропускаются.
-        """
+        """Извлечь список глобально видимых параметров из ENS-примеров."""
         if not examples:
             return ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
 
-        check_keys = self.CHECK_KEYS
-        unambiguous = []
-        ambiguous = []
-
-        for ex in examples:
-            vis = self._get_example_visible_params(ex, standard="", check_keys=check_keys)
-            values = list(vis.values())
-            if len(values) != len(set(values)):
-                ambiguous.append((ex, vis))
-            else:
-                unambiguous.append((ex, vis))
-
-        global_visible = set()
-        for ex, vis in unambiguous:
-            global_visible.update(vis.keys())
-
-        keep, remove = self._resolve_twin_pairs(ambiguous, check_keys=check_keys)
-        global_visible |= keep
-        global_visible -= remove
-        global_visible.add("тип_изделия")
-        global_visible.add("нтд_1")
+        twin_groups = self._detect_twin_groups(examples)
+        unambiguous, _ = self._filter_unambiguous(examples, twin_groups)
+        required, optional = self._get_global_visible(unambiguous)
+        global_visible = required | optional
         return list(global_visible)
 
     def _get_debug_dir(self) -> Optional[Path]:
@@ -1051,7 +1214,6 @@ class LLMMaskGenerator:
         pattern = pattern.replace('\\"', '"')
         pattern = pattern.replace('\\n', '\n')
         pattern = pattern.replace('\\t', ' ')
-        pattern = pattern.replace('\t', ' ')
 
         params = _find_array(text, '"params"')
         required = _find_array(text, '"required"')
