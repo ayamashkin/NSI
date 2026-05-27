@@ -1,13 +1,13 @@
 # =============================================================================
-# FIX 2026-05-25 20:05:21 UTC+3:
-# 1. _format_stats: добавлен параметр standard (сигнатура не совпадала с
-#    вызовом в _build_prompt, что вызывало TypeError: takes 2 positional args
-#    but 3 were given).
-# 2. _format_examples: добавлен параметр standard в вызовы _is_value_in_name
-#    для консистентности с _format_stats и предотвращения false positives
-#    на номерах стандарта.
+# FILE: core/llm_mask_generator.py
+# REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
-
+# FIX 2026-05-25 20:26 UTC+3:
+# 1. _select_representative_examples/_visible_params: заменен ex.get(key) на
+#    self._get_example_value(ex, key). Теперь учитываются альтернативные имена
+#    полей (например, длина_изделия/l для длины, шаг/шаг_резьбы_1 для шага
+#    резьбы), что расширяет coverage и позволяет LLM видеть все параметры.
+# =============================================================================
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
@@ -100,18 +100,14 @@ class LLMMaskGenerator:
             if examples:
                 logger.info("[LLMMaskGenerator] Loaded %d ENS examples for %s/%s",
                             len(examples), standard, item_type)
-            return examples[:max_examples]
+                return examples[:max_examples]
         except Exception as e:
             logger.warning("[LLMMaskGenerator] Failed to load examples: %s", e)
-            return []
+        return []
 
     @staticmethod
     def _get_example_value(ex: Dict, key: str) -> Optional[str]:
-        """Получить значение из примера ЕНС с учётом маппинга полей.
-
-        FIX 2026-05-25: Добавлены маппинги для ГОСТ-специфичных полей:
-        класс_поле_допуска, группа_класс_прочности, свойства, тип_резьбы, марка_материала.
-        """
+        """Получить значение из примера ЕНС с учётом маппинга полей."""
         # Прямой доступ
         val = ex.get(key)
         if val is not None and str(val).strip():
@@ -141,10 +137,7 @@ class LLMMaskGenerator:
         return None
 
     def _format_stats(self, examples: List[Dict], standard: str = "") -> str:
-        """Форматировать статистику глобально видимых параметров для вставки в промпт.
-
-        FIX 2026-05-25 v3: считаем только параметры, видимые в наименовании.
-        """
+        """Форматировать статистику глобально видимых параметров для вставки в промпт."""
         if not examples:
             return "(нет данных)"
 
@@ -164,7 +157,6 @@ class LLMMaskGenerator:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
-            # Clean name
             name_clean = re.sub(
                 r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
                 '',
@@ -190,123 +182,19 @@ class LLMMaskGenerator:
             lines.append(f"  {key}: {count} из {total} ({count/total*100:.0f}%)")
         return "\n".join(lines) if lines else "(нет параметров)"
 
-    # Parameters that are NEVER visible in the nomenclature string (metadata only)
     SKIP_PARAMS = {
         "марка_материала", "марка_материала_1", "толщина_покрытия",
         "наличие_бп", "автор_последнего_изменения", "дата_последнего_изменения",
     }
 
-
-    @staticmethod
-    def _find_value_positions(val: str, name: str, param_key: str = "") -> List[Tuple[int, int]]:
-        """Найти все позиции вхождения значения в строку номенклатуры.
-
-        FIX 2026-05-25 v4:
-        - Возвращает список (start, end) для каждого match.
-        - Нормализации: exact, comma→dot, coatings prefix, М-prefix.
-        - НЕ использует float .0 → int (слишком агрессивно, 3.0 матчит исполнение 3).
-        - НЕ использует numeric no-separator (5.8 → 58 может матчить неверно).
-        """
-        if not val or not name:
-            return []
-
-        val_raw = str(val).strip()
-        val_str = val_raw.lower()
-        name_lower = name.lower()
-        matches = []
-
-        def _add_match(start: int, end: int):
-            # Проверить, что match не пересекается с существующими
-            for s, e in matches:
-                if start < e and end > s:
-                    return
-            matches.append((start, end))
-
-        # 1. Exact match (case-insensitive)
-        start = 0
-        while True:
-            pos = name_lower.find(val_str, start)
-            if pos < 0:
-                break
-            _add_match(pos, pos + len(val_str))
-            start = pos + 1
-
-        # 2. Comma→dot normalization (2,5 → 2.5)
-        if ',' in val_raw:
-            norm = val_raw.lower().replace(',', '.')
-            start = 0
-            while True:
-                pos = name_lower.find(norm, start)
-                if pos < 0:
-                    break
-                _add_match(pos, pos + len(norm))
-                start = pos + 1
-
-        # 3. Coatings / composite: token-based fuzzy
-        if param_key in ("покрытие", "coating", "покрытие_1") or \
-           re.search(r"[a-zA-Zа-яА-Я]", val_str):
-            tokens = re.split(r"[.\-]", val_str)
-            tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
-            for tok in tokens:
-                tok_lower = tok.lower()
-                start = 0
-                while True:
-                    pos = name_lower.find(tok_lower, start)
-                    if pos < 0:
-                        break
-                    _add_match(pos, pos + len(tok_lower))
-                    start = pos + 1
-            # Prefix match
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix:
-                pref_lower = prefix.group(1).lower()
-                start = 0
-                while True:
-                    pos = name_lower.find(pref_lower, start)
-                    if pos < 0:
-                        break
-                    _add_match(pos, pos + len(pref_lower))
-                    start = pos + 1
-
-        # 4. М-prefix: М22 → 22
-        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
-        if m_match:
-            num = m_match.group(1).lower()
-            start = 0
-            while True:
-                pos = name_lower.find(num, start)
-                if pos < 0:
-                    break
-                _add_match(pos, pos + len(num))
-                start = pos + 1
-
-        # 5. Tolerance classes: 6g, 5Н (exact)
-        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_raw):
-            start = 0
-            while True:
-                pos = name_lower.find(val_str, start)
-                if pos < 0:
-                    break
-                _add_match(pos, pos + len(val_str))
-                start = pos + 1
-
-        return sorted(matches, key=lambda x: x[0])
-
     @staticmethod
     def _is_value_in_name(val: str, name: str, param_key: str = "", standard: str = "") -> bool:
-        """Проверить, что значение параметра присутствует в строке номенклатуры.
-
-        FIX 2026-05-25 v4: обёртка над _find_value_positions.
-        - Metadata params (SKIP_PARAMS) всегда False.
-        - Удаляем стандарт из строки перед проверкой.
-        """
+        """Проверить, что значение параметра присутствует в строке номенклатуры."""
         if not val or not name:
             return False
-
         if param_key in LLMMaskGenerator.SKIP_PARAMS:
             return False
 
-        # Remove standard from name to prevent false positives
         name_clean = name
         if standard:
             name_clean = re.sub(
@@ -316,24 +204,79 @@ class LLMMaskGenerator:
                 flags=re.IGNORECASE
             )
 
-        positions = LLMMaskGenerator._find_value_positions(val, name_clean, param_key)
-        return len(positions) > 0
+        val_raw = str(val).strip()
+        val_str = val_raw.lower().replace(",", ".")
+        name_lower = name_clean.lower().replace(",", ".")
+
+        if val_str in name_lower:
+            return True
+
+        if re.match(r"^\d+[.,]\d+$", val_raw):
+            no_sep = re.sub(r"[.,]", "", val_str)
+            if no_sep in name_lower:
+                return True
+
+        if param_key in ("покрытие", "coating", "покрытие_1") or re.search(r"[a-zA-Zа-яА-Я]", val_str):
+            tokens = re.split(r"[.\-]", val_str)
+            tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
+            for tok in tokens:
+                if tok in name_lower:
+                    return True
+            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+            if prefix and prefix.group(1) in name_lower:
+                return True
+
+        if param_key in ("марка_материала", "марка_материала_1", "материал"):
+            return val_str in name_lower
+
+        if '.' in val_str and val_str.endswith('.0'):
+            int_part = val_str[:-2]
+            if int_part and int_part in name_lower:
+                return True
+
+        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
+            if val_str in name_lower:
+                return True
+
+        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
+        if m_match:
+            num = m_match.group(1)
+            if num.lower() in name_lower:
+                return True
+
+        return False
+
     @staticmethod
-    def _select_representative_examples(examples: List[Dict], max_count: int = 10) -> List[Dict]:
+    def _find_value_positions(val: str, name: str, param_key: str = "") -> List[Tuple[int, int]]:
+        """Найти все позиции значения в строке номенклатуры."""
+        if not val or not name:
+            return []
+        val_str = val.strip().lower()
+        name_lower = name.lower()
+        positions = []
+        start = 0
+        while True:
+            idx = name_lower.find(val_str, start)
+            if idx == -1:
+                break
+            positions.append((idx, idx + len(val_str)))
+            start = idx + 1
+        return positions
+
+    def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
         """Выбрать representative примеры, покрывающие максимум комбинаций параметров.
 
-        FIX 2026-05-25: greedy coverage — на каждом шаге выбираем пример,
-        добавляющий больше всего новых видимых параметров в union.
+        FIX 2026-05-25 20:26: в _visible_params заменен ex.get(key) на
+        self._get_example_value(ex, key), чтобы учитывать альтернативные имена
+        полей (длина_изделия, шаг_резьбы_1 и т.д.).
         """
         if len(examples) <= max_count:
             return examples
 
-        # Compute visible set for each example
         def _visible_params(ex: Dict) -> set:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 return set()
-            # Clean name: remove standard
             name_clean = re.sub(
                 r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
                 '',
@@ -341,7 +284,6 @@ class LLMMaskGenerator:
                 flags=re.IGNORECASE
             )
             visible = set()
-            occupied = set()
             for key in ["тип_изделия", "исполнение", "толщина_проката_стенки_полки",
                         "номинальный_диаметр_резьбы", "шаг_резьбы",
                         "наружный_диаметр_диаметр_вписанного_круга_сторона_квадрата_стороны_поперечного_сечения",
@@ -350,24 +292,21 @@ class LLMMaskGenerator:
                         "марка_материала", "марка_материала_1", "тип_резьбы"]:
                 if key in LLMMaskGenerator.SKIP_PARAMS:
                     continue
-                val = ex.get(key)
+                # FIX 2026-05-25 20:26: используем _get_example_value для учета альтернативных имен
+                val = self._get_example_value(ex, key)
                 if not val:
                     continue
                 val_str = str(val).strip()
                 if key == "тип_изделия":
-                    if name_clean.lower().startswith(val_str.lower()):
+                    if name.lower().startswith(val_str.lower()):
                         visible.add(key)
                     continue
                 positions = LLMMaskGenerator._find_value_positions(val_str, name_clean, param_key=key)
-                for start, end in positions:
-                    if not any(p in range(start, end) for p in occupied):
-                        visible.add(key)
-                        occupied.update(range(start, end))
-                        break
+                if positions:
+                    visible.add(key)
             return visible
 
         scored = [(ex, _visible_params(ex)) for ex in examples]
-        # Sort by coverage size descending
         scored.sort(key=lambda x: -len(x[1]))
 
         selected = []
@@ -380,7 +319,6 @@ class LLMMaskGenerator:
                 selected.append(ex)
                 covered |= vis
 
-        # If not enough, fill with remaining
         if len(selected) < max_count:
             used = set(id(e) for e in selected)
             for ex, _ in scored:
@@ -394,26 +332,12 @@ class LLMMaskGenerator:
         return selected
 
     def _format_examples(self, examples: List[Dict], standard: str, item_type: str) -> str:
-        """Форматировать ENS-примеры для вставки в промпт.
-
-        FIX 2026-05-25 v3:
-        1. Глобально определяем видимые параметры — union across all examples.
-           Параметр считается "видимым", если присутствует хотя бы в одном примере.
-        2. Для каждого примера показываем:
-           - Видимые параметры (есть в этом примере)
-           - Отсутствуют (есть в других примерах, но не в этом) → LLM понимает опциональность
-        3. Параметры, которые НИГДЕ не видны (марка материала и т.д.), не упоминаются.
-        4. Сортировка по позиции в строке.
-        5. Coverage-based sampling: выбираем representative примеры (до 10),
-           покрывающие максимум комбинаций параметров.
-        """
+        """Форматировать ENS-примеры для вставки в промпт."""
         if not examples:
             return "(примеры отсутствуют)"
 
-        # --- Выбираем representative примеры (coverage-based) ---
         display_examples = self._select_representative_examples(examples, max_count=10)
 
-        # --- Полный набор проверяемых параметров ---
         check_keys = [
             "тип_изделия", "исполнение",
             "толщина_проката_стенки_полки",
@@ -425,7 +349,6 @@ class LLMMaskGenerator:
             "марка_материала", "марка_материала_1", "тип_резьбы",
         ]
 
-        # --- Шаг 1: Определить глобально видимые параметры (union across ALL examples) ---
         global_visible = set()
         for ex in examples:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
@@ -445,7 +368,6 @@ class LLMMaskGenerator:
                 if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
                     global_visible.add(key)
 
-        # --- Шаг 2: Для каждого примера: видимые + отсутствующие (из global_visible) ---
         lines = []
         lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
         lines.append("")
@@ -457,17 +379,15 @@ class LLMMaskGenerator:
             if not name:
                 continue
 
-            visible = []   # (key, val_str, position)
-            missing = []   # keys from global_visible not in this example
+            visible = []
+            missing = []
 
             for key in check_keys:
                 if key not in global_visible:
-                    continue  # параметр нигде не виден — не упоминаем
+                    continue
 
                 val = self._get_example_value(ex, key)
                 if key == "тип_изделия":
-                    # тип_изделия всегда считаем видимым (начало строки)
-                    val = self._get_example_value(ex, key)
                     if val:
                         visible.append((key, val.strip(), 0))
                     else:
@@ -477,21 +397,19 @@ class LLMMaskGenerator:
                 if val:
                     val_str = val.strip()
                     if self._is_value_in_name(val_str, name, param_key=key, standard=standard):
-                        # Найти позицию в строке для сортировки
                         pos = name.lower().find(val_str.lower())
                         if pos < 0:
                             m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
                             if m:
                                 pos = name.lower().find(m.group().lower())
-                            if pos < 0:
-                                pos = 999
+                        if pos < 0:
+                            pos = 999
                         visible.append((key, val_str, pos))
                     else:
                         missing.append(key)
                 else:
                     missing.append(key)
 
-            # Сортировать видимые по позиции в строке
             visible.sort(key=lambda x: x[2])
 
             lines.append(f'{i}. Исходное: "{name}"')
@@ -504,13 +422,8 @@ class LLMMaskGenerator:
 
         return "\n".join(lines)
 
-
     def _get_prompt_template(self) -> str:
-        """Загрузить шаблон промпта.
-
-        FIX 2026-05-25: Читаем содержимое файла по пути из
-        mask_generation.prompt_template, а не возвращаем сам путь как строку.
-        """
+        """Загрузить шаблон промпта."""
         if self.settings and hasattr(self.settings, "mask_generation"):
             mg = self.settings.mask_generation
             template_path = getattr(mg, "prompt_template", "")
@@ -522,7 +435,6 @@ class LLMMaskGenerator:
                     return content
                 else:
                     logger.warning("[LLMMaskGenerator] prompt_template path not found: %s", template_path)
-        # Fallback paths
         for path in [
             "prompts/templates/mask_generation.txt",
             "prompts/mask_generation.txt",
@@ -560,19 +472,19 @@ class LLMMaskGenerator:
 11. Порядок групп: `тип_изделия` → `исполнение` (опц.) → числовые параметры → `покрытие` → `нтд_1`.
 12. Полная строка: `^...$` обязательно.
 13. Имена групп ≤30 символов, только [a-zA-Zа-яА-Я0-9_].
-14. **ЗАПРЕЩЕНЫ nested named groups**: `(?P<name>(?P<name2>...))` — НЕВАЛИДНЫ в Python re. Используй `(?:...)` для вложенных групп.
+14. **ЗАПРЕЩЕНЫ nested named groups**: `(?P(?P...))` — НЕВАЛИДНЫ в Python re. Используй `(?:...)` для вложенных групп.
 
 ### === ПРАВИЛО ТОЧКИ ===
 15. Точка `.` в номенклатуре:
-    - ДЕСЯТИЧНАЯ: если дробная часть имеет смысл (12.5 мм).
-    - РАЗДЕЛИТЕЛЬ: если после точки ровно 2 цифры-кода (100.58 → длина=100, группа=58).
-    - **ПРАВИЛО**: при сомнении разделяй: `(?P<длина>\d+)\.(?P<группа>\d+)` вместо `(?P<длина>\d+(?:[.,]\d+)?)`.
+   - ДЕСЯТИЧНАЯ: если дробная часть имеет смысл (12.5 мм).
+   - РАЗДЕЛИТЕЛЬ: если после точки ровно 2 цифры-кода (100.58 → длина=100, группа=58).
+   - **ПРАВИЛО**: при сомнении разделяй: `(?P<длина>\d+)\.(?P<группа>\d+)` вместо `(?P<длина>\d+(?:[.,]\d+)?)`.
 
 ### === КРИТИЧНО: ФОРМАТ НТД_1 ===
 16. **Группа `нтд_1` ДОЛЖНА матчить ПОЛНОЕ название стандарта** из заголовка этого промпта.
-    - Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `(?P<нтд_1>ОСТ\s*1\s*33049-80)`
-    - Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)` или `(?P<нтд_1>ГОСТ\s*7795-70)`
-    - **ЗАПРЕЩЕНО** использовать `\d+` вместо `ОСТ`/`ГОСТ` — это сломает парсинг.
+   - Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `(?P<нтд_1>ОСТ\s*1\s*33049-80)`
+   - Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)` или `(?P<нтд_1>ГОСТ\s*7795-70)`
+   - **ЗАПРЕЩЕНО** использовать `\d+` вместо `ОСТ`/`ГОСТ` — это сломает парсинг.
 17. **Пример правильного pattern для ОСТ 1 33049-80 / Гайка**:
 ```
 ^(?P<тип_изделия>Гайка)\s*(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?\s*[-\s]+(?P<покрытие>[\w.]+)\s*[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
@@ -602,7 +514,7 @@ class LLMMaskGenerator:
 - [ ] Покрытие не перехватывает `ОСТ`?
 - [ ] `нтд_1` содержит полное название стандарта (`ОСТ 1 XXXXX-80` или `ГОСТ XXXX-XX`), а НЕ `\d+`?
 - [ ] `^` и `$` присутствуют?
-- [ ] НЕТ nested named groups `(?P<a>(?P<b>...))`?
+- [ ] НЕТ nested named groups `(?P(?P ...))`?
 - [ ] Pattern компилируется в Python re без ошибок?
 
 === СТРОГОЕ СООТВЕТСТВИЕ ===
@@ -611,21 +523,13 @@ class LLMMaskGenerator:
 
     def _build_prompt(self, standard: str, item_type: str, examples: List[Dict],
                       name: str = "", standard_info: Any = None) -> str:
-        """Собрать промпт с ENS-примерами.
-
-        FIX 2026-05-25:
-        1. Добавлен header с мета-информацией (provider, model, temperature, timestamp).
-        2. Убрано дублирование: examples_text содержит только примеры,
-           stats_text — только статистику (placeholder из template).
-        3. Для _default_template() НЕ добавляем task/format секции — они уже внутри.
-        """
+        """Собрать промпт с ENS-примерами."""
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
         stats_text = self._format_stats(examples, standard)
 
         service, model, temperature = self._resolve_service()
 
-        # --- Замена placeholder'ов в template ---
         replacements = {
             "{examples_text}": examples_text,
             "{stats_text}": stats_text,
@@ -641,15 +545,14 @@ class LLMMaskGenerator:
                 template = template.replace(placeholder, value)
 
         if "{params_list}" in template:
-            visible = self._extract_visible_params(examples, standard)
+            visible = self._extract_visible_params(examples)
             template = template.replace("{params_list}", json.dumps(visible, ensure_ascii=False))
         if "{required_list}" in template:
-            visible = self._extract_visible_params(examples, standard)
+            visible = self._extract_visible_params(examples)
             optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
             required = [p for p in visible if p not in optional]
             template = template.replace("{required_list}", json.dumps(required, ensure_ascii=False))
 
-        # --- Добавляем ЗАДАЧА/ФОРМАТ только если их нет в template ---
         has_task = "=== ЗАДАЧА ===" in template or "ЗАДАЧА:" in template.lower()
         has_format = "=== ФОРМАТ ОТВЕТА ===" in template or "```json" in template
 
@@ -678,7 +581,6 @@ class LLMMaskGenerator:
 
 Только JSON, без комментариев."""
 
-        # Header с мета-информацией (не для regex — для отладки)
         header = f"""# Тип изделия: {item_type}
 # Стандарт: {standard}
 # Провайдер: {service or 'LLM'}
@@ -690,11 +592,8 @@ class LLMMaskGenerator:
         prompt = header + "\n" + template + task_section + format_section
         return prompt
 
-    def _extract_visible_params(self, examples: List[Dict], standard: str = "") -> List[str]:
-        """Извлечь список глобально видимых параметров из ENS-примеров.
-
-        FIX 2026-05-25 v4: union across all examples с positional matching.
-        """
+    def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
+        """Извлечь список глобально видимых параметров из ENS-примеров."""
         if not examples:
             return ["тип_изделия", "номинальный_диаметр_резьбы", "покрытие", "нтд_1"]
 
@@ -714,14 +613,6 @@ class LLMMaskGenerator:
             name = ex.get("наименование", ex.get("полное_наименование", ""))
             if not name:
                 continue
-            # Clean name: remove standard
-            name_clean = re.sub(
-                r'ОСТ\s*\d+\s*\d+-\d+|ГОСТ\s*\d+-\d+',
-                '',
-                name,
-                flags=re.IGNORECASE
-            )
-            occupied = set()
             for key in check_keys:
                 if key == "наименование_типа":
                     continue
@@ -730,28 +621,18 @@ class LLMMaskGenerator:
                     continue
                 val_str = val.strip()
                 if key == "тип_изделия":
-                    if name_clean.lower().startswith(val_str.lower()):
+                    if name.lower().startswith(val_str.lower()):
                         global_visible.add(key)
                     continue
-                positions = self._find_value_positions(val_str, name_clean, param_key=key)
-                for start, end in positions:
-                    if not any(p in range(start, end) for p in occupied):
-                        global_visible.add(key)
-                        occupied.update(range(start, end))
-                        break
+                if self._is_value_in_name(val_str, name, param_key=key):
+                    global_visible.add(key)
 
-        # Обязательные поля
         global_visible.add("тип_изделия")
         global_visible.add("нтд_1")
         return list(global_visible)
 
     def _get_debug_dir(self) -> Optional[Path]:
-        """Получить путь к debug-директории из конфига.
-
-        FIX 2026-05-25: Используем mask_generation.debug_prompts_dir из config.
-        Файлы сохраняются напрямую в эту директорию (без подпапок).
-        Возвращает None если save_debug_prompts=false.
-        """
+        """Получить путь к debug-директории из конфига."""
         if not self.settings:
             return None
         mg = getattr(self.settings, "mask_generation", None)
@@ -765,11 +646,7 @@ class LLMMaskGenerator:
         return Path(debug_dir)
 
     def _save_debug_prompt(self, standard: str, item_type: str, prompt: str) -> None:
-        """Сохранить промпт в debug-директорию.
-
-        Формат имени: {item_type}_{standard}.txt
-        Пример: Болт_ОСТ 1 31141-80.txt
-        """
+        """Сохранить промпт в debug-директорию."""
         base_dir = self._get_debug_dir()
         if not base_dir:
             return
@@ -784,15 +661,7 @@ class LLMMaskGenerator:
 
     def _save_debug_response(self, standard: str, item_type: str, response: str,
                              service: str, attempt: int) -> None:
-        """Сохранить ответ LLM в debug-директорию.
-
-        Формат имени: {item_type}_{standard}_a{attempt}.txt
-        Пример: Болт_ОСТ 1 31141-80_a1.txt
-
-        FIX 2026-05-25:
-        1. Добавлен header с мета-информацией.
-        2. Извлекаем только 'raw' content из dict repr (не сохраняем весь dict).
-        """
+        """Сохранить ответ LLM в debug-директорию."""
         base_dir = self._get_debug_dir()
         if not base_dir:
             return
@@ -803,22 +672,13 @@ class LLMMaskGenerator:
 
             svc, model, temp = self._resolve_service()
 
-            # Извлечь raw content из Python dict repr
             raw_content = response
-            try:
-                import ast
-                parsed = ast.literal_eval(response)
-                if isinstance(parsed, dict) and "raw" in parsed:
-                    raw_content = parsed["raw"]
-                    # Убрать markdown обёртку ```json ... ```
-                    for prefix in ["```json", "```python", "```"]:
-                        if raw_content.startswith(prefix):
-                            raw_content = raw_content[len(prefix):].strip()
-                            break
-                    if raw_content.endswith("```"):
-                        raw_content = raw_content[:-3].strip()
-            except Exception:
-                pass  # не dict repr — сохраняем как есть
+            for prefix in ["```json", "```python", "```"]:
+                if raw_content.startswith(prefix):
+                    raw_content = raw_content[len(prefix):].strip()
+                    break
+            if raw_content.endswith("```"):
+                raw_content = raw_content[:-3].strip()
 
             lines = [
                 f"# Тип изделия: {item_type}",
@@ -844,22 +704,12 @@ class LLMMaskGenerator:
         name: str = "",
         standard_info: Any = None,
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
-        """
-        Генерация маски через LLM с ENS-примерами.
-
-        RETURNS:
-        (MaskGenerationResult, metadata_dict) on success
-        (None, None) on failure
-
-        metadata_dict contains: provider, model, temperature,
-        tokens_prompt, tokens_completion
-        """
+        """Генерация маски через LLM с ENS-примерами."""
         canon_std = canonicalize_standard(standard)
         if examples is None:
             examples = self._get_ens_examples(canon_std, item_type, max_examples=20)
         prompt = self._build_prompt(canon_std, item_type, examples, name, standard_info)
 
-        # DEBUG: save prompt before sending
         self._save_debug_prompt(canon_std, item_type, prompt)
 
         service, model, temperature = self._resolve_service()
@@ -871,7 +721,6 @@ class LLMMaskGenerator:
                 try:
                     result = self._call_llm(client, prompt, model, temperature)
                     if result:
-                        # DEBUG: save raw response
                         self._save_debug_response(canon_std, item_type, result["text"],
                                                   svc_name, attempt)
 
@@ -884,7 +733,6 @@ class LLMMaskGenerator:
                             tokens_completion=result.get("tokens_completion", 0)
                         )
                         if mask:
-                            # FIX: validate regex compiles before returning
                             try:
                                 re.compile(mask.pattern, re.IGNORECASE)
                             except re.error as re_err:
@@ -934,7 +782,6 @@ class LLMMaskGenerator:
         client_type = type(client).__name__
         logger.debug("[LLMMaskGenerator] Calling %s with model=%s temp=%s", client_type, model, temperature)
 
-        # Attempt 1: OpenAI-compatible messages format (most common)
         try:
             if hasattr(client, "chat") or hasattr(client, "generate"):
                 method = getattr(client, "chat", None) or getattr(client, "generate", None)
@@ -958,7 +805,6 @@ class LLMMaskGenerator:
                 if isinstance(response, str):
                     text = response
                 elif isinstance(response, dict):
-                    # FIX 2026-05-25: MTSAIClient returns dict with "raw", "text", "content"
                     text = response.get("text", "") or response.get("raw", "") or response.get("content", "")
                     if not text:
                         text = str(response)
@@ -993,7 +839,6 @@ class LLMMaskGenerator:
         except Exception as e:
             logger.warning("[LLMMaskGenerator] %s call failed: %s", client_type, e)
 
-        # Attempt 2: Direct HTTP-style complete()
         try:
             if hasattr(client, "complete"):
                 response = client.complete(prompt, model=model, temperature=temperature)
@@ -1012,15 +857,10 @@ class LLMMaskGenerator:
 
     @staticmethod
     def _extract_json_fields(text: str) -> Optional[Dict]:
-        """Извлечь pattern/params/required из JSON-like текста.
-
-        FIX 2026-05-25: Простой парсинг без сложных regex.
-        Ищем поля по ключам, извлекаем значения между кавычками.
-        """
+        """Извлечь pattern/params/required из JSON-like текста."""
         logger.debug("[LLM] _extract_json_fields called, text len=%d", len(text))
 
         def _find_quoted_value(text: str, key: str) -> Optional[str]:
-            """Найти строковое значение между кавычками после key."""
             pos = text.find(key)
             if pos < 0:
                 return None
@@ -1040,7 +880,6 @@ class LLMMaskGenerator:
             return text[quote + 1:i]
 
         def _find_array(text: str, key: str) -> List[str]:
-            """Найти массив строк [...] после key."""
             pos = text.find(key)
             if pos < 0:
                 return []
@@ -1066,8 +905,7 @@ class LLMMaskGenerator:
         if not raw_pattern:
             return None
 
-        # JSON → Python: \\ → \, \" → ", \n → newline
-        pattern = raw_pattern.replace('\\\\', '\\')
+        pattern = raw_pattern.replace('\\\', '\')
         pattern = pattern.replace('\\"', '"')
         pattern = pattern.replace('\\n', '\n')
         pattern = pattern.replace('\\t', ' ')
@@ -1088,12 +926,7 @@ class LLMMaskGenerator:
         tokens_prompt: int = 0,
         tokens_completion: int = 0,
     ) -> Optional[MaskGenerationResult]:
-        """Парсинг JSON-ответа LLM.
-
-        FIX 2026-05-25: MTSAIClient возвращает Python dict repr (одинарные кавычки).
-        Добавлен ast.literal_eval + извлечение из content/raw.
-        Добавлена проверка компиляции regex после парсинга.
-        """
+        """Парсинг JSON-ответа LLM."""
         if not text:
             logger.warning("[LLMMaskGenerator] Empty response text")
             return None
@@ -1104,7 +937,6 @@ class LLMMaskGenerator:
         data = None
         candidate = None
 
-        # --- STRATEGY 1: Python dict repr (MTSAIClient format) ---
         try:
             import ast
             parsed = ast.literal_eval(text)
@@ -1121,7 +953,6 @@ class LLMMaskGenerator:
         except (ValueError, SyntaxError, TypeError) as e:
             logger.debug("[LLM] ast.literal_eval failed: %s", e)
 
-        # --- STRATEGY 2: Extract from raw field with markdown ---
         if data is None:
             try:
                 import yaml
@@ -1131,16 +962,13 @@ class LLMMaskGenerator:
                         data = data["content"]
                         logger.debug("[LLM] Parsed via yaml.safe_load -> content")
                     elif "raw" in data and isinstance(data["raw"], str):
-                        # raw содержит markdown-обёртку ```json\n{...}\n```
                         raw_text = data["raw"]
-                        # Убираем markdown обёртку
                         for prefix in ["```json", "```python", "```"]:
                             if raw_text.startswith(prefix):
                                 raw_text = raw_text[len(prefix):].strip()
                                 break
                         if raw_text.endswith("```"):
                             raw_text = raw_text[:-3].strip()
-                        # Пробуем распарсить очищенный JSON
                         try:
                             data = json.loads(raw_text)
                             logger.debug("[LLM] Parsed raw markdown JSON via json.loads")
@@ -1160,7 +988,6 @@ class LLMMaskGenerator:
             except Exception as e:
                 logger.debug("[LLM] yaml.safe_load failed: %s", e)
 
-        # --- STRATEGY 3: Markdown code block inside text ---
         if data is None:
             for prefix in ["```json", "```python", "```"]:
                 start = text.find(prefix)
@@ -1185,7 +1012,6 @@ class LLMMaskGenerator:
                     except Exception:
                         pass
 
-        # --- STRATEGY 4: Balanced braces ---
         if data is None:
             for start_match in re.finditer(r"(?m)^[ \t]*\{", text):
                 pos = start_match.start()
@@ -1196,7 +1022,7 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == '\\':
+                    if ch == '\\' and not escape:
                         escape = True
                         continue
                     if ch == '"' and not escape:
@@ -1226,7 +1052,6 @@ class LLMMaskGenerator:
                 if data is not None:
                     break
 
-        # --- STRATEGY 5: Simple regex fallback ---
         if data is None:
             json_match = re.search(r"\{.*?\}", text, re.DOTALL)
             if json_match:
@@ -1245,7 +1070,6 @@ class LLMMaskGenerator:
                     except Exception:
                         pass
 
-        # --- STRATEGY 6: Regex-based field extraction (ultimate fallback) ---
         if data is None:
             logger.debug("[LLM] Trying _extract_json_fields fallback...")
             try:
@@ -1258,7 +1082,6 @@ class LLMMaskGenerator:
                 logger.warning("[LLM] _extract_json_fields failed: %s", e)
                 data = None
 
-        # --- Validate and build result ---
         if data is None or not isinstance(data, dict):
             logger.warning(
                 "[LLMMaskGenerator] Failed to parse any JSON for %s/%s. Preview: %r",
@@ -1274,7 +1097,6 @@ class LLMMaskGenerator:
             return None
         pattern = self._fix_pattern(pattern, standard, item_type)
 
-        # FIX: validate regex compiles immediately after fix
         try:
             re.compile(pattern, re.IGNORECASE)
         except re.error as re_err:
@@ -1322,32 +1144,20 @@ class LLMMaskGenerator:
             pattern = pattern.replace("наименование_типа", "тип_изделия")
             logger.info("[LLMMaskGenerator] Fixed тип_изделия name")
 
-        # FIX: remove nested named groups (invalid in Python re)
-        # Pattern: (?P<outer>(?P<inner>...)) → (?P<outer>(?:...))
         nested_fix = re.sub(
-            r'\(\?P<([^>]+)>\((\?P<[^>]+>[^)]+)\)\)',
-            lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\\?\\?P<[^>]+>", "", m.group(2))}))',
+            r'\(\?P<([^>]+)>\(\(\?P<[^>]+>[^)]+\)\)',
+            lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\(\?P<[^>]+>", "(?:", m.group(2))}))',
             pattern
         )
         if nested_fix != pattern:
             logger.info("[LLMMaskGenerator] Removed nested named groups")
             pattern = nested_fix
 
-        # Also fix: (?P<name>(?:...(?P<name2>...)...)) — convert inner named to non-capturing
-        # This is a best-effort fix
-        def _fix_inner_named(match):
-            inner = match.group(1)
-            # Replace all (?P<...>...) inside with (?:...)
-            inner_fixed = re.sub(r'\?P<[^>]+>', '?:', inner)
-            return f'(?P<{match.group(0).split("<")[1].split(">")[0]}>(?:{inner_fixed}))'
-
-        # More robust: replace any (?P< inside already opened (?P<...>...
-        # We do iterative replacement
         max_iter = 5
         for _ in range(max_iter):
             new_pattern = re.sub(
-                r'\(\?P<([^>]+)>\(([^()]*\(\?P<[^)]+\)[^()]*)\)\)',
-                lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\\?\\?P<[^>]+>", "", m.group(2))}))',
+                r'\(\?P<([^>]+)>\(([^()]*\(\?P<[^)]+\)[^()]*)\)',
+                lambda m: f'(?P<{m.group(1)}>(?:{re.sub(r"\(\?P<[^>]+>", "(?:", m.group(2))}))',
                 pattern
             )
             if new_pattern == pattern:
@@ -1358,39 +1168,26 @@ class LLMMaskGenerator:
         return pattern
 
     def _sanitize_mask_result(self, result: MaskGenerationResult) -> MaskGenerationResult:
-        r"""Универсальная очистка маски от типичных LLM-ошибок.
-
-        FIX 2026-05-25: Не хардкод под стандарт, а универсальные правила:
-        1. Удалить наименование_типа, если есть тип_изделия.
-        2. Исправить опечатки в именах групп (тип_2изделия → тип_изделия).
-        3. Убедиться, что required ⊆ params.
-        4. Удалить пустые опциональные группы из pattern.
-        5. НЕ ломать [:-\s] (colon-dash-whitespace char class).
-        """
+        r"""Универсальная очистка маски от типичных LLM-ошибок."""
         pattern = result.pattern
         params = list(result.params)
         required = list(result.required)
 
-        # 0. Удалить metadata-only params (SKIP_PARAMS) — они не видны в наименовании
         for sp in LLMMaskGenerator.SKIP_PARAMS:
             if sp in params:
                 params.remove(sp)
                 logger.info("[LLMMaskGenerator] Sanitized: removed metadata param %s", sp)
             if sp in required:
                 required.remove(sp)
-            # Remove from pattern
             pattern = re.sub(rf'\(\?P<{re.escape(sp)}>[^)]+\)\??', '', pattern)
 
-        # 1. Удалить дублирующий наименование_типа
         if "тип_изделия" in params and "наименование_типа" in params:
             params.remove("наименование_типа")
             if "наименование_типа" in required:
                 required.remove("наименование_типа")
-            # Удалить группу наименование_типа из pattern (с разделителем)
             pattern = re.sub(r"\(\?P<наименование_типа>[^)]+\)(?:\s*[-\s]*)?", "", pattern)
             logger.info("[LLMMaskGenerator] Sanitized: removed duplicate наименование_типа")
 
-        # 2. Исправить типичные опечатки
         typo_fixes = {
             "тип_2изделия": "тип_изделия",
             "тип_изделия2": "тип_изделия",
@@ -1403,28 +1200,17 @@ class LLMMaskGenerator:
                 pattern = pattern.replace(f"(?P<{bad}>", f"(?P<{good}>")
                 logger.info("[LLMMaskGenerator] Sanitized: fixed typo %s → %s", bad, good)
 
-        # 3. required должен быть подмножеством params
         required = [p for p in required if p in params]
 
-        # 4. Удалить пустые опциональные группы (?P<name>)? из pattern
         try:
             pattern = re.sub(r"\(\?P<[^>]+>\)\?", "", pattern)
         except re.error:
-            pass  # ignore regex errors in cleanup
-
-        # 5. НЕ исправлять [:-\s] — это валидный char class в Python re
-        #    (matches ':', '-', whitespace). Предыдущий fix ломал этот паттерн.
-        #    Оставляем как есть.
-
-        # 6. Исправить двойные обратные слеши: \\d+ → \d+
-        # NOTE: Не делаем replace("\\", "\\") — это ломает \\s → s
-        # Двойные слеши уже обработаны в _extract_json_fields
+            pass
 
         result.pattern = pattern
         result.params = params
         result.required = required
 
-        # Final compile check
         try:
             re.compile(pattern, re.IGNORECASE)
         except re.error as re_err:
