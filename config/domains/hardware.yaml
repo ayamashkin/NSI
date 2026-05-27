@@ -10,6 +10,10 @@ description: "Крепежные изделия"
 # Путь к построенному индексу (используется как default при --domain hardware)
 index_path: "cache/ens_hardware.pkl"
 
+# Шаблон промпта для генерации масок в этом домене.
+# Если не указан — используется базовый prompts/templates/mask_generation.txt
+prompt_template: "prompts/templates/mask_generation_hardware.txt"
+
 index:
   # =============================================================================
   # skip_fields — поля, которые удаляются полностью из индекса.

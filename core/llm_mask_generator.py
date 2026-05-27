@@ -2,10 +2,10 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-27 17:46:00 — Убрано forced добавление нтд_1 и тип_изделия в visible-параметры
-# 2026-05-27 17:46:00 — _get_global_visible и _get_visible_params_from_index возвращают только данные из примеров
-# 2026-05-27 17:46:00 — _extract_visible_params fallback упрощён (нет захардкоженного списка)
-# 2026-05-27 17:46:00 — нтд_1 остаётся только в правилах regex (пункт 18 шаблона), но не в "Параметры из ЕНС"
+# 2026-05-27 18:15:00 — FIX SyntaxError: r'\\\' → безопасный chr(92)*3
+# 2026-05-27 18:15:00 — Добавлена поддержка доменных prompt_template
+# 2026-05-27 18:15:00 — _get_prompt_template ищет сначала доменный шаблон
+# 2026-05-27 17:46:00 — Убрано forced добавление нтд_1/тип_изделия в visible
 # 2026-05-27 14:15:00 — Рефакторинг под доменную архитектуру ENS
 # =============================================================================
 """
@@ -468,6 +468,8 @@ class LLMMaskGenerator:
         return "\n".join(lines)
 
     def _get_prompt_template(self) -> str:
+        """Получить базовый шаблон промпта (с плейсхолдерами)."""
+        # 1. Пробуем базовый шаблон из settings
         if self.settings and hasattr(self.settings, "mask_generation"):
             mg = self.settings.mask_generation
             template_path = getattr(mg, "prompt_template", "")
@@ -475,6 +477,8 @@ class LLMMaskGenerator:
                 p = Path(template_path)
                 if p.exists():
                     return p.read_text(encoding="utf-8")
+
+        # 2. Fallback на базовые пути
         for path in [
             "prompts/templates/mask_generation.txt",
             "prompts/mask_generation.txt",
@@ -483,7 +487,36 @@ class LLMMaskGenerator:
             p = Path(path)
             if p.exists():
                 return p.read_text(encoding="utf-8")
+
         return self._default_template()
+
+    def _get_domain_examples_text(self) -> str:
+        """Получить доменные примеры паттернов (фрагмент для {domain_examples})."""
+        # 1. Пробуем путь из DomainConfig
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            if cfg.prompt_template:
+                p = Path(cfg.prompt_template)
+                if p.exists():
+                    logger.info("[LLMMaskGenerator] Using domain examples: %s", p)
+                    return p.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.debug("[LLMMaskGenerator] Domain config prompt_template not found: %s", e)
+
+        # 2. Пробуем соглашение об именовании
+        domain_paths = [
+            f"prompts/templates/mask_generation_{self.domain}.txt",
+            f"prompts/mask_generation_{self.domain}.txt",
+        ]
+        for path in domain_paths:
+            p = Path(path)
+            if p.exists():
+                logger.info("[LLMMaskGenerator] Using domain examples: %s", p)
+                return p.read_text(encoding="utf-8")
+
+        logger.info("[LLMMaskGenerator] No domain examples found for '%s', using empty", self.domain)
+        return ""
 
     def _default_template(self) -> str:
         return r"""Ты — эксперт по техническим стандартам ГОСТ/ОСТ/ТУ и регулярным выражениям Python 3 (re модуль).
@@ -551,23 +584,6 @@ class LLMMaskGenerator:
 Если параметр "Отсутствует" в части примеров — он ОПЦИОНАЛЬНЫЙ.
 Используй (?P<...>)? для опциональных параметров.
 
-=== ПРИМЕРЫ ПРАВИЛЬНЫХ ПАТТЕРНОВ ===
-
-**ОСТ 1 33049-80 / Гайка** (без шага, без исполнения):
-```
-^(?P<тип_изделия>Гайка)[-\s]+(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
-```
-
-**ГОСТ 7795-70 / Болт** (с классом допуска, длиной, покрытием):
-```
-^(?P<тип_изделия>Болт)[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_поле_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)?[-\s]*(?P<нтд_1>ГОСТ\s*7795-70)$
-```
-
-**ОСТ 1 31133-80 / Болт** (с исполнением, покрытием):
-```
-^(?P<тип_изделия>Болт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
-```
-
 === ФОРМАТ ОТВЕТА ===
 
 ```json
@@ -605,10 +621,13 @@ class LLMMaskGenerator:
         template = self._get_prompt_template()
         examples_text = self._format_examples(examples, standard, item_type)
         stats_text = self._format_stats(examples, standard)
+        domain_examples = self._get_domain_examples_text()
         service, model, temperature = self._resolve_service()
+
         replacements = {
             "{examples_text}": examples_text,
             "{stats_text}": stats_text,
+            "{domain_examples}": domain_examples,
             "{item_type}": item_type,
             "{standard}": standard,
             "{provider}": service or "LLM",
@@ -619,6 +638,20 @@ class LLMMaskGenerator:
         for placeholder, value in replacements.items():
             if placeholder in template:
                 template = template.replace(placeholder, value)
+
+        # ЗАЩИТА: если {examples_text} не был заменён (нет в шаблоне) — вставляем принудительно
+        if "{examples_text}" in template:
+            # Вставляем перед === ЖЁСТКИЕ ЗАПРЕТЫ === или === ПРАВИЛА ===
+            insert_marker = "=== ЖЁСТКИЕ ЗАПРЕТЫ ==="
+            if insert_marker in template:
+                template = template.replace(
+                    insert_marker,
+                    f"=== ПРИМЕРЫ ИЗ ЕНС ===\n\n{examples_text}\n\n=== СТАТИСТИКА ПАРАМЕТРОВ ===\n\n{stats_text}\n\n" + insert_marker
+                )
+            else:
+                template = template.replace("{examples_text}", examples_text)
+                template = template.replace("{stats_text}", stats_text)
+
         if "{params_list}" in template:
             visible = self._extract_visible_params(examples)
             template = template.replace("{params_list}", json.dumps(visible, ensure_ascii=False))
@@ -627,6 +660,7 @@ class LLMMaskGenerator:
             optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
             required = [p for p in visible if p not in optional]
             template = template.replace("{required_list}", json.dumps(required, ensure_ascii=False))
+
         has_task = "=== ЗАДАЧА ===" in template or "ЗАДАЧА:" in template.lower()
         has_format = "=== ФОРМАТ ОТВЕТА ===" in template or "```json" in template
         task_section = ""
@@ -801,6 +835,7 @@ class LLMMaskGenerator:
     def _call_llm(self, client: Any, prompt: str, model: str, temperature: float) -> Optional[Dict]:
         client_type = type(client).__name__
         logger.debug("[LLMMaskGenerator] Calling %s with model=%s temp=%s", client_type, model, temperature)
+        text = None
         try:
             if hasattr(client, "chat") or hasattr(client, "generate"):
                 method = getattr(client, "chat", None) or getattr(client, "generate", None)
@@ -810,7 +845,6 @@ class LLMMaskGenerator:
                 except TypeError as te:
                     logger.debug("[LLMMaskGenerator] messages failed, trying prompt: %s", te)
                     response = method(prompt=prompt, model=model, temperature=temperature)
-                text = None
                 if isinstance(response, str):
                     text = response
                 elif isinstance(response, dict):
@@ -826,6 +860,9 @@ class LLMMaskGenerator:
                                 text = str(choice)
                     if not text:
                         text = response.get("text", "") or response.get("content", "")
+                    # DEBUG: показать ключи, если текст всё ещё пустой
+                    if not text:
+                        logger.debug("[LLMMaskGenerator] %s returned dict with keys: %s", client_type, list(response.keys()))
                 elif hasattr(response, "text"):
                     text = response.text
                 elif hasattr(response, "content"):
@@ -835,12 +872,15 @@ class LLMMaskGenerator:
                 if text and len(text) > 10:
                     tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens", 0)
                     tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client, "_last_completion_tokens", 0)
+                    logger.debug("[LLMMaskGenerator] %s returned text (len=%d)", client_type, len(text))
                     return {
                         "text": text,
                         "model": model,
                         "tokens_prompt": tokens_prompt,
                         "tokens_completion": tokens_completion,
                     }
+                else:
+                    logger.warning("[LLMMaskGenerator] %s returned empty/short text: %r", client_type, text[:50] if text else None)
         except Exception as e:
             logger.warning("[LLMMaskGenerator] %s call failed: %s", client_type, e)
             try:
@@ -848,10 +888,10 @@ class LLMMaskGenerator:
                     response = client.complete(prompt, model=model, temperature=temperature)
                     if response and len(str(response)) > 10:
                         return {"text": str(response), "model": model, "tokens_prompt": 0, "tokens_completion": 0}
-            except Exception as e:
-                logger.debug("[LLMMaskGenerator] complete() failed: %s", e)
-            logger.error("[LLMMaskGenerator] All LLM call methods failed for %s", client_type)
-            return None
+            except Exception as e2:
+                logger.debug("[LLMMaskGenerator] complete() failed: %s", e2)
+        logger.error("[LLMMaskGenerator] All LLM call methods failed for %s", client_type)
+        return None
 
     @staticmethod
     def _extract_json_fields(text: str) -> Optional[Dict]:
@@ -899,11 +939,11 @@ class LLMMaskGenerator:
         raw_pattern = _find_quoted_value(text, '"pattern"')
         if not raw_pattern:
             return None
-        pattern = raw_pattern.replace(r'\\\', '\')
-        pattern = pattern.replace('\"', '"')
-        pattern = pattern.replace('\n', '
-')
-        pattern = pattern.replace('\t', ' ')
+        # FIX SyntaxError: безопасная замена тройных слешей
+        pattern = raw_pattern.replace(chr(92) * 3, chr(92))
+        pattern = pattern.replace('\\"', '"')
+        pattern = pattern.replace('\\n', '\n')
+        pattern = pattern.replace('\\t', ' ')
         params = _find_array(text, '"params"')
         required = _find_array(text, '"required"')
         return {"pattern": pattern, "params": params, "required": required}
@@ -1023,11 +1063,6 @@ class LLMMaskGenerator:
                         data = yaml.safe_load(candidate)
                     except Exception:
                         pass
-        if data is None:
-            try:
-                data = self._extract_json_fields(text)
-            except Exception:
-                data = None
         if data is None or not isinstance(data, dict):
             return None
         pattern = data.get("pattern", "")

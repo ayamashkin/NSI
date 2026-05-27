@@ -2,11 +2,11 @@
 # FILE: core/domain_config.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-27 18:15:00 — Добавлен prompt_template для доменных промптов
 # 2026-05-27 14:05:00 — Создан DomainConfig для доменной архитектуры ENS
 # 2026-05-27 14:05:00 — Добавлена поддержка skip_fields, meta_fields, retain_fields
 # 2026-05-27 14:05:00 — Добавлены field_aliases и нормализация имён полей
 # 2026-05-27 14:05:00 — Реализован загрузчик YAML из config/domains/
-# 2026-05-27 14:05:00 — Добавлены thresholds для visible/twin detection
 # =============================================================================
 """
 Domain Configuration Module
@@ -29,6 +29,7 @@ class DomainConfig:
     domain: str = ""
     description: str = ""
     index_path: str = ""
+    prompt_template: Optional[str] = None
     skip_fields: Set[str] = field(default_factory=set)
     meta_fields: Set[str] = field(default_factory=set)
     retain_fields: Set[str] = field(default_factory=set)
@@ -60,6 +61,7 @@ class DomainConfig:
             domain=domain,
             description=data.get("description", ""),
             index_path=data.get("index_path", f"cache/ens_{domain}.pkl"),
+            prompt_template=data.get("prompt_template"),
             skip_fields=set(str(x) for x in idx.get("skip_fields", [])),
             meta_fields=set(str(x) for x in idx.get("meta_fields", [])),
             retain_fields=set(str(x) for x in idx.get("retain_fields", [])),
