@@ -2,15 +2,15 @@
 # FILE: core/domain_config.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-27 18:15:00 — Добавлен prompt_template для доменных промптов
-# 2026-05-27 14:05:00 — Создан DomainConfig для доменной архитектуры ENS
-# 2026-05-27 14:05:00 — Добавлена поддержка skip_fields, meta_fields, retain_fields
-# 2026-05-27 14:05:00 — Добавлены field_aliases и нормализация имён полей
-# 2026-05-27 14:05:00 — Реализован загрузчик YAML из config/domains/
+# 2026-05-27 21:15:00 — Added meta_regex_groups for configurable regex meta-groups
+# 2026-05-27 18:15:00 — Added prompt_template for domain prompts
+# 2026-05-27 14:05:00 — Created DomainConfig for domain ENS architecture
+# 2026-05-27 14:05:00 — Added skip_fields, meta_fields, retain_fields support
+# 2026-05-27 14:05:00 — Added field_aliases and field name normalization
 # =============================================================================
 """
 Domain Configuration Module
-Загружает предметную конфигурацию (домен) из YAML.
+Loads subject configuration (domain) from YAML.
 """
 import logging
 import re
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DomainConfig:
-    """Конфигурация предметной области."""
+    """Subject area configuration."""
     domain: str = ""
     description: str = ""
     index_path: str = ""
@@ -37,10 +37,11 @@ class DomainConfig:
     twin_threshold: float = 1.0
     visible_threshold: float = 0.05
     max_field_name_len: int = 30
+    meta_regex_groups: List[str] = field(default_factory=lambda: ["тип_изделия", "нтд_1"])
 
     @classmethod
     def load(cls, domain: str, base_path: str = "config/domains") -> "DomainConfig":
-        """Загрузить конфигурацию домена из YAML."""
+        """Load domain configuration from YAML."""
         path = Path(base_path) / f"{domain}.yaml"
         if not path.exists():
             logger.warning("[DomainConfig] Domain file not found: %s", path)
@@ -51,11 +52,16 @@ class DomainConfig:
 
         idx = data.get("index", {})
 
-        # field_aliases: ключ в YAML может содержать точки/скобки — читаем как строки
+        # field_aliases: key in YAML may contain dots/brackets — read as strings
         aliases_raw = idx.get("field_aliases", {})
         aliases: Dict[str, str] = {}
         for k, v in aliases_raw.items():
             aliases[str(k).strip()] = str(v).strip()
+
+        # meta_regex_groups from index or root
+        meta_groups = data.get("meta_regex_groups", idx.get("meta_regex_groups", ["тип_изделия", "нтд_1"]))
+        if isinstance(meta_groups, str):
+            meta_groups = [g.strip() for g in meta_groups.split(",")]
 
         return cls(
             domain=domain,
@@ -69,20 +75,21 @@ class DomainConfig:
             twin_threshold=float(idx.get("twin_threshold", 1.0)),
             visible_threshold=float(idx.get("visible_threshold", 0.05)),
             max_field_name_len=int(idx.get("max_field_name_len", 30)),
+            meta_regex_groups=meta_groups,
         )
 
     def canonicalize_field_name(self, original: str) -> str:
-        """Преобразовать оригинальное имя поля ENS в canonical name."""
+        """Convert original ENS field name to canonical name."""
         if original in self.field_aliases:
             return self.field_aliases[original]
 
-        # Fallback: очистка
+        # Fallback: cleanup
         name = re.sub(r"\s*\([^)]*\)\s*", " ", original).strip()
         name = name.lower().replace(" ", "_").replace(",", "_")
         name = re.sub(r"_+", "_", name).strip("_")
 
         if len(name) > self.max_field_name_len:
-            # Удаляем повторяющиеся слова и артикли
+            # Remove duplicate words and articles
             name = re.sub(r"\b(ди|de|la|le|et|du)\b", "", name)
             name = re.sub(r"_+", "_", name).strip("_")
             name = name[:self.max_field_name_len]

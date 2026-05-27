@@ -2,11 +2,11 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-27 17:46:00 — Убран хардкод skip_params, теперь читается из DomainConfig
-# 2026-05-27 17:46:00 — _build_skip_params формирует набор из meta_fields + retain_fields + skip_fields домена
-# 2026-05-27 17:46:00 — Добавлен _norm_field_name для нормализации имён полей
-# 2026-05-27 17:46:00 — Fallback на базовый набор только если доменный конфиг недоступен
-# 2026-05-27 14:20:00 — Добавлена поддержка доменных индексов ens_{domain}.pkl
+# 2026-05-27 21:15:00 — _build_skip_params now uses DomainConfig.meta_regex_groups
+# 2026-05-27 21:15:00 — Removed hardcoded нтд_1/тип_изделия from fallback skip set
+# 2026-05-27 17:46:00 — Removed hardcoded skip_params, now reads from DomainConfig
+# 2026-05-27 17:46:00 — _build_skip_params builds from meta_fields + retain_fields + skip_fields
+# 2026-05-27 17:46:00 — Added _norm_field_name for field name normalization
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -45,7 +45,7 @@ class ValidationResult:
 
 
 class AutoValidator:
-    """Валидатор масок на примерах ЕНС с поддержкой доменов."""
+    """Mask validator on ENS examples with domain support."""
 
     def __init__(
         self,
@@ -62,14 +62,14 @@ class AutoValidator:
 
     @staticmethod
     def _norm_field_name(name: str) -> str:
-        """Нормализация имени поля для сравнения."""
+        """Normalize field name for comparison."""
         return re.sub(r"[^\wа-яА-Я]", "", str(name).lower().strip())
 
     def _build_skip_params(self) -> set:
-        """Сформировать набор пропускаемых параметров из доменного конфига.
+        """Build skip parameters set from domain config.
 
-        Использует meta_fields, retain_fields и skip_fields из доменного YAML.
-        Эти поля не участвуют в regex-парсинге (либо метаданные, либо служебные).
+        Uses meta_fields, retain_fields and skip_fields from domain YAML.
+        These fields do not participate in regex parsing (either metadata or service).
         """
         base = {
             "код", "mdm_key", "id",
@@ -85,15 +85,18 @@ class AutoValidator:
         try:
             from core.domain_config import DomainConfig
             cfg = DomainConfig.load(self.domain)
-            # meta_fields и retain_fields не видны в наименовании (не в regex)
-            # skip_fields уже удалены из индекса, но на всякий случай включаем
+            # meta_fields and retain_fields are not visible in the name (not in regex)
+            # skip_fields are already removed from index, but included just in case
             skip = set(cfg.skip_fields) | set(cfg.meta_fields) | set(cfg.retain_fields)
             skip_normalized = {self._norm_field_name(f) for f in skip}
-            # Добавляем канонические имена, которые точно не извлекаются regex
+            # Add canonical names that are definitely not extracted by regex
             skip_normalized |= {
                 "тип_изделия", "item_type", "наименование", "полное_наименование",
                 "нтд_1", "нтд_2", "стандарт", "нтд",
             }
+            # Add meta_regex_groups from domain config
+            for mg in cfg.meta_regex_groups:
+                skip_normalized.add(self._norm_field_name(mg))
             logger.info("[AutoValidator] skip_params built from domain '%s': %d fields",
                         self.domain, len(skip_normalized))
             return base | skip_normalized
@@ -111,8 +114,8 @@ class AutoValidator:
             with open(target, "rb") as f:
                 data = pickle.load(f)
             if isinstance(data, dict):
-                # Проверяем, что это структурированный индекс (ens_{domain}.pkl)
-                # Формат: {"ОСТ 1 31133-80": {"Болт": {"examples": [...], ...}}}
+                # Check if this is a structured index (ens_{domain}.pkl)
+                # Format: {"ОСТ 1 31133-80": {"Болт": {"examples": [...], ...}}}
                 first_std = next(iter(data.values())) if data else None
                 if isinstance(first_std, dict):
                     first_type = next(iter(first_std.values())) if first_std else None
@@ -127,7 +130,7 @@ class AutoValidator:
             return {}
 
     def _legacy_load(self, data: Any) -> Dict:
-        """Конвертировать legacy формат в структурированный."""
+        """Convert legacy format to structured."""
         index: Dict[str, Dict[str, List[Dict]]] = {}
         items = []
         if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
@@ -135,7 +138,7 @@ class AutoValidator:
         elif isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            # Пробуем извлечь списки
+            # Try to extract lists
             for k, v in data.items():
                 if isinstance(v, list):
                     items.extend(v)
@@ -152,7 +155,7 @@ class AutoValidator:
         return index
 
     def _load_all_domain_indices(self, cache_dir: str = "cache") -> Dict[str, Dict]:
-        """Загрузить все ens_*.pkl из cache_dir."""
+        """Load all ens_*.pkl from cache_dir."""
         if self._all_domain_indices is not None:
             return self._all_domain_indices
         self._all_domain_indices = {}
@@ -167,12 +170,12 @@ class AutoValidator:
         return self._all_domain_indices
 
     def _get_ens_examples(self, standard: str, item_type: str, domain: Optional[str] = None, limit: int = 10) -> List[Dict]:
-        """Получить примеры из доменного индекса."""
+        """Get examples from domain index."""
         dom = domain or self.domain
         if dom:
             index = self._load_domain_index(self.ens_index_path)
         else:
-            # Если домен не указан — пробуем текущий индекс
+            # If domain not specified — try current index
             index = self._load_domain_index()
 
         canon_std = canonicalize_standard(standard)
@@ -266,8 +269,8 @@ class AutoValidator:
         params: List[str],
         required: List[str],
     ) -> Dict:
-        """Проверить один пример ЕНС против regex."""
-        # Поддержка структурированного индекса: name в _meta
+        """Check one ENS example against regex."""
+        # Support structured index: name in _meta
         meta = ex.get("_meta", {})
         text = meta.get("full_name", meta.get("name", ""))
         if not text:
@@ -371,17 +374,17 @@ class AutoValidator:
             return abs(f1 - f2) < 0.001
         except (ValueError, TypeError):
             pass
-        if '.' in v1 and v1.replace('.', '').isdigit():
-            if v1.replace('.', '') == v2:
+        if "." in v1 and v1.replace(".", "").isdigit():
+            if v1.replace(".", "") == v2:
                 return True
-        if '.' in v2 and v2.replace('.', '').isdigit():
-            if v2.replace('.', '') == v1:
+        if "." in v2 and v2.replace(".", "").isdigit():
+            if v2.replace(".", "") == v1:
                 return True
-        if len(v1) == 2 and v1.isdigit() and len(v2) >= 3 and v2[0].isdigit() and v2[1] == '.' and v2[2:].isdigit():
-            if v1 == v2.replace('.', ''):
+        if len(v1) == 2 and v1.isdigit() and len(v2) >= 3 and v2[0].isdigit() and v2[1] == "." and v2[2:].isdigit():
+            if v1 == v2.replace(".", ""):
                 return True
-        if len(v2) == 2 and v2.isdigit() and len(v1) >= 3 and v1[0].isdigit() and v1[1] == '.' and v1[2:].isdigit():
-            if v2 == v1.replace('.', ''):
+        if len(v2) == 2 and v2.isdigit() and len(v1) >= 3 and v1[0].isdigit() and v1[1] == "." and v1[2:].isdigit():
+            if v2 == v1.replace(".", ""):
                 return True
         t1 = set(v1.split("."))
         t2 = set(v2.split("."))
@@ -414,17 +417,17 @@ class AutoValidator:
             if no_sep in name_lower:
                 return True
         if re.search(r"[a-zA-Zа-яА-Я]", val_str):
-            tokens = re.split(r"[.\-]", val_str)
+            tokens = re.split(r"[.\\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
             for tok in tokens:
                 if tok in name_lower:
                     return True
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix and prefix.group(1) in name_lower:
-                return True
+        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+        if prefix and prefix.group(1) in name_lower:
+            return True
         if param_key in ("марка_материала", "марка_материала_1", "материал"):
             return val_str in name_lower
-        if '.' in val_str and val_str.endswith(".0"):
+        if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
             if int_part and int_part in name_lower:
                 return True
