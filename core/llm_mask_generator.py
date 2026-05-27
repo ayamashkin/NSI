@@ -8,6 +8,12 @@
 #    полей (например, длина_изделия/l для длины, шаг/шаг_резьбы_1 для шага
 #    резьбы), что расширяет coverage и позволяет LLM видеть все параметры.
 # =============================================================================
+# FIX 2026-05-27 10:37 UTC+3:
+# 2. _is_value_in_name и _find_value_positions: для числовых значений добавлена
+#    проверка границ слова (word boundaries), чтобы "8" не считалось видимым
+#    внутри "88", "10" внутри "100" и т.д. Это предотвращает ложные positive
+#    при определении видимости параметров.
+# =============================================================================
 """
 LLM Mask Generator Module
 Generates regex masks using LLM with ENS examples context.
@@ -209,6 +215,16 @@ class LLMMaskGenerator:
         name_lower = name_clean.lower().replace(",", ".")
 
         if val_str in name_lower:
+            # FIX 2026-05-27: для чисел проверяем границы слова,
+            # чтобы "8" не считалось видимым внутри "88" или "100"
+            if re.match(r"^\d+([.,]\d+)?$", val_str):
+                for m in re.finditer(re.escape(val_str), name_lower):
+                    start, end = m.start(), m.end()
+                    left_is_digit = start > 0 and name_lower[start-1].isdigit()
+                    right_is_digit = end < len(name_lower) and name_lower[end].isdigit()
+                    if not left_is_digit and not right_is_digit:
+                        return True
+                return False
             return True
 
         if re.match(r"^\d+[.,]\d+$", val_raw):
@@ -259,7 +275,14 @@ class LLMMaskGenerator:
             idx = name_lower.find(val_str, start)
             if idx == -1:
                 break
-            positions.append((idx, idx + len(val_str)))
+            # FIX 2026-05-27: для чисел проверяем границы слова
+            if re.match(r"^\d+([.,]\d+)?$", val_str):
+                left_is_digit = idx > 0 and name_lower[idx-1].isdigit()
+                right_is_digit = (idx + len(val_str)) < len(name_lower) and name_lower[idx + len(val_str)].isdigit()
+                if not left_is_digit and not right_is_digit:
+                    positions.append((idx, idx + len(val_str)))
+            else:
+                positions.append((idx, idx + len(val_str)))
             start = idx + 1
         return positions
 
