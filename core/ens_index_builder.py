@@ -1,17 +1,14 @@
 # =============================================================================
-# FILE: core/ens_index_builder.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
+# ENS Index Builder Module
+# Строит структурированный доменный индекс из Excel-файла ЕНС.
+#
 # 2026-05-27 14:10:00 — Создан построитель доменного индекса ENS
 # 2026-05-27 14:10:00 — Реализована нормализация заголовков и удаление skip_fields
 # 2026-05-27 14:10:00 — Добавлено автоопределение visible_count и twin_groups
 # 2026-05-27 14:10:00 — Реализовано удаление пустых/константных колонок
 # 2026-05-27 14:10:00 — Добавлена структура _meta + field_meta в индекс
 # =============================================================================
-"""
-ENS Index Builder Module
-Строит структурированный доменный индекс из Excel-файла ЕНС.
-"""
+
 import logging
 import click
 import pickle
@@ -149,9 +146,12 @@ class ENSIndexBuilder:
         )
         return output_path
 
-
     def _print_group_stats(self, standard: str, item_type: str, built: Dict) -> None:
-        """Вывести статистику по сформированной группе (стандарт, тип)."""
+        """Вывести статистику по сформированной группе (стандарт, тип).
+
+        Показывает ТОЛЬКО значимые поля (visible > 0 или retain/meta).
+        Поля с visible_count == 0, не входящие в retain/meta, скрыты.
+        """
         stats = built.get("stats", {})
         field_meta = built.get("field_meta", {})
         twin_groups = built.get("twin_groups", [])
@@ -160,10 +160,17 @@ class ENSIndexBuilder:
         visible_fields = stats.get("visible_fields", [])
         metadata_fields = stats.get("metadata_fields", [])
 
-        click.echo(f"\n{'='*60}")
+        # Фильтруем twin_groups: показываем только осмысленные (не giant clusters)
+        meaningful_twins = [
+            g for g in twin_groups
+            if len(g) <= 5  # giant clusters (>5 полей) — скорее всего артефакт
+        ]
+
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"📊 {standard} / {item_type} — {total} примеров")
-        click.echo(f"{'='*60}")
-        click.echo(f"  Полей после фильтрации: {len(field_meta)} (visible: {len(visible_fields)}, metadata: {len(metadata_fields)})")
+        click.echo(f"{'=' * 60}")
+        click.echo(
+            f"  Полей в индексе: {len(field_meta)} (visible: {len(visible_fields)}, metadata: {len(metadata_fields)})")
 
         if visible_fields:
             click.echo(f"\n  📋 Видимые параметры (участвуют в regex):")
@@ -171,7 +178,8 @@ class ENSIndexBuilder:
                 meta = field_meta.get(f, {})
                 vc = meta.get("visible_count", 0)
                 ratio = vc / total * 100 if total > 0 else 0
-                bar = "█" * int(ratio / 5) + "░" * (20 - int(ratio / 5))
+                bar_len = int(ratio / 5)
+                bar = "█" * bar_len + "░" * (20 - bar_len)
                 click.echo(f"    {f:30s} {bar} {vc:3d}/{total} ({ratio:5.1f}%)  [{meta.get('original_name', f)[:40]}]")
 
         if metadata_fields:
@@ -181,12 +189,22 @@ class ENSIndexBuilder:
                 vc = meta.get("visible_count", 0)
                 click.echo(f"    {f:30s} visible={vc}/{total}  [{meta.get('original_name', f)[:40]}]")
 
-        if twin_groups:
+        if meaningful_twins:
             click.echo(f"\n  👯 Близнецы (twin_groups):")
-            for group in twin_groups:
+            for group in meaningful_twins:
                 click.echo(f"    {' = '.join(group)}  → canonical: {group[0]}")
+        elif twin_groups:
+            # Сообщаем о giant clusters без деталей
+            giant = [g for g in twin_groups if len(g) > 5]
+            click.echo(f"\n  ⚠️  Обнаружены giant twin_clusters: {len(giant)} (полей > 5, скорее всего пустые поля)")
 
-        click.echo(f"{'='*60}")
+        click.echo(f"{'=' * 60}")
+
+    @staticmethod
+    def _norm_field_name(name: str) -> str:
+        """Нормализация имени поля для сравнения (skip_fields matching)."""
+        import re
+        return re.sub(r"[^\wа-яА-Я]", "", str(name).lower().strip())
 
     def _find_column(self, df: pd.DataFrame, keywords: List[str]) -> Optional[str]:
         for col in df.columns:
@@ -197,18 +215,21 @@ class ENSIndexBuilder:
         return None
 
     def _build_standard_type(
-        self,
-        standard: str,
-        item_type: str,
-        examples: List[Dict],
-        name_col: str,
-        code_col: Optional[str],
-        full_name_col: Optional[str],
-        type_col: str,
+            self,
+            standard: str,
+            item_type: str,
+            examples: List[Dict],
+            name_col: str,
+            code_col: Optional[str],
+            full_name_col: Optional[str],
+            type_col: str,
     ) -> Optional[Dict]:
         """Построить запись индекса для пары (стандарт, тип)."""
         if not examples:
             return None
+
+        # 0. Нормализованный skip_fields для fuzzy matching
+        skip_normalized = {self._norm_field_name(f) for f in self.domain.skip_fields}
 
         # 1. Нормализация заголовков
         canonical_map: Dict[str, str] = {}  # original -> canonical
@@ -216,14 +237,13 @@ class ENSIndexBuilder:
         for ex in examples:
             all_fields.update(ex.keys())
 
-        # Удаляем skip_fields
-        all_fields = {f for f in all_fields if f not in self.domain.skip_fields}
+        # Удаляем skip_fields (с fuzzy matching по нормализованным именам)
+        all_fields = {f for f in all_fields if self._norm_field_name(f) not in skip_normalized}
 
         for field in all_fields:
             canonical = self.domain.canonicalize_field_name(field)
             # Разрешаем дубли canonical имен
             if canonical in canonical_map.values():
-                # Добавляем суффикс _1, _2
                 base = canonical
                 i = 1
                 while canonical in canonical_map.values():
@@ -236,7 +256,7 @@ class ENSIndexBuilder:
         for ex in examples:
             new_ex: Dict[str, Any] = {}
             for orig, val in ex.items():
-                if orig in self.domain.skip_fields:
+                if self._norm_field_name(orig) in skip_normalized:
                     continue
                 if orig in canonical_map:
                     new_ex[canonical_map[orig]] = val
@@ -244,18 +264,28 @@ class ENSIndexBuilder:
                     new_ex[orig] = val
             normalized_examples.append(new_ex)
 
-        # 2. Удалить всегда пустые колонки
+        # 2. Удалить всегда пустые колонки (>99% пустых)
         non_empty_counts: Dict[str, int] = {}
         for ex in normalized_examples:
             for k, v in ex.items():
                 if v is not None and str(v).strip() not in ("", " ", "0", "0.0", "None"):
                     non_empty_counts[k] = non_empty_counts.get(k, 0) + 1
 
-        always_empty = {k for k in all_fields if non_empty_counts.get(canonical_map.get(k, k), 0) == 0}
-        # Удаляем их из normalized_examples
+        total_examples = len(normalized_examples)
+        always_empty = {
+            k for k in all_fields
+            if non_empty_counts.get(canonical_map.get(k, k), 0) == 0
+        }
+        # Также удаляем поля с заполненностью < 1% (редкие)
+        rarely_filled = {
+            k for k in all_fields
+            if 0 < non_empty_counts.get(canonical_map.get(k, k), 0) / total_examples < 0.01
+        }
+        fields_to_drop = always_empty | rarely_filled
+
         filtered_examples: List[Dict] = []
         for ex in normalized_examples:
-            filtered_ex = {k: v for k, v in ex.items() if k not in always_empty}
+            filtered_ex = {k: v for k, v in ex.items() if k not in fields_to_drop}
             filtered_examples.append(filtered_ex)
 
         # 3. Удалить константные колонки
@@ -278,8 +308,11 @@ class ENSIndexBuilder:
             if b not in constant_fields:
                 constant_fields.add(b)
 
-        # Не удаляем retain_fields и meta_fields из константных (они нужны в _meta)
-        safe_constant = {k for k in constant_fields if k not in self.domain.retain_fields and k not in self.domain.meta_fields}
+        # Не удаляем retain_fields и meta_fields из константных
+        safe_constant = {
+            k for k in constant_fields
+            if k not in self.domain.retain_fields and k not in self.domain.meta_fields
+        }
 
         filtered_examples2: List[Dict] = []
         for ex in filtered_examples:
@@ -292,7 +325,6 @@ class ENSIndexBuilder:
         for ex in filtered_examples2:
             name = ex.get(self.domain.canonicalize_field_name(name_col), "")
             if not name:
-                # Пробуем оригинальное имя
                 for k in ex:
                     if "наименование" in k.lower() and "полное" not in k.lower():
                         name = str(ex.get(k, ""))
@@ -321,12 +353,12 @@ class ENSIndexBuilder:
             final_ex = {k: v for k, v in ex.items() if k not in invisible_fields}
             final_examples.append(final_ex)
 
-        # 6. Определить близнецов (Union-Find)
+        # 6. Определить близнецов (Union-Find) — только для полей с visible_count > 0
         twin_groups = self._detect_twin_groups(final_examples, visible_counts)
 
-        # 7. Разрешить близнецов: заменить на canonical (первый в группе)
+        # 7. Разрешить близнецов
         resolved_examples: List[Dict] = []
-        twin_canonical_map: Dict[str, str] = {}  # twin -> canonical
+        twin_canonical_map: Dict[str, str] = {}
         for group in twin_groups:
             canonical = group[0]
             for twin in group[1:]:
@@ -337,7 +369,6 @@ class ENSIndexBuilder:
             for k, v in ex.items():
                 if k in twin_canonical_map:
                     ck = twin_canonical_map[k]
-                    # Если canonical уже есть — пропускаем twin
                     if ck in resolved:
                         continue
                     resolved[ck] = v
@@ -345,10 +376,10 @@ class ENSIndexBuilder:
                     resolved[k] = v
             resolved_examples.append(resolved)
 
-        # 8. Сформировать _meta + field_meta
+        # 8. Сформировать _meta + field_meta (только для значимых полей)
         field_meta: Dict[str, Dict] = {}
         for orig, can in canonical_map.items():
-            if can in safe_constant or can in invisible_fields:
+            if can in safe_constant or can in invisible_fields or can in fields_to_drop:
                 continue
             field_meta[can] = {
                 "original_name": orig,
@@ -368,7 +399,6 @@ class ENSIndexBuilder:
             }
             if code_col and code_col in ex:
                 meta["ens_code"] = str(ex.pop(code_col, ""))
-            # Имя
             for k in list(ex.keys()):
                 if "наименование" in k.lower() and "полное" not in k.lower():
                     meta["name"] = ex.pop(k)
@@ -377,12 +407,9 @@ class ENSIndexBuilder:
                 can_full = self.domain.canonicalize_field_name(full_name_col)
                 if can_full in ex:
                     meta["full_name"] = ex.pop(can_full)
-            # Тип
             can_type = self.domain.canonicalize_field_name(type_col)
             if can_type in ex:
                 meta["item_type"] = ex.pop(can_type)
-
-            # meta_fields в _meta
             for mf in self.domain.meta_fields:
                 can_mf = self.domain.canonicalize_field_name(mf)
                 if can_mf in ex:
@@ -407,19 +434,33 @@ class ENSIndexBuilder:
         }
 
     def _detect_twin_groups(self, examples: List[Dict], visible_counts: Dict[str, int]) -> List[List[str]]:
-        """Union-Find по visible values (threshold=1.0)."""
-        # Собираем пары (a,b) где значения совпадают во всех примерах, где оба видны
+        """Union-Find по visible values (threshold=1.0).
+
+        ИСПРАВЛЕНИЕ: пропускаем поля с visible_count == 0 — у них нет значений
+        для сравнения (все None/пустые), и они создают ложные giant clusters.
+        """
+        # Фильтруем только поля, которые реально видны хотя бы в одном примере
+        meaningful_keys = {
+            k for k, vc in visible_counts.items()
+            if vc > 0 or k in self.domain.retain_fields or k in self.domain.meta_fields
+        }
+
         pair_stats: Dict[Tuple[str, str], List[int]] = {}
         for ex in examples:
-            keys = sorted([k for k in ex.keys() if not k.startswith("_")])
+            keys = sorted([k for k in ex.keys() if not k.startswith("_") and k in meaningful_keys])
             for i in range(len(keys)):
                 for j in range(i + 1, len(keys)):
                     a, b = keys[i], keys[j]
+                    # Пропускаем пары, где оба значения пустые
+                    va = str(ex.get(a, "")).strip()
+                    vb = str(ex.get(b, "")).strip()
+                    if not va and not vb:
+                        continue
                     pair = tuple(sorted((a, b)))
                     if pair not in pair_stats:
                         pair_stats[pair] = [0, 0]
                     pair_stats[pair][0] += 1
-                    if str(ex.get(a, "")).strip() == str(ex.get(b, "")).strip():
+                    if va == vb:
                         pair_stats[pair][1] += 1
 
         twin_edges = []
@@ -455,7 +496,6 @@ class ENSIndexBuilder:
         groups = []
         for members in groups_map.values():
             if len(members) >= 2:
-                # Сортируем по частоте видимости (desc)
                 freq = {m: visible_counts.get(m, 0) for m in members}
                 members_sorted = sorted(members, key=lambda m: -freq[m])
                 groups.append(members_sorted)

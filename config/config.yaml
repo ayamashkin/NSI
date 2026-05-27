@@ -5,29 +5,35 @@
 
 # =============================================================================
 # API Configuration
+# Настройки подключения к LLM-провайдерам.
+# Каждый сервис требует свой набор credentials (API key, username/password).
 # =============================================================================
 api:
   openwebui:
+    # Локальный LLM-сервер (OpenWebUI)
     base_url: "https://webui.game73.ru/api"
     username: "default7@yandex.ru"
-    password_file: "secrets/openwebui_password.txt"
-    timeout: 240
+    password_file: "secrets/openwebui_password.txt"  # JWT-токен получается через /api/v1/auths/signin
+    timeout: 240  # секунды; локальные модели (Qwen3-30B) требуют больше времени
     default_model: "/app/models/Qwen3-30B-A3B-GPTQ-Int4"
 
   mws:
+    # MWS Cloud GPT — облачный API с Qwen2.5-72B
     base_url: "https://api.gpt.mws.ru/"
     api_key_file: "secrets/mws_key.txt"
     timeout: 120
     default_model: "qwen2.5-72b-instruct"
 
   gigachat:
+    # GigaChat (Sber) — российская LLM
     base_url: "https://gigachat.devices.sberbank.ru/api/v1"
-    api_key_file: "secrets/gigachat_credentials.txt"
-    scope: "GIGACHAT_API_PERS"
+    api_key_file: "secrets/gigachat_credentials.txt"  # client_id:client_secret в Base64
+    scope: "GIGACHAT_API_PERS"  # или GIGACHAT_API_CORP для корп. доступа
     timeout: 120
     default_model: "GigaChat-2"
 
   mts_ai:
+    # MTS AI — CoType Pro 2.5
     base_url: "https://demo6-fundres.dev.mts.ai/"
     api_key_file: "secrets/mts_ai_key.txt"
     timeout: 120
@@ -35,79 +41,85 @@ api:
 
 # =============================================================================
 # Database Configuration
+# SQLite БД для хранения результатов обработки (results.db).
 # =============================================================================
 database:
   path: "results.db"
-  backup_enabled: true
-  backup_interval: 1000
+  backup_enabled: true      # Автоматический бэкап при достижении backup_interval
+  backup_interval: 1000       # Число записей между бэкапами
 
 # =============================================================================
 # Processing Configuration
+# Настройки пакетной обработки и retry-логики.
 # =============================================================================
 processing:
-  default_workers: 1
-  default_timeout: 180
-  batch_size: 100
-  retry_attempts: 3
-  retry_delay: 5
-  cache_completed_only: true
-  retry_errors: true
-  retry_ignored: true
+  default_workers: 1        # Число параллельных потоков (1 = последовательно)
+  default_timeout: 180        # Таймаут одного запроса к LLM, сек
+  batch_size: 100             # Размер чанка для прогресс-бара
+  retry_attempts: 3         # Число повторных попыток при ошибке API
+  retry_delay: 5              # Задержка между попытками, сек
+  cache_completed_only: true  # Кэшировать только успешно обработанные
+  retry_errors: true          # Повторно обрабатывать записи со статусом error
+  retry_ignored: true         # Повторно обрабатывать записи со статусом ignored
 
 # =============================================================================
 # Matching Configuration
+# Параметры параметрического сопоставления с ЕНС (fuzzy + exact matching).
 # =============================================================================
 matching:
-  success_threshold: 0.7
-  fuzzy_threshold: 0.5
-  v2_exact_threshold: 0.99
-  coating_similarity_threshold: 0.8
-  strict_union_keys: false
-  debug_per_parameter: true
-  fuzzy_params_comparison: true
-  numeric_field_weight: 5.0
-  text_field_weight: 2.0
-  default_field_weight: 1.0
-  length_tolerance: 1.0
-  numeric_tolerance: 0.01
-  confidence_penalty_per_mismatch: 0.15
-  max_confidence_penalty: 0.5
+  success_threshold: 0.7              # Минимальный score для успешного сопоставления
+  fuzzy_threshold: 0.5              # Порог fuzzy similarity для текстовых параметров
+  v2_exact_threshold: 0.99          # Порог для exact matching (все required-параметры совпали)
+  coating_similarity_threshold: 0.8 # Порог схожести покрытий (Jaccard)
+  strict_union_keys: false          # Строгое сравнение всех ключей (True = медленнее, точнее)
+  debug_per_parameter: true         # Логировать сравнение по каждому параметру отдельно
+  fuzzy_params_comparison: true     # Включить fuzzy matching для текстовых параметров
+  numeric_field_weight: 5.0        # Вес числовых параметров при score-расчёте
+  text_field_weight: 2.0            # Вес текстовых параметров (покрытие, марка)
+  default_field_weight: 1.0         # Вес по умолчанию для прочих параметров
+  length_tolerance: 1.0             # Допуск для длины, мм (|ens - text| <= tolerance)
+  numeric_tolerance: 0.01           # Допуск для числовых параметров (относительный)
+  confidence_penalty_per_mismatch: 0.15  # Штраф к confidence за каждое несовпадение
+  max_confidence_penalty: 0.5       # Максимальный суммарный штраф
 
 # =============================================================================
 # Prompts Configuration
+# Реестр промптов для LLM-генерации масок живёт в prompts.yaml.
 # =============================================================================
 prompts:
-  directory: "prompts/templates"
-  registry: "config/prompts.yaml"
+  directory: "prompts/templates"    # Директория с .txt-шаблонами промптов
+  registry: "config/prompts.yaml"   # YAML-реестр: имя, keywords, service, model
 
 # =============================================================================
 # Logging Configuration
 # =============================================================================
 logging:
-  level: "DEBUG"
-  file: "logs/processor.log"
-  max_size: "50MB"
-  backup_count: 20
+  level: "DEBUG"              # DEBUG | INFO | WARNING | ERROR
+  file: "logs/processor.log"  # Путь к файлу логов
+  max_size: "50MB"            # Ротация при достижении размера
+  backup_count: 20            # Число архивных файлов логов
 
 # =============================================================================
 # Mask Generation Configuration
+# Настройки LLM-генерации regex-масок.
 # =============================================================================
 mask_generation:
-  default_service: "mts_ai"
-  default_model: "cotype_pro_2.5"
-  default_temperature: 0.1
-  keyword_match_from_name: true
-  prompt_template: "prompts/templates/mask_generation.txt"
-  save_debug_prompts: true
+  default_service: "mts_ai"           # Сервис по умолчанию для генерации масок
+  default_model: "cotype_pro_2.5"     # Модель по умолчанию
+  default_temperature: 0.1          # Низкая температура для детерминированности
+  keyword_match_from_name: true       # Искать keywords в наименовании для выбора промпта
+  prompt_template: "prompts/templates/mask_generation.txt"  # Шаблон системного промпта
+  save_debug_prompts: true            # Сохранять промпты и ответы LLM в prompts/debug/
   debug_prompts_dir: "prompts/debug"
-  deduplicate_by_standard_type: true
+  deduplicate_by_standard_type: true  # Не генерировать маску, если (standard, type) уже есть
 
 # =============================================================================
 # Output Configuration
+# Настройки выходных файлов (Excel/JSON).
 # =============================================================================
 output:
-  include_mask_pattern: true
-  include_ens_details: false
+  include_mask_pattern: true    # Включать regex-паттерн в выходной файл
+  include_ens_details: false    # Включать debug-информацию (details) в выходной файл
   # NOTE (2026-05-27): Предметная фильтрация полей (skip/meta/retain) теперь
   # выполняется на этапе построения доменного индекса (config/domains/*.yaml).
   # Список ниже — только технические поля, которые могут просочиться из
@@ -122,8 +134,11 @@ output:
 
 # =============================================================================
 # Coating Rules
+# Правила валидации и авто-подстановки покрытий по марке материала.
 # =============================================================================
 coating_rules:
+  # Допустимые покрытия для каждой марки стали.
+  # Если покрытие из номенклатуры не входит в список — match отклоняется (strict_mode).
   material_coating_map:
     "14Х17Н2": ["Н.Кд", "Хим.Пас", "Н.Пас", "Пас"]
     "12Х18Н10Т": ["Н.Кд", "Хим.Пас", "Н.Пас"]
@@ -135,6 +150,7 @@ coating_rules:
     "38ХА": ["Кд", "Цд", "Окс", "Фос", "Окс.Фос", "Фос.Окс", "Неп", "Пас", "Бп"]
     "Д1П": ["Ан.Окс", "Хим.Окс", "Бп"]
 
+  # Авто-подстановка: если покрытие не допустимо, но есть правило — заменить.
   auto_substitution:
     - material_pattern: "^(14Х17Н2|12Х18Н10Т|08Х18Н10Т)$"
       wrong_coating: "Кд"
@@ -145,18 +161,20 @@ coating_rules:
       correct_coating: "Ан.Окс"
       note: "Для сплава Д1П покрытие Кд не допускается, применяется Ан.Окс"
 
-  similarity_threshold: 0.8
-  strict_mode: true
+  similarity_threshold: 0.8   # Порог схожести для fuzzy matching покрытий
+  strict_mode: true           # True = отклонять match при недопустимом покрытии
   auto_substitution_enabled: true
 
 # =============================================================================
 # Result Database
+# SQLite БД для версионирования результатов сопоставления.
 # =============================================================================
 result_database:
   path: "cache/result.db"
 
 # =============================================================================
 # Validation
+# Значения, которые считаются "пустым" покрытием (не требуют валидации).
 # =============================================================================
 validation:
   empty_values:
