@@ -326,6 +326,13 @@ class AutoValidator:
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
 
         success = len(missing) == 0 and len(mismatches) == 0
+        if not success and logger.isEnabledFor(logging.DEBUG):
+            if missing:
+                logger.debug("[AutoValidator] Missing required params: %s", missing)
+            if mismatches:
+                for mm in mismatches:
+                    logger.debug("[AutoValidator] Mismatch param=%s expected=%s extracted=%s",
+                                 mm.get("param"), mm.get("expected"), mm.get("extracted"))
         return {
             "success": success,
             "missing": missing,
