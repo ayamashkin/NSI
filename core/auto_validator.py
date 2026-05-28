@@ -2,11 +2,11 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 15:15:00 — Compact summary table per standard, reduced noise on success
+# 2026-05-28 15:15:00 — _test_pattern returns param_results; Match OK debug lines removed
+# 2026-05-28 15:15:00 — _print_summary_table added for end-of-validation stats
 # 2026-05-28 14:30:00 — Added TABLE diagnostics: param vs ENS vs extracted vs text snippet
 # 2026-05-28 14:30:00 — _diagnose_no_match and _test_pattern now output aligned tables
-# 2026-05-27 21:15:00 — _build_skip_params now uses DomainConfig.meta_regex_groups
-# 2026-05-27 21:15:00 — Removed hardcoded нтд_1/тип_изделия from fallback skip set
-# 2026-05-27 17:46:00 — Removed hardcoded skip_params, now reads from DomainConfig
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class ValidationResult:
@@ -42,7 +41,6 @@ class ValidationResult:
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
-
 
 class AutoValidator:
     """Mask validator on ENS examples with domain support."""
@@ -112,7 +110,7 @@ class AutoValidator:
                     if isinstance(first_type, dict) and "examples" in first_type:
                         logger.info("[AutoValidator] Loaded structured domain index from %s", target)
                         return data
-                return self._legacy_load(data)
+            return self._legacy_load(data)
         except Exception as e:
             logger.error("[AutoValidator] Failed to load ENS index %s: %s", target, e)
             return {}
@@ -226,6 +224,7 @@ class AutoValidator:
         total = len(examples)
         success_count = 0
         details = []
+        logger.debug("[AutoValidator] Validating %s/%s against %d examples", standard, item_type, total)
         for ex in examples:
             result = self._test_pattern(compiled, ex, params, required)
             if result["success"]:
@@ -235,8 +234,12 @@ class AutoValidator:
         passed = score >= self.activation_threshold
         mismatched = sum(1 for d in details if not d["success"] and d.get("error") != "No match")
         missing = sum(1 for d in details if d.get("error") == "No match")
-        logger.info("[AutoValidator] Validation result for %s/%s: score=%.2f, passed=%s",
-                    standard, item_type, score, passed)
+
+        # === SUMMARY TABLE (always in debug) ===
+        if logger.isEnabledFor(logging.DEBUG):
+            self._print_summary_table(standard, item_type, details, required, self._skip_params, total, success_count)
+
+        # === FAILED DETAILS (only if not passed) ===
         if not passed and logger.isEnabledFor(logging.DEBUG):
             failed = [d for d in details if not d["success"]]
             logger.debug("[AutoValidator] Failed examples (%d/%d):", len(failed), total)
@@ -250,6 +253,9 @@ class AutoValidator:
                     for mm in fd["mismatches"]:
                         logger.debug("[AutoValidator] Mismatch: param=%s expected=%s extracted=%s",
                                      mm.get("param"), mm.get("expected"), mm.get("extracted"))
+
+        logger.info("[AutoValidator] Validation result for %s/%s: score=%.2f, passed=%s",
+                     standard, item_type, score, passed)
         return ValidationResult(
             score=score, passed=passed, details=details, total=total,
             matched=success_count, mismatched=mismatched, missing=missing,
@@ -274,14 +280,10 @@ class AutoValidator:
 
         skip_params = self._skip_params
         match = pattern.search(text)
-        logger.debug("[AutoValidator] Testing pattern against: %s", text[:100])
-        if match:
-            extracted = match.groupdict()
-            logger.debug("[AutoValidator] Match OK. Extracted: %s", extracted)
-        else:
-            logger.debug("[AutoValidator] NO MATCH for text: %s", text[:100])
-            logger.debug("[AutoValidator] Pattern used: %s", pattern.pattern)
-            # Log expected params from ENS for debugging
+        param_results: Dict[str, str] = {}
+
+        if not match:
+            # Expected params for diagnostics
             expected_info = []
             for param in required:
                 if param in skip_params:
@@ -289,12 +291,11 @@ class AutoValidator:
                 best_exp_key, _ = self._find_expected_key(param, ex)
                 expected_val = ex.get(best_exp_key) if best_exp_key else None
                 expected_info.append(f"{param}={expected_val}")
+            logger.debug("[AutoValidator] NO MATCH for text: %s", text[:100])
+            logger.debug("[AutoValidator] Pattern used: %s", pattern.pattern)
             logger.debug("[AutoValidator] Expected params from ENS: %s", ", ".join(expected_info))
-
-            # === TABLE DIAGNOSTICS ===
             self._print_table(text, required, ex, skip_params, extracted=None)
-
-            return {"success": False, "error": "No match", "text": text, "example": ex}
+            return {"success": False, "error": "No match", "text": text, "example": ex, "param_results": param_results}
 
         extracted = match.groupdict()
         mismatches = []
@@ -310,20 +311,25 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if extracted_empty and expected_empty:
-                debug_lines.append(f"  {param}: OK (both empty)")
+                debug_lines.append(f" {param}: OK (both empty)")
+                param_results[param] = "ok"
                 continue
             elif expected_empty and not extracted_empty:
-                debug_lines.append(f"  {param}: OK (expected empty, extracted={extracted_val})")
+                debug_lines.append(f" {param}: OK (expected empty, extracted={extracted_val})")
+                param_results[param] = "ok"
                 continue
             elif extracted_empty or extracted_val == "":
                 missing.append(param)
-                debug_lines.append(f"  {param}: MISSING (expected={expected_val})")
+                debug_lines.append(f" {param}: MISSING (expected={expected_val})")
+                param_results[param] = "missing"
                 continue
             if not self._values_match(str(extracted_val), str(expected_val)):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
-                debug_lines.append(f"  {param}: MISMATCH expected={expected_val} extracted={extracted_val}")
+                debug_lines.append(f" {param}: MISMATCH expected={expected_val} extracted={extracted_val}")
+                param_results[param] = "mismatch"
             else:
-                debug_lines.append(f"  {param}: OK expected={expected_val} extracted={extracted_val}")
+                debug_lines.append(f" {param}: OK expected={expected_val} extracted={extracted_val}")
+                param_results[param] = "ok"
 
         optional_params = set(params) - set(required) - skip_params
         for param in optional_params:
@@ -333,17 +339,21 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if expected_empty:
-                debug_lines.append(f"  {param}: OK (expected empty, optional)")
+                debug_lines.append(f" {param}: OK (expected empty, optional)")
+                param_results[param] = "ok"
                 continue
             if extracted_empty:
                 mismatches.append({"param": param, "expected": expected_val, "extracted": None})
-                debug_lines.append(f"  {param}: MISMATCH expected={expected_val} extracted=None (optional)")
+                debug_lines.append(f" {param}: MISMATCH expected={expected_val} extracted=None (optional)")
+                param_results[param] = "mismatch"
                 continue
             if not self._values_match(str(extracted_val), str(expected_val)):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
-                debug_lines.append(f"  {param}: MISMATCH expected={expected_val} extracted={extracted_val} (optional)")
+                debug_lines.append(f" {param}: MISMATCH expected={expected_val} extracted={extracted_val} (optional)")
+                param_results[param] = "mismatch"
             else:
-                debug_lines.append(f"  {param}: OK expected={expected_val} extracted={extracted_val} (optional)")
+                debug_lines.append(f" {param}: OK expected={expected_val} extracted={extracted_val} (optional)")
+                param_results[param] = "ok"
 
         success = len(missing) == 0 and len(mismatches) == 0
         if not success and logger.isEnabledFor(logging.DEBUG):
@@ -356,7 +366,6 @@ class AutoValidator:
                 for mm in mismatches:
                     logger.debug("[AutoValidator] Mismatch param=%s expected=%s extracted=%s",
                                  mm.get("param"), mm.get("expected"), mm.get("extracted"))
-            # === TABLE DIAGNOSTICS for mismatch ===
             self._print_table(text, required, ex, skip_params, extracted=extracted, mismatches=mismatches, missing=missing)
         return {
             "success": success,
@@ -364,7 +373,109 @@ class AutoValidator:
             "mismatches": mismatches,
             "text": text,
             "example": ex,
+            "param_results": param_results,
         }
+
+    def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
+                             required: List[str], skip_params: set, total: int, success_count: int) -> None:
+        """Print compact summary table after validation."""
+        param_stats: Dict[str, Dict[str, Any]] = {}
+        for param in required:
+            if param in skip_params:
+                continue
+            param_stats[param] = {"ok": 0, "fail": 0, "total": 0, "examples": []}
+
+        for d in details:
+            if d.get("error") == "No match":
+                for p in param_stats:
+                    param_stats[p]["fail"] += 1
+                    param_stats[p]["total"] += 1
+                    if len(param_stats[p]["examples"]) < 2:
+                        param_stats[p]["examples"].append(f"NO MATCH: {d.get('text', '')[:50]}")
+                continue
+            pr = d.get("param_results", {})
+            for p in param_stats:
+                param_stats[p]["total"] += 1
+                if pr.get(p) == "ok":
+                    param_stats[p]["ok"] += 1
+                else:
+                    param_stats[p]["fail"] += 1
+                    if len(param_stats[p]["examples"]) < 2:
+                        txt = d.get("text", "")[:50]
+                        reason = pr.get(p, "fail")
+                        param_stats[p]["examples"].append(f"{reason}: {txt}")
+
+        if not param_stats:
+            return
+
+        rows = []
+        for p, s in sorted(param_stats.items()):
+            rate = s["ok"] / s["total"] * 100 if s["total"] > 0 else 0
+            rows.append({
+                "param": p,
+                "ok": s["ok"],
+                "fail": s["fail"],
+                "total": s["total"],
+                "rate": f"{rate:.1f}%",
+                "examples": "; ".join(s["examples"]) if s["examples"] else "",
+            })
+
+        w_param = max(len(r["param"]) for r in rows)
+        w_ok = max(len(str(r["ok"])) for r in rows)
+        w_fail = max(len(str(r["fail"])) for r in rows)
+        w_total = max(len(str(r["total"])) for r in rows)
+        w_rate = max(len(r["rate"]) for r in rows)
+        w_examples = max(len(r["examples"]) for r in rows) if any(r["examples"] for r in rows) else 0
+
+        def hline(char="─"):
+            parts = [
+                f"{char*(w_param+2)}", f"{char*(w_ok+2)}", f"{char*(w_fail+2)}",
+                f"{char*(w_total+2)}", f"{char*(w_rate+2)}",
+            ]
+            if w_examples > 0:
+                parts.append(f"{char*(w_examples+2)}")
+            return "├" + "┼".join(parts) + "┤"
+
+        def top():
+            parts = [
+                f"{'─'*(w_param+2)}", f"{'─'*(w_ok+2)}", f"{'─'*(w_fail+2)}",
+                f"{'─'*(w_total+2)}", f"{'─'*(w_rate+2)}",
+            ]
+            if w_examples > 0:
+                parts.append(f"{'─'*(w_examples+2)}")
+            return "┌" + "┬".join(parts) + "┐"
+
+        def bottom():
+            parts = [
+                f"{'─'*(w_param+2)}", f"{'─'*(w_ok+2)}", f"{'─'*(w_fail+2)}",
+                f"{'─'*(w_total+2)}", f"{'─'*(w_rate+2)}",
+            ]
+            if w_examples > 0:
+                parts.append(f"{'─'*(w_examples+2)}")
+            return "└" + "┴".join(parts) + "┘"
+
+        logger.debug("[AutoValidator] === Summary %s/%s: %d/%d passed ===", standard, item_type, success_count, total)
+        logger.debug("[AutoValidator] %s", top())
+        header_parts = [
+            f" {'Параметр':<{w_param}} ", f" {'OK':<{w_ok}} ", f" {'Fail':<{w_fail}} ",
+            f" {'Всего':<{w_total}} ", f" {'Rate':<{w_rate}} ",
+        ]
+        if w_examples > 0:
+            header_parts.append(f" {'Примеры ошибок':<{w_examples}} ")
+        logger.debug("[AutoValidator] │" + "│".join(header_parts) + "│")
+        logger.debug("[AutoValidator] %s", hline())
+        for r in rows:
+            row_parts = [
+                f" {r['param']:<{w_param}} ",
+                f" {str(r['ok']):<{w_ok}} ",
+                f" {str(r['fail']):<{w_fail}} ",
+                f" {str(r['total']):<{w_total}} ",
+                f" {r['rate']:<{w_rate}} ",
+            ]
+            if w_examples > 0:
+                row_parts.append(f" {r['examples']:<{w_examples}} ")
+            logger.debug("[AutoValidator] │" + "│".join(row_parts) + "│")
+        logger.debug("[AutoValidator] %s", bottom())
 
     def _print_table(self, text: str, required: List[str], ex: Dict, skip_params: set,
                      extracted: Optional[Dict] = None, mismatches: Optional[List] = None,
@@ -392,7 +503,6 @@ class AutoValidator:
         if not rows:
             return
 
-        # Column widths
         w_param = max(len(r["param"]) for r in rows)
         w_ens = max(len(r["ens"]) for r in rows)
         w_mask = max(len(r["mask"]) for r in rows)
@@ -423,13 +533,11 @@ class AutoValidator:
             return "—"
         val_str = str(val).strip()
         text_lower = text.lower()
-        # Direct match
         pos = text_lower.find(val_str.lower())
         if pos >= 0:
             start = max(0, pos - 3)
             end = min(len(text), pos + len(val_str) + 3)
             return text[start:end]
-        # For decimal like 45.0, try integer part
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
             pos = text_lower.find(int_part.lower())
@@ -437,22 +545,18 @@ class AutoValidator:
                 start = max(0, pos - 3)
                 end = min(len(text), pos + len(int_part) + 3)
                 return text[start:end]
-        # Try without spaces/dots
         val_norm = val_str.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
         text_norm = text_lower.replace(" ", "").replace("-", "").replace("_", "")
         pos = text_norm.find(val_norm)
         if pos >= 0:
-            # Map back to original text roughly
             return text[max(0, pos-2):min(len(text), pos+len(val_norm)+2)]
         return "не найдено"
 
     def _diagnose_no_match(self, pattern_str: str, text: str, required: List[str], ex: Dict, skip_params: set) -> None:
         """Detailed diagnostics when regex doesn't match the text."""
         logger.debug("[AutoValidator] === NO-MATCH DIAGNOSTICS ===")
-        logger.debug("[AutoValidator] Text:    %s", text)
+        logger.debug("[AutoValidator] Text: %s", text)
         logger.debug("[AutoValidator] Pattern: %s", pattern_str)
-
-        # 1. Try prefix match without end anchor
         prefix_pattern = pattern_str.rstrip("$")
         if prefix_pattern != pattern_str:
             try:
@@ -468,29 +572,22 @@ class AutoValidator:
                     logger.debug("[AutoValidator] No prefix match either — pattern fails near start")
             except re.error:
                 pass
-
-        # 2. Try to match just the literal item type at start
         item_type_match = re.match(r"^(Болт|Винт|Шайба|Гайка)", text, re.IGNORECASE)
         if item_type_match:
             logger.debug("[AutoValidator] Item type literal '%s' found at start — OK", item_type_match.group(1))
         else:
             logger.debug("[AutoValidator] Item type literal NOT found at start of text!")
-
-        # 3. Try to match just the standard at end
         std_match = re.search(r"(ОСТ\s*1\s*\d+-\d+|ГОСТ\s*\d+-\d+)$", text, re.IGNORECASE)
         if std_match:
             logger.debug("[AutoValidator] Standard '%s' found at end — OK", std_match.group(1))
         else:
             logger.debug("[AutoValidator] Standard NOT found at end of text!")
-
-        # 4. Check for common structural issues
         has_parens = "(" in text and ")" in text
         pattern_expects_parens = r"\(" in pattern_str or r"\)?" in pattern_str
         if has_parens and not pattern_expects_parens:
             logger.debug("[AutoValidator] Text has parentheses (execution?) but pattern does not expect them")
         if pattern_expects_parens and not has_parens:
             logger.debug("[AutoValidator] Pattern expects parentheses but text has none")
-
         logger.debug("[AutoValidator] === END DIAGNOSTICS ===")
 
     @staticmethod
@@ -533,7 +630,6 @@ class AutoValidator:
             return abs(f1 - f2) < 0.001
         except (ValueError, TypeError):
             pass
-        # FIX: v1="45.0" → int_part="45" (not "450" from replace)
         if "." in v1 and v1.endswith(".0"):
             int_part = v1[:-2]
             if int_part == v2:
@@ -576,21 +672,15 @@ class AutoValidator:
         name_lower = name.lower().replace(",", ".")
         if val_str in name_lower:
             return True
-        if re.match(r"^\d+[.,]\d+$", val_raw):
-            no_sep = re.sub(r"[.,]", "", val_str)
-            if no_sep in name_lower:
-                return True
         if re.search(r"[a-zA-Zа-яА-Я]", val_str):
-            tokens = re.split(r"[.\\-]", val_str)
+            tokens = re.split(r"[.\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
             for tok in tokens:
                 if tok in name_lower:
                     return True
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix and prefix.group(1) in name_lower:
-                return True
-        if param_key in ("марка_материала", "марка_материала_1", "материал"):
-            return val_str in name_lower
+        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+        if prefix and prefix.group(1) in name_lower:
+            return True
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
             if int_part and int_part in name_lower:
