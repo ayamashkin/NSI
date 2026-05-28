@@ -757,6 +757,42 @@ class LLMMaskGenerator:
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to save response: %s", e)
 
+    def _copy_to_good_bad(self, standard: str, item_type: str, is_good: bool) -> None:
+        """Copy saved prompt/response into good/ or bad/ subfolder based on validation result."""
+        base_dir = self._get_debug_dir()
+        if not base_dir:
+            return
+        try:
+            subfolder = "good" if is_good else "bad"
+            target_dir = base_dir / subfolder
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Source files
+            prompt_src = base_dir / f"{item_type}_{standard}.txt"
+            # Find latest response file (highest attempt number)
+            response_src = None
+            max_attempt = 0
+            for attempt in range(1, self.max_retries + 1):
+                candidate = base_dir / f"{item_type}_{standard}_a{attempt}.txt"
+                if candidate.exists():
+                    response_src = candidate
+                    max_attempt = attempt
+
+            import shutil
+            if prompt_src.exists():
+                prompt_dst = target_dir / f"{item_type}_{standard}.txt"
+                shutil.copy2(str(prompt_src), str(prompt_dst))
+                logger.debug("[LLMMaskGenerator] Prompt copied to %s: %s", subfolder, prompt_dst.name)
+
+            if response_src and response_src.exists():
+                response_dst = target_dir / f"{item_type}_{standard}_a{max_attempt}.txt"
+                shutil.copy2(str(response_src), str(response_dst))
+                logger.debug("[LLMMaskGenerator] Response copied to %s: %s", subfolder, response_dst.name)
+
+            logger.info("[LLMMaskGenerator] %s/%s -> %s (validation=%s)", standard, item_type, subfolder, is_good)
+        except Exception as e:
+            logger.debug("[LLMMaskGenerator] Failed to copy to good/bad: %s", e)
+
     def generate_mask(
             self,
             standard: str,

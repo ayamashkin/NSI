@@ -871,6 +871,11 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                 auto_score = validation.score
             else:
                 auto_score = 0.0
+
+            # Copy prompt/response to good/bad based on validation result
+            if generator and hasattr(generator, '_copy_to_good_bad'):
+                generator._copy_to_good_bad(canon_std, item_type, validation.passed if validate else False)
+
             mask_record = MaskRecord(
                 standard=canon_std, item_type=item_type.upper(),
                 pattern=mask['pattern'], params=mask['params'],
@@ -982,6 +987,11 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                     stats['generated'] += 1
                     if is_active:
                         stats['activated'] += 1
+
+                    # Copy prompt/response to good/bad based on validation result
+                    if generator and hasattr(generator, '_copy_to_good_bad'):
+                        generator._copy_to_good_bad(std, itype, is_active)
+
                     stats_rows.append({
                         'тип': item_type_normalized, 'стандарт': std,
                         'маска': mask['pattern'], 'score': auto_score,
