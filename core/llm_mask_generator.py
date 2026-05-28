@@ -2,11 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 18:22:00 — FIX: _format_examples shows ALL per-example visible params (not filtered by global_visible)
+# 2026-05-28 18:22:00 — FIX: _format_examples adds "Метаданные БД" section + per-standard statistics
+# 2026-05-28 18:22:00 — FIX: _get_global_visible optional threshold lowered 0.20 -> 0.05 (catches rare params like исполнение)
+# 2026-05-28 18:22:00 — FIX: removed "Структура" and "Параметры, участвующие" lines from prompt (misleading order)
 # 2026-05-28 16:21:00 — FIX: _filter_unambiguous normalizes values before uniqueness check ('7.0' vs '7')
-# 2026-05-28 16:21:00 — FIX: _default_template removed pattern examples, added rules 9-10 (absent params, coating boundary)
-# 2026-05-28 14:00:00 — FIX: _is_value_in_name removed no_sep decimal heuristic ("1,5" falsely matched "15")
-# 2026-05-28 13:30:00 — FIX: _fix_pattern and _sanitize_mask_result normalize \\d->\d, \\s->\s, \\w->\w
-# 2026-05-28 13:30:00 — FIX: _default_template uses literal item types (not named group) + split params rule
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -293,7 +293,7 @@ class LLMMaskGenerator:
             ratio = count / total
             if ratio >= threshold:
                 required.add(key)
-            elif ratio >= 0.20:
+            elif ratio >= 0.05:  # FIX: lowered from 0.20 to catch rare params like исполнение
                 optional.add(key)
         return required, optional
 
@@ -375,13 +375,15 @@ class LLMMaskGenerator:
             len(display_examples), total_unambiguous)
 
         lines = []
-        lines.append(f"Структура: <{item_type}> [исполнение] <параметры> <покрытие> {standard}")
-        lines.append("")
-        display_params = sorted(global_visible)
-        lines.append(f"Параметры, участвующие в наименовании: {', '.join(display_params)}")
-        lines.append("")
+        # FIX: removed misleading "Структура" and "Параметры, участвующие" lines
 
         twin_groups = self._get_twin_groups(standard, item_type)
+
+        # Build param_counts for statistics
+        param_counts: Dict[str, int] = {}
+        for ex, vis in unambiguous:
+            for key in vis:
+                param_counts[key] = param_counts.get(key, 0) + 1
 
         for i, ex in enumerate(display_examples, 1):
             meta = ex.get("_meta", {})
@@ -422,42 +424,75 @@ class LLMMaskGenerator:
                     for k in keys:
                         ambiguous_keys.add(k)
 
+            # FIX: show ALL resolved params for this example (not filtered by global_visible)
             visible_list = []
-            missing_list = []
-            ambiguous_list = []
-
-            for key in sorted(global_visible):
-                if key not in resolved:
-                    missing_list.append(key)
-                    continue
+            for key in sorted(resolved.keys()):
                 val_str = resolved[key]
-                is_in_name = self._is_value_in_name(val_str, name, param_key=key, standard=standard)
-                if key in ambiguous_keys:
-                    ambiguous_list.append((key, val_str))
-                elif is_in_name:
-                    pos = name.lower().find(val_str.lower())
+                pos = name.lower().find(val_str.lower())
+                if pos < 0:
+                    m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
+                    if m:
+                        pos = name.lower().find(m.group().lower())
                     if pos < 0:
-                        m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
-                        if m:
-                            pos = name.lower().find(m.group().lower())
-                        if pos < 0:
-                            pos = 999
-                    visible_list.append((key, val_str, pos))
-                else:
-                    missing_list.append(key)
-
+                        pos = 999
+                visible_list.append((key, val_str, pos))
             visible_list.sort(key=lambda x: x[2])
+
+            # Missing = params from global_visible not in this example
+            missing_list = [k for k in sorted(global_visible) if k not in resolved]
+
+            # Meta-data: params present in ENS but NOT visible in name
+            meta_list = []
+            for k, v in ex.items():
+                if k.startswith("_"):
+                    continue
+                if v is None or str(v).strip() == "":
+                    continue
+                if k in self.SKIP_PARAMS or k in self._SKIP_META_PARAMS:
+                    continue
+                if k in resolved:
+                    continue
+                meta_list.append((k, str(v)))
 
             lines.append(f'{i}. Исходное: "{name}"')
             if visible_list:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible_list])
-                lines.append(f"   Видимые: {vis_str}")
-            if ambiguous_list:
-                amb_str = " ".join([f"(?P<{k}>{v})" for k, v in ambiguous_list])
+                lines.append(f"   Видимые в строке: {vis_str}")
+            if ambiguous_keys:
+                amb_items = [(k, resolved[k]) for k in sorted(ambiguous_keys)]
+                amb_str = " ".join([f"(?P<{k}>{v})" for k, v in amb_items])
                 lines.append(f"   Неоднозначные: {amb_str}")
             if missing_list:
                 lines.append(f"   Отсутствуют: {', '.join(missing_list)}")
+            if meta_list:
+                meta_str = ", ".join([f"{k}={v}" for k, v in meta_list])
+                lines.append(f"   Метаданные БД: {meta_str}")
             lines.append("")
+
+        # Statistics block (inspired by old prompt)
+        lines.append("=== СТАТИСТИКА ===")
+        lines.append("")
+        for key in sorted(global_visible):
+            count = param_counts.get(key, 0)
+            lines.append(f"  {key}: {count} из {total_unambiguous} ({count/total_unambiguous*100:.0f}%) — видим в строке")
+        # Meta-data stats
+        meta_counts: Dict[str, int] = {}
+        for ex, _ in unambiguous:
+            name = ex.get("_meta", {}).get("name", ex.get("_meta", {}).get("full_name", ""))
+            for k, v in ex.items():
+                if k.startswith("_") or v is None or str(v).strip() == "":
+                    continue
+                if k in self.SKIP_PARAMS or k in self._SKIP_META_PARAMS:
+                    continue
+                if name and self._is_value_in_name(str(v), name, param_key=k, standard=standard):
+                    continue
+                meta_counts[k] = meta_counts.get(k, 0) + 1
+        if meta_counts:
+            lines.append("")
+            lines.append("  --- Метаданные БД (не для regex) ---")
+            for key, count in sorted(meta_counts.items()):
+                lines.append(f"  {key}: {count} из {total_unambiguous} — [в БД, не в строке]")
+        lines.append("")
 
         return "\n".join(lines)
 
@@ -508,7 +543,7 @@ class LLMMaskGenerator:
 
 === ЗАДАЧА ===
 
-Создай regex-паттерн с named groups (?P<name>...) для извлечения параметров из строки номенклатуры.
+Создай regex-паттерн с named groups (?P<name>...) для извлечения параметров из строки номенклатуры крепежа по стандартам ОСТ и ГОСТ.
 
 Стандарт: {standard}
 Тип изделия: {item_type}
@@ -521,21 +556,24 @@ class LLMMaskGenerator:
 
 {examples_text}
 
-=== ПРАВИЛА (8 штук) ===
+=== ПРАВИЛА (11 штук) ===
 
 1. **Тип изделия — ЛИТЕРАЛ, не named group**. Начинай паттерн с ^Болт, ^Винт, ^Шайба или ^Гайка. НЕ используй (?P<тип_изделия>Болт) и НЕ (?P<наименование_1>Болт).
-2. **Разделители — гибкие, но обязательный перед нтд_1**. Используй `[-\s]+` между параметрами. Если параметры слитные (без разделителя), не вставляй разделитель между ними. Перед нтд_1 разделитель обязателен.
-3. **Слитные параметры**: "M6" = тип_резьбы "M" + номинальный_диаметр "6" (без разделителя: `M(?P<номинальный_диаметр_резьбы>\d+)`). "22х1,5" = диаметр "22" + шаг "1,5" (`(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)`).
-4. **Порядок групп**: тип (литерал) → исполнение (если есть) → числовые параметры → покрытие → нтд_1.
-5. **Исполнение опциональное**: `(?:[-\s]+\(?(?P<исполнение>\d+)\)?)?` — только если в примерах есть (N). Разделитель внутри группы.
-6. **Покрытие**: `[\w.]+` (включает точки и кириллицу). Должно стоять ДО нтд_1. Не захватывай стандарт.
-7. **НТД_1**: полное название стандарта. Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)`. Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
-8. **Полная строка**: `^...$` обязательно. НЕТ nested named groups `(?P<a>(?P<b>...))`.
+2. **Разделители — гибкие, но обязательный перед нтд_1**. Между параметрами используй `[-\s]+` (дефис или пробел). Если параметры слитные (M6, 22х1,5), не вставляй разделитель между ними. Перед нтд_1 ОБЯЗАТЕЛЬНО ставь `[-\s]+`. НЕ используй `\s*` или `\s+` перед нтд_1.
+3. **Слитные параметры**: "M6" → `M(?P<номинальный_диаметр_резьбы>\d+)`. "22х1,5" → `(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)`.
+4. **Порядок групп**: тип → исполнение → числовые параметры → покрытие → нтд_1.
+5. **Исполнение опциональное**: `(?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?`. Используй `(?:\()?` для опциональной скобки. НЕ пиши `\(?P<` — это сломает regex.
+6. **Покрытие**: `[\w.]+`. После покрытия ОБЯЗАТЕЛЬНО `[-\s]+` перед нтд_1. Покрытие НЕ должно включать "ОСТ" или "ГОСТ".
+7. **НТД_1**: `[-\s]+(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `[-\s]+(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
+8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<a>(?P<b>...))`.
+9. **Блок "длина.свойства.покрытие" (ГОСТ 7795-70)**: Это ТРИ ОТДЕЛЬНЫХ целых числа через точку. Правильно: `(?P<длина>\d+)\.(?P<свойства>\d+)\.(?P<покрытие>\d+)`. Неправильно: `\d+(?:[.,]\d+)?` для длины — жадно сожрет все три числа.
+10. **Точка в номенклатуре**: Точка может быть десятичной (12.5 мм) или разделителем (45.46.019). Анализируй примеры: если после точки ровно 2 цифры-кода — это разделитель. При сомнении разделяй: `(?P<a>\d+)\.(?P<b>\d+)`, а не `(?P<x>\d+(?:[.,]\d+)?)`.
+11. **НЕ используй неявные параметры**: НЕ создавай группу `тип_резьбы` со значением "M", если "M" нет в строке. НЕ создавай `марка_материала`, `номинальный_диаметр_резьбы` если их нет в наименовании (смотри Метаданные БД).
 
 === ЗАПРЕЩЁННЫЕ ПАРАМЕТРЫ ===
 
 НЕ включай в список params и не создавай группы для: наименование, наименование_1, стандарт, тип_изделия, нтд, нтд_1, нтд_2, код.
-НЕ включай параметры, которые в примерах помечены как «Отсутствуют».
+НЕ включай параметры, которые в примерах помечены как «Отсутствуют» или перечислены в «Метаданные БД».
 
 === ФОРМАТ ОТВЕТА ===
 
@@ -544,8 +582,8 @@ class LLMMaskGenerator:
 ```json
 {
   "pattern": "^...$",
-  "params": ["номинальный_диаметр_резьбы", "..."],
-  "required": ["номинальный_диаметр_резьбы", "..."]
+  "params": ["..."],
+  "required": ["..."]
 }
 ```
 """
