@@ -109,7 +109,8 @@ class MaskGenerationConfig:
     activation_threshold: float = 0.85
     retry_threshold: float = 0.50
     deduplicate_by_standard_type: bool = True  # FIX 2026-05-25: suppress Unknown field warning
-    validation_max_examples: int = 10             # FIX 2026-05-28: configurable validation sample size
+    prompt_max_examples: int = 20               # FIX 2026-05-28: examples for LLM prompt
+    validation_max_examples: int = 10            # FIX 2026-05-28: examples for mask validation
 
 @dataclass
 class OutputConfig:

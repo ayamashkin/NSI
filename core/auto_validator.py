@@ -296,17 +296,18 @@ class AutoValidator:
                 best_exp_key, _ = self._find_expected_key(param, ex)
                 expected_val = ex.get(best_exp_key) if best_exp_key else None
                 expected_info.append(f"{param}={expected_val}")
-            logger.debug("[AutoValidator] NO MATCH for text: %s", text[:100])
-            logger.debug("[AutoValidator] Pattern used: %s", pattern.pattern)
-            logger.debug("[AutoValidator] Expected params from ENS: %s", ", ".join(expected_info))
-            self._print_table(text, required, ex, skip_params, extracted=None)
+            sep = chr(10)
+            no_match_lines = [
+                f"NO MATCH for text: {text[:100]}",
+                f"Pattern used: {pattern.pattern}",
+                f"Expected params from ENS: {', '.join(expected_info)}",
+            ]
+            logger.debug("[AutoValidator]" + sep + "%s", sep.join(no_match_lines))
             return {"success": False, "error": "No match", "text": text, "example": ex, "param_results": param_results}
 
         extracted = match.groupdict()
         mismatches = []
         missing = []
-        debug_lines = []
-
         for param in required:
             if param in skip_params:
                 continue
@@ -316,24 +317,24 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if extracted_empty and expected_empty:
-                debug_lines.append(f" {param}: OK (both empty)")
+
                 param_results[param] = "ok"
                 continue
             elif expected_empty and not extracted_empty:
-                debug_lines.append(f" {param}: OK (expected empty, extracted={extracted_val})")
+
                 param_results[param] = "ok"
                 continue
             elif extracted_empty or extracted_val == "":
                 missing.append(param)
-                debug_lines.append(f" {param}: MISSING (expected={expected_val})")
+
                 param_results[param] = "missing"
                 continue
             if not self._values_match(str(extracted_val), str(expected_val)):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
-                debug_lines.append(f" {param}: MISMATCH expected={expected_val} extracted={extracted_val}")
+
                 param_results[param] = "mismatch"
             else:
-                debug_lines.append(f" {param}: OK expected={expected_val} extracted={extracted_val}")
+
                 param_results[param] = "ok"
 
         optional_params = set(params) - set(required) - skip_params
@@ -344,34 +345,24 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if expected_empty:
-                debug_lines.append(f" {param}: OK (expected empty, optional)")
+
                 param_results[param] = "ok"
                 continue
             if extracted_empty:
                 mismatches.append({"param": param, "expected": expected_val, "extracted": None})
-                debug_lines.append(f" {param}: MISMATCH expected={expected_val} extracted=None (optional)")
+
                 param_results[param] = "mismatch"
                 continue
             if not self._values_match(str(extracted_val), str(expected_val)):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
-                debug_lines.append(f" {param}: MISMATCH expected={expected_val} extracted={extracted_val} (optional)")
+
                 param_results[param] = "mismatch"
             else:
-                debug_lines.append(f" {param}: OK expected={expected_val} extracted={extracted_val} (optional)")
+
                 param_results[param] = "ok"
 
         success = len(missing) == 0 and len(mismatches) == 0
-        if not success and logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[AutoValidator] Validation details for: %s", text[:80])
-            for line in debug_lines:
-                logger.debug("[AutoValidator]%s", line)
-            if missing:
-                logger.debug("[AutoValidator] Missing required params: %s", missing)
-            if mismatches:
-                for mm in mismatches:
-                    logger.debug("[AutoValidator] Mismatch param=%s expected=%s extracted=%s",
-                                 mm.get("param"), mm.get("expected"), mm.get("extracted"))
-            self._print_table(text, required, ex, skip_params, extracted=extracted, mismatches=mismatches, missing=missing)
+        # Detailed per-example debug removed — see _print_summary_table for aggregated view
         return {
             "success": success,
             "missing": missing,
@@ -485,8 +476,7 @@ class AutoValidator:
             header_parts.append(f" {p:<{param_widths[p]}} ")
         lines.append("│" + "│".join(header_parts) + "│")
         lines.append(hline())
-        max_display_rows = 15
-        for r in rows[:max_display_rows]:
+        for r in rows:
             row_parts = [
                 f" {str(r['idx']):<{w_idx}} ",
                 f" {r['text']:<{w_text}} ",
@@ -496,8 +486,6 @@ class AutoValidator:
                 cell = str(r["cells"].get(p, ""))
                 row_parts.append(f" {cell:<{param_widths[p]}} ")
             lines.append("│" + "│".join(row_parts) + "│")
-        if len(rows) > max_display_rows:
-            lines.append(f"│ ... и ещё {len(rows) - max_display_rows} строк │")
         lines.append(bottom())
         sep = chr(10)
         logger.debug("[AutoValidator]" + sep + "%s", sep.join(lines))
@@ -650,8 +638,22 @@ class AutoValidator:
         v2_raw = str(val2).strip()
         v1 = v1_raw.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
         v2 = v2_raw.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
-        if v1 == v2 or v1 in v2 or v2 in v1:
+        if v1 == v2:
             return True
+        # FIX 2026-05-28 21:58 UTC+3: substring match only for minor differences (.0 suffix, ≤2 chars)
+        # Reject "22" vs "22х1.5" (different values, one contains other by accident)
+        if v1 in v2 or v2 in v1:
+            longer = v2 if len(v2) > len(v1) else v1
+            shorter = v1 if len(v2) > len(v1) else v2
+            remaining = longer.replace(shorter, "", 1)
+            # Allow only .0 / ,0 suffix differences
+            if remaining in (".0", ",0", ".00", ",00"):
+                return True
+            # Allow tiny formatting differences (≤ 2 chars)
+            if abs(len(v1) - len(v2)) <= 2:
+                return True
+            # Otherwise: real mismatch (e.g., "22" vs "22х1.5", "6" vs "6g")
+            return False
         try:
             f1 = float(v1)
             f2 = float(v2)

@@ -2,6 +2,7 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 22:00:00 — FEAT: generate_mask uses prompt_max_examples from settings (default 20)
 # 2026-05-28 21:50:00 — FEAT: passes validation_max_examples from settings to AutoValidator
 # 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
 # 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
@@ -814,7 +815,11 @@ class LLMMaskGenerator:
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
         canon_std = canonicalize_standard(standard)
         if examples is None:
-            examples = self._get_ens_examples(canon_std, item_type, max_examples=20)
+            # FIX 2026-05-28: use prompt_max_examples from settings
+            prompt_max = 20
+            if self.settings and hasattr(self.settings, "mask_generation"):
+                prompt_max = getattr(self.settings.mask_generation, "prompt_max_examples", 20)
+            examples = self._get_ens_examples(canon_std, item_type, max_examples=prompt_max)
         prompt = self._build_prompt(canon_std, item_type, examples, name, standard_info)
         self._save_debug_prompt(canon_std, item_type, prompt)
         service, model, temperature = self._resolve_service()

@@ -2,11 +2,11 @@
 # Nomenclature Processor CLI
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
+# 2026-05-28 22:00:00 — FEAT: generate-masks uses prompt_max_examples and validation_max_examples from config
 # 2026-05-27 17:00:00 — Добавлена команда build-index с доменной архитектурой
 # 2026-05-27 14:25:00 — generate-masks, batch, diagnose обновлены с --domain
 # 2026-05-27 14:25:00 — Добавлен --auto-domain для multi-domain сопоставления
 # 2026-05-27 14:25:00 — ens build-index теперь использует ENSIndexBuilder
-# 2026-05-27 14:25:00 — process_parametric и analyze-quality поддерживают --domain
 # =============================================================================
 
 import click
@@ -90,7 +90,7 @@ def prompts():
     settings = get_settings()
     click.echo("📋 Доступные промпты:")
     for pid, cfg in settings.prompts.items():
-        click.echo(f"\n🔹 {pid}")
+        click.echo(f"🔹 {pid}")
         click.echo(f"  Название: {cfg.name}")
         click.echo(f"  Категория: {cfg.category}")
         click.echo(f"  Сервис: {cfg.resolve_service(settings)}")
@@ -129,7 +129,7 @@ def process(ctx, input_file, prompt, auto, workers, force):
             click.echo("❌ Укажите --auto или --prompt", err=True)
             return
         results = processor.process_batch(items, prompt_ids, force_reprocess=force)
-    click.echo(f"\n✅ Обработано: {len(results)} позиций")
+    click.echo(f"✅ Обработано: {len(results)} позиций")
     stats = db.get_statistics()
     click.echo(f"📊 Всего в БД: {stats.get('total', 0)}")
 
@@ -191,7 +191,7 @@ def errors(limit, prompt):
     if not error_results:
         click.echo("✅ Ошибок не найдено")
         return
-    click.echo(f"\n❌ Найдено {len(error_results)} ошибок:\n")
+    click.echo(f"❌ Найдено {len(error_results)} ошибок:")
     for i, result in enumerate(error_results, 1):
         click.echo(f"{i}. {result.get('article', 'N/A')}: {result.get('name', 'N/A')[:50]}...")
         click.echo(f"   Промпт: {result.get('prompt_id', 'N/A')}")
@@ -217,7 +217,7 @@ def detect(text):
         matches = processor._check_category_match(text, cfg)
         if matches:
             click.echo(f"✅ Подходит: {pid} ({cfg.category})")
-            click.echo(f"  Сервис: {cfg.resolve_service(settings)}, Модель: {cfg.resolve_model(settings)}")
+            click.echo(f"   Сервис: {cfg.resolve_service(settings)}, Модель: {cfg.resolve_model(settings)}")
             return
     click.echo("❌ Категория не определена")
 
@@ -233,7 +233,7 @@ def models(api_name):
         if not cfg:
             click.echo(f"❌ {service}: не найден")
             continue
-        click.echo(f"\n🔧 {service.upper()}:")
+        click.echo(f"🔧 {service.upper()}:")
         click.echo(f"  URL: {cfg.base_url}")
         try:
             if service == 'openwebui':
@@ -424,13 +424,13 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     click.echo(f"  Прочитано {len(df)} строк, {len(df.columns)} колонок")
     name_col = _find_name_column(df)
     if name_col is None:
-        click.echo("\n❌ ОШИБКА: В файле отсутствует колонка с наименованием.")
+        click.echo("❌ ОШИБКА: В файле отсутствует колонка с наименованием.")
         click.echo("  Ожидается колонка, содержащая в названии одно из слов:")
         click.echo("  'Наименование', 'Номенклатура', 'Name', 'Наим.', 'Наименов'")
-        click.echo(f"\n  Доступные колонки в файле:")
+        click.echo(f"  Доступные колонки в файле:")
         for i, col in enumerate(df.columns, 1):
-            click.echo(f"  {i}. {col}")
-        click.echo("\n  Переименуйте колонку с наименованием изделий и повторите запуск.")
+            click.echo(f"    {i}. {col}")
+        click.echo("  Переименуйте колонку с наименованием изделий и повторите запуск.")
         return 1
     click.echo(f"✅ Колонка с наименованием: '{name_col}'")
     texts = df[name_col].astype(str).tolist()
@@ -591,7 +591,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                             cell.number_format = '0.000'
                         break
         file_size = output_path.stat().st_size / 1024
-        click.echo(f"\n✅ Excel сохранен: {output}")
+        click.echo(f"✅ Excel сохранен: {output}")
         click.echo(f"  Размер: {file_size:.1f} КБ")
     else:
         json_results = []
@@ -603,9 +603,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         clean_results = _sanitize_for_json(json_results)
         with open(output, 'w', encoding='utf-8') as f:
             json.dump(clean_results, f, ensure_ascii=False, indent=2, default=str)
-        click.echo(f"\n✅ JSON сохранен: {output}")
+        click.echo(f"✅ JSON сохранен: {output}")
 
-    click.echo(f"\n📊 Статистика:")
+    click.echo(f"📊 Статистика:")
     click.echo(f"  Всего обработано: {stats['total']}")
     click.echo(f"  ✅ Успешно: {stats['success']}")
     click.echo(f"  ❌ Ошибки: {stats['failed']}")
@@ -613,7 +613,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         click.echo(f"  Отфильтровано (неуспешные): {stats['filtered']}")
     if hasattr(processor, '_cache_stats'):
         cs = processor._cache_stats
-        click.echo(f"\n💾 Кэш:")
+        click.echo(f"💾 Кэш:")
         click.echo(f"  Попаданий (HIT): {cs.get('hits', 0)}")
         click.echo(f"  Промахов (MISS): {cs.get('misses', 0)}")
         total_cache = cs.get('hits', 0) + cs.get('misses', 0)
@@ -671,13 +671,13 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
     click.echo(f"📊 Анализ файла: {input_file}...")
     stats = analyzer.analyze_file(input_file)
     report_text = analyzer.format_report(stats)
-    click.echo("\n" + report_text)
+    click.echo("" + report_text)
     if output:
         analyzer.save_excel(stats, output)
-        click.echo(f"\n✅ Excel отчет сохранен: {output}")
+        click.echo(f"✅ Excel отчет сохранен: {output}")
     if json_output:
         analyzer.save_json(stats, json_output)
-        click.echo(f"\n✅ JSON отчет сохранен: {json_output}")
+        click.echo(f"✅ JSON отчет сохранен: {json_output}")
 
 @cli.command()
 @click.argument('text')
@@ -725,21 +725,21 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm, settings=settings
     )
-    click.echo(f"\n{'='*60}")
+    click.echo(f"{'='*60}")
     click.echo(f"🔍 ДИАГНОСТИКА: {text}")
     click.echo(f"{'='*60}")
     extracted = processor.standard_extractor.extract_all(text)
     standard_info = extracted.get('standard_info')
     item_type = extracted.get('item_type')
-    click.echo(f"\n📋 Извлечено (Level 0):")
+    click.echo(f"📋 Извлечено (Level 0):")
     click.echo(f"  standard_info: {standard_info.to_dict() if standard_info else None}")
     click.echo(f"  item_type: {item_type}")
     if not standard_info or not item_type:
-        click.echo("\n❌ Недостаточно данных для обработки")
+        click.echo("❌ Недостаточно данных для обработки")
         return
     standard = canonicalize_standard(standard_info.normalized)
     search_item_type = item_type.upper()
-    click.echo(f"\n🔍 Поиск маски (Level 1):")
+    click.echo(f"🔍 Поиск маски (Level 1):")
     click.echo(f"  Запрос: standard='{standard}', item_type='{search_item_type}'")
     mask = mask_db.get_mask(standard, search_item_type)
     click.echo(f"  Найдено: {mask is not None}")
@@ -755,20 +755,20 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
     click.echo(f"  mask.item_type: {getattr(mask, 'item_type', 'N/A')}")
     click.echo(f"  mask.is_active: {getattr(mask, 'is_active', 'N/A')}")
     click.echo(f"  mask.pattern (первые 120 симв):")
-    click.echo(f"  {getattr(mask, 'pattern', 'N/A')[:120]}")
+    click.echo(f"    {getattr(mask, 'pattern', 'N/A')[:120]}")
     effective_standard = getattr(mask, 'standard', None) or standard
     client = ParametricENSClient.__new__(ParametricENSClient)
     relaxed = client._relax_pattern(mask.pattern, standard=effective_standard)
-    click.echo(f"\n📋 Relax pattern:")
+    click.echo(f"📋 Relax pattern:")
     click.echo(f"  standard заменен: '{effective_standard}'")
     click.echo(f"  relaxed (первые 200 симв):")
-    click.echo(f"  {relaxed[:200]}")
+    click.echo(f"    {relaxed[:200]}")
     if len(relaxed) > 200:
-        click.echo(f"  ... ({len(relaxed)} символов всего)")
+        click.echo(f"    ... ({len(relaxed)} символов всего)")
     try:
         compiled = re.compile(relaxed, re.IGNORECASE)
         match = compiled.search(text)
-        click.echo(f"\n📋 Regex match:")
+        click.echo(f"📋 Regex match:")
         if match:
             click.echo(f"  ✅ MATCH")
             click.echo(f"  groups: {match.groupdict()}")
@@ -781,9 +781,9 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
             else:
                 click.echo(f"  no prefix matches at all")
     except re.error as e:
-        click.echo(f"\n📋 Regex match:")
+        click.echo(f"📋 Regex match:")
         click.echo(f"  ❌ INVALID REGEX: {e}")
-    click.echo(f"\n📋 Full processor result:")
+    click.echo(f"📋 Full processor result:")
     result = processor.process(text)
     click.echo(f"  level: {result.level.value if hasattr(result.level, 'value') else result.level}")
     click.echo(f"  success: {result.success}")
@@ -794,7 +794,7 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
     click.echo(f"  processing_time_ms: {result.processing_time_ms:.1f}")
     if result.details:
         click.echo(f"  details: {result.details}")
-    click.echo(f"\n{'='*60}")
+    click.echo(f"{'='*60}")
 
 @cli.command('generate-masks')
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')
@@ -845,9 +845,12 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
     # === РЕЖИМ 1: Одиночная генерация ===
     if standard and item_type:
         canon_std = canonicalize_standard(standard)
-        validator = AutoValidator(ens_index_path=ens_index, domain=domain)
+        # FIX 2026-05-28: use configurable example counts
+        prompt_max = getattr(settings.mask_generation, "prompt_max_examples", 20)
+        validation_max = getattr(settings.mask_generation, "validation_max_examples", 10)
+        validator = AutoValidator(ens_index_path=ens_index, domain=domain, max_examples=validation_max)
         examples = validator._get_ens_examples(canon_std, item_type, domain=domain)
-        click.echo(f"📋 Загружено {len(examples)} примеров для {canon_std} / {item_type}")
+        click.echo(f"📋 Загружено {len(examples)} примеров для {canon_std} / {item_type} (validation_max={validation_max})")
         if not examples:
             click.echo("❌ Нет примеров")
             return
@@ -855,7 +858,8 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             click.echo("❌ Для генерации укажите --llm")
             return
         click.echo(f"🎯 Генерация маски для {canon_std} / {item_type}...")
-        mask, meta = generator.generate_mask(canon_std, item_type, examples)
+        prompt_examples = examples[:prompt_max]
+        mask, meta = generator.generate_mask(canon_std, item_type, prompt_examples)
         if mask:
             click.echo(f"✅ Маска сгенерирована:")
             click.echo(f"  Паттерн: {mask['pattern'][:80]}...")
@@ -962,21 +966,24 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             if old_mask and old_mask.is_active and force:
                 click.echo(f"  🔄 Force: перегенерация {std}/{itype}")
             if generator:
-                limited_examples = examples[:20]
+                # FIX 2026-05-28: configurable example counts
+                prompt_max = getattr(settings.mask_generation, "prompt_max_examples", 20)
+                validation_max = getattr(settings.mask_generation, "validation_max_examples", 10)
+                limited_examples = examples[:prompt_max]
                 mask, meta = generator.generate_mask(std, itype, limited_examples)
                 if mask:
                     auto_score = 0.0
                     is_active = True
                     if validate:
                         from core.auto_validator import AutoValidator
-                        validator = AutoValidator(ens_index_path=ens_index, domain=domain)
+                        validator = AutoValidator(ens_index_path=ens_index, domain=domain, max_examples=validation_max)
                         validation = validator.validate_mask(
                             mask['pattern'], mask['params'], mask['required'],
-                            std, itype, ens_examples=limited_examples
+                            std, itype, ens_examples=examples  # validate on FULL examples
                         )
                         auto_score = validation.score
                         is_active = auto_score >= min_score
-                    click.echo(f"  🔍 Маска {std}/{itype}: score={auto_score:.2f}, active={is_active}")
+                        click.echo(f"  🔍 Маска {std}/{itype}: score={auto_score:.2f}, active={is_active}")
                     temp_mask = MaskRecord(
                         standard=std, item_type=item_type_normalized,
                         pattern=mask['pattern'], params=mask['params'],
@@ -1018,7 +1025,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                         'tokens_prompt': meta.get('tokens_prompt') if meta else None,
                         'tokens_completion': meta.get('tokens_completion') if meta else None,
                     })
-    click.echo(f"\n📊 Результат:")
+    click.echo(f"📊 Результат:")
     click.echo(f"  Уже активных: {stats['existing']}")
     click.echo(f"  Сгенерировано: {stats['generated']}")
     click.echo(f"  Активировано: {stats['activated']}")
@@ -1072,7 +1079,7 @@ def build_index(excel_file, output, domain):
         for std_data in idx.values()
         for entry in std_data.values()
     )
-    click.echo(f"\n📊 Сводная статистика:")
+    click.echo(f"📊 Сводная статистика:")
     click.echo(f"  Стандартов: {total_std}")
     click.echo(f"  Типов изделий: {total_types}")
     click.echo(f"  Всего примеров: {total_examples}")
@@ -1100,10 +1107,10 @@ def info(pkl_file):
             for entry in std_data.values()
         )
         click.echo(f"  Всего примеров: {total_examples}")
-        click.echo(f"\n📋 Топ-10 стандартов:")
+        click.echo(f"📋 Топ-10 стандартов:")
         for std, types in sorted(data.items(), key=lambda x: -len(x[1]))[:10]:
             ex_count = sum(len(entry.get('examples', [])) for entry in types.values())
-            click.echo(f"  {std}: {len(types)} типов, {ex_count} примеров")
+            click.echo(f"    {std}: {len(types)} типов, {ex_count} примеров")
     else:
         # Legacy формат
         items = data.get('items', [])
@@ -1116,12 +1123,12 @@ def info(pkl_file):
             itype = item.get('тип_изделия') or item.get('наименование_типа') or 'unknown'
             std_counter[std] += 1
             type_counter[itype] += 1
-        click.echo(f"\n📋 Топ-10 стандартов:")
+        click.echo(f"📋 Топ-10 стандартов:")
         for std, count in std_counter.most_common(10):
-            click.echo(f"  {std}: {count}")
-        click.echo(f"\n📋 Топ-10 типов:")
+            click.echo(f"    {std}: {count}")
+        click.echo(f"📋 Топ-10 типов:")
         for itype, count in type_counter.most_common(10):
-            click.echo(f"  {itype}: {count}")
+            click.echo(f"    {itype}: {count}")
 
 @ens.command()
 @click.argument('pkl_file', type=click.Path(exists=True))
@@ -1143,7 +1150,7 @@ def show(pkl_file, standard, item_type, limit):
             for itype, entry in types.items():
                 if item_type and item_type.lower() != itype.lower():
                     continue
-                click.echo(f"\n🔹 {std} / {itype}")
+                click.echo(f"🔹 {std} / {itype}")
                 examples = entry.get('examples', [])
                 twin_groups = entry.get('twin_groups', [])
                 field_meta = entry.get('field_meta', {})
@@ -1154,7 +1161,7 @@ def show(pkl_file, standard, item_type, limit):
                 click.echo(f"  Метаданные: {stats.get('metadata_fields', [])}")
                 for i, ex in enumerate(examples[:limit]):
                     meta = ex.get('_meta', {})
-                    click.echo(f"  {i+1}. {meta.get('name', 'N/A')[:80]}")
+                    click.echo(f"    {i+1}. {meta.get('name', 'N/A')[:80]}")
     else:
         # Legacy формат
         items = data.get('items', [])
@@ -1170,7 +1177,7 @@ def show(pkl_file, standard, item_type, limit):
         click.echo(f"  Найдено: {len(filtered)} записей")
         for i, item in enumerate(filtered[:limit]):
             name = item.get('наименование') or item.get('полное_наименование') or 'N/A'
-            click.echo(f"  {i+1}. {name[:80]}")
+            click.echo(f"    {i+1}. {name[:80]}")
 
 if __name__ == '__main__':
     cli()
