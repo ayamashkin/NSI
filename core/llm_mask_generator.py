@@ -2,6 +2,7 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 22:52:00 — FIX: _select_representative_examples shows all examples up to 20, prioritizes rare params (шаг_резьбы, исполнение)
 # 2026-05-28 22:00:00 — FEAT: generate_mask uses prompt_max_examples from settings (default 20)
 # 2026-05-28 21:50:00 — FEAT: passes validation_max_examples from settings to AutoValidator
 # 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
@@ -328,7 +329,9 @@ class LLMMaskGenerator:
             lines.append(f" {key}: {count} из {total} ({count / total * 100:.0f}%)")
         return "\n".join(lines) if len(lines) > 1 else "(нет параметров)"
 
-    def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
+    def _select_representative_examples(self, examples: List[Dict], max_count: int = 20) -> List[Dict]:
+        """Select examples ensuring rare params (шаг_резьбы, исполнение) are represented.
+        FIX 2026-05-28 22:52: show ALL examples up to max_count, prioritize rare params."""
         if len(examples) <= max_count:
             return examples
 
@@ -346,24 +349,42 @@ class LLMMaskGenerator:
                     vis.add(k)
             return vis
 
-        scored = [(ex, _visible_params(ex)) for ex in examples]
-        scored.sort(key=lambda x: -len(x[1]))
+        # Priority: examples with rare params (шаг_резьбы, исполнение) first
+        rare_params = {"шаг_резьбы", "исполнение", "класс_допуска"}
+        scored = []
+        for ex in examples:
+            vis = _visible_params(ex)
+            has_rare = bool(vis & rare_params)
+            scored.append((ex, vis, has_rare))
+
+        # Sort: has_rare first, then by param count desc
+        scored.sort(key=lambda x: (-x[2], -len(x[1])))
+
         selected = []
         covered = set()
-        for ex, vis in scored:
+        rare_covered = set()
+
+        # Phase 1: pick examples covering rare params
+        for ex, vis, has_rare in scored:
             if len(selected) >= max_count:
                 break
+            new_rare = (vis & rare_params) - rare_covered
+            if new_rare:
+                selected.append(ex)
+                covered |= vis
+                rare_covered |= new_rare
+
+        # Phase 2: fill remaining slots with diverse examples
+        for ex, vis, has_rare in scored:
+            if len(selected) >= max_count:
+                break
+            if ex in selected:
+                continue
             new_params = vis - covered
             if new_params or len(selected) < max_count:
                 selected.append(ex)
                 covered |= vis
-        if len(selected) < max_count:
-            used = set(id(e) for e in selected)
-            for ex, _ in scored:
-                if id(ex) not in used:
-                    selected.append(ex)
-                    if len(selected) >= max_count:
-                        break
+
         return selected
 
     _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2", "наименование_1"}
@@ -380,7 +401,7 @@ class LLMMaskGenerator:
             return "(нет примеров)"
 
         unambiguous_examples = [ex for ex, _ in unambiguous]
-        display_examples = self._select_representative_examples(unambiguous_examples, max_count=10)
+        display_examples = self._select_representative_examples(unambiguous_examples, max_count=20)
         total_unambiguous = len(unambiguous_examples)
         logger.info(
             "[LLMMaskGenerator] Format examples: %d displayed (of %d unambiguous)",

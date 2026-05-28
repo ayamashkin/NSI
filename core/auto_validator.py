@@ -432,7 +432,11 @@ class AutoValidator:
             ex = d.get("example", {})
             for p in params:
                 if error == "No match":
-                    row["cells"][p] = "—"
+                    # Show what we expected from ENS but couldn't extract
+                    best_key, _ = self._find_expected_key(p, ex)
+                    ens_val = ex.get(best_key) if best_key else None
+                    ens_str = str(ens_val) if ens_val is not None else "—"
+                    row["cells"][p] = f"∅≠{ens_str}"
                     continue
                 # Get ENS expected value
                 best_key, _ = self._find_expected_key(p, ex)

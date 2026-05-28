@@ -112,7 +112,7 @@ mask_generation:
   save_debug_prompts: true            # Сохранять промпты и ответы LLM в prompts/debug/
   debug_prompts_dir: "prompts/debug"  # путь к папке с промптами и ответами
   deduplicate_by_standard_type: true  # Не генерировать маску, если (standard, type) уже есть
-  validation_max_examples: 100        # количество примеров при валидации для пары стандарт+тип
+  validation_max_examples: 200        # количество примеров при валидации для пары стандарт+тип
   prompt_max_examples: 20             # количество примеров в промпте для LLM
 
 # =============================================================================
