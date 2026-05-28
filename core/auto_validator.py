@@ -429,16 +429,16 @@ class AutoValidator:
 
                 status = pr.get(p, "ok")
                 if status == "ok":
-                    # OK: show ENS_value/Extracted_value (real value from regex match)
+                    # OK: show Extracted/ENS (mask value first, then ENS reference)
                     ext_val = d.get("extracted", {}).get(p)
                     ext_str = str(ext_val) if ext_val is not None else "—"
-                    row["cells"][p] = f"{ens_str}/{ext_str}"
+                    row["cells"][p] = f"{ext_str}/{ens_str}"
                 elif p in missing:
-                    row["cells"][p] = f"{ens_str}/∅"
+                    row["cells"][p] = f"∅/{ens_str}"
                 elif p in mismatches:
                     exp, ext = mismatches[p]
                     ext_str = str(ext) if ext is not None else "—"
-                    row["cells"][p] = f"{ens_str}≠{ext_str}"
+                    row["cells"][p] = f"{ext_str}≠{ens_str}"
                 else:
                     row["cells"][p] = "?"
             rows.append(row)
