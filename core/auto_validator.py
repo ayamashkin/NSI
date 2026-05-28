@@ -375,6 +375,7 @@ class AutoValidator:
             "text": text,
             "example": ex,
             "param_results": param_results,
+            "extracted": extracted,
         }
 
     def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
@@ -440,10 +441,12 @@ class AutoValidator:
                     row["cells"][p] = "?"
             rows.append(row)
 
-        w_idx = max(2, len(str(total)))
+        w_idx = max(2, len(str(total)), len("№"))
         w_text = max(len(r["text"]) for r in rows) if rows else 0
         w_text = min(w_text, 40)
-        w_result = max(len(r["result"]) for r in rows) if rows else 0
+        w_text = max(int(w_text * 1.5) + 1, 3)
+        w_result = max(len("Результат"), max(len(r["result"]) for r in rows) if rows else 0)
+        w_result = max(int(w_result * 1.5) + 1, 3)
 
         # Calculate widths with 1.5x scaling to fit cell contents
         param_widths = {}
