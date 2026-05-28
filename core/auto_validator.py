@@ -2,11 +2,11 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-28 15:15:00 — Compact summary table per standard, reduced noise on success
-# 2026-05-28 15:15:00 — _test_pattern returns param_results; Match OK debug lines removed
-# 2026-05-28 15:15:00 — _print_summary_table added for end-of-validation stats
-# 2026-05-28 14:30:00 — Added TABLE diagnostics: param vs ENS vs extracted vs text snippet
-# 2026-05-28 14:30:00 — _diagnose_no_match and _test_pattern now output aligned tables
+# 2026-05-28 20:45:00 — FIX: _print_summary_table transposed (examples as rows, params as columns)
+# 2026-05-28 20:10:52 — 913cbafd 28.05.2026
+# 2026-05-28 16:11:43 — 4edaece3 28.05.2026
+# 2026-05-28 16:11:38 — 391c9b21 28.05.2026
+# 2026-05-28 15:58:38 — e08274a2 28.05.2026
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -255,7 +255,7 @@ class AutoValidator:
                                      mm.get("param"), mm.get("expected"), mm.get("extracted"))
 
         logger.info("[AutoValidator] Validation result for %s/%s: score=%.2f, passed=%s",
-                     standard, item_type, score, passed)
+                    standard, item_type, score, passed)
         return ValidationResult(
             score=score, passed=passed, details=details, total=total,
             matched=success_count, mismatched=mismatched, missing=missing,
@@ -283,7 +283,6 @@ class AutoValidator:
         param_results: Dict[str, str] = {}
 
         if not match:
-            # Expected params for diagnostics
             expected_info = []
             for param in required:
                 if param in skip_params:
@@ -378,102 +377,91 @@ class AutoValidator:
 
     def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
                              required: List[str], skip_params: set, total: int, success_count: int) -> None:
-        """Print compact summary table after validation."""
-        param_stats: Dict[str, Dict[str, Any]] = {}
-        for param in required:
-            if param in skip_params:
-                continue
-            param_stats[param] = {"ok": 0, "fail": 0, "total": 0, "examples": []}
-
-        for d in details:
-            if d.get("error") == "No match":
-                for p in param_stats:
-                    param_stats[p]["fail"] += 1
-                    param_stats[p]["total"] += 1
-                    if len(param_stats[p]["examples"]) < 2:
-                        param_stats[p]["examples"].append(f"NO MATCH: {d.get('text', '')[:50]}")
-                continue
-            pr = d.get("param_results", {})
-            for p in param_stats:
-                param_stats[p]["total"] += 1
-                if pr.get(p) == "ok":
-                    param_stats[p]["ok"] += 1
-                else:
-                    param_stats[p]["fail"] += 1
-                    if len(param_stats[p]["examples"]) < 2:
-                        txt = d.get("text", "")[:50]
-                        reason = pr.get(p, "fail")
-                        param_stats[p]["examples"].append(f"{reason}: {txt}")
-
-        if not param_stats:
+        """Print transposed summary table: examples as rows, params as columns."""
+        params = [p for p in required if p not in skip_params]
+        if not params:
             return
 
         rows = []
-        for p, s in sorted(param_stats.items()):
-            rate = s["ok"] / s["total"] * 100 if s["total"] > 0 else 0
-            rows.append({
-                "param": p,
-                "ok": s["ok"],
-                "fail": s["fail"],
-                "total": s["total"],
-                "rate": f"{rate:.1f}%",
-                "examples": "; ".join(s["examples"]) if s["examples"] else "",
-            })
+        for i, d in enumerate(details, 1):
+            text = d.get("text", "")[:50]
+            pr = d.get("param_results", {})
+            error = d.get("error")
+            mismatches = {mm["param"]: (mm.get("expected"), mm.get("extracted")) for mm in d.get("mismatches", [])}
+            missing = set(d.get("missing", []))
 
-        w_param = max(len(r["param"]) for r in rows)
-        w_ok = max(len(str(r["ok"])) for r in rows)
-        w_fail = max(len(str(r["fail"])) for r in rows)
-        w_total = max(len(str(r["total"])) for r in rows)
-        w_rate = max(len(r["rate"]) for r in rows)
-        w_examples = max(len(r["examples"]) for r in rows) if any(r["examples"] for r in rows) else 0
+            row = {"idx": i, "text": text, "cells": {}, "result": "OK"}
+            if error == "No match":
+                row["result"] = "NO MATCH"
+            elif not d.get("success"):
+                row["result"] = "FAIL"
+            else:
+                row["result"] = "OK"
+
+            for p in params:
+                if error == "No match":
+                    row["cells"][p] = "—"
+                    continue
+                status = pr.get(p, "ok")
+                if status == "ok":
+                    ex = d.get("example", {})
+                    best_key, _ = self._find_expected_key(p, ex)
+                    val = ex.get(best_key) if best_key else None
+                    row["cells"][p] = str(val) if val is not None else "—"
+                elif p in missing:
+                    row["cells"][p] = "∅"
+                elif p in mismatches:
+                    exp, ext = mismatches[p]
+                    row["cells"][p] = f"✗ {exp}≠{ext}"
+                else:
+                    row["cells"][p] = "?"
+            rows.append(row)
+
+        w_idx = max(2, len(str(total)))
+        w_text = max(len(r["text"]) for r in rows) if rows else 0
+        w_text = min(w_text, 40)
+        w_result = max(len(r["result"]) for r in rows) if rows else 0
+
+        param_widths = {}
+        for p in params:
+            header_len = len(p)
+            max_cell = max(len(str(r["cells"].get(p, ""))) for r in rows) if rows else 0
+            param_widths[p] = max(header_len, max_cell, 3)
 
         def hline(char="─"):
-            parts = [
-                f"{char*(w_param+2)}", f"{char*(w_ok+2)}", f"{char*(w_fail+2)}",
-                f"{char*(w_total+2)}", f"{char*(w_rate+2)}",
-            ]
-            if w_examples > 0:
-                parts.append(f"{char*(w_examples+2)}")
+            parts = [f"{char*(w_idx+2)}", f"{char*(w_text+2)}", f"{char*(w_result+2)}"]
+            for p in params:
+                parts.append(f"{char*(param_widths[p]+2)}")
             return "├" + "┼".join(parts) + "┤"
 
         def top():
-            parts = [
-                f"{'─'*(w_param+2)}", f"{'─'*(w_ok+2)}", f"{'─'*(w_fail+2)}",
-                f"{'─'*(w_total+2)}", f"{'─'*(w_rate+2)}",
-            ]
-            if w_examples > 0:
-                parts.append(f"{'─'*(w_examples+2)}")
+            parts = [f"{'─'*(w_idx+2)}", f"{'─'*(w_text+2)}", f"{'─'*(w_result+2)}"]
+            for p in params:
+                parts.append(f"{'─'*(param_widths[p]+2)}")
             return "┌" + "┬".join(parts) + "┐"
 
         def bottom():
-            parts = [
-                f"{'─'*(w_param+2)}", f"{'─'*(w_ok+2)}", f"{'─'*(w_fail+2)}",
-                f"{'─'*(w_total+2)}", f"{'─'*(w_rate+2)}",
-            ]
-            if w_examples > 0:
-                parts.append(f"{'─'*(w_examples+2)}")
+            parts = [f"{'─'*(w_idx+2)}", f"{'─'*(w_text+2)}", f"{'─'*(w_result+2)}"]
+            for p in params:
+                parts.append(f"{'─'*(param_widths[p]+2)}")
             return "└" + "┴".join(parts) + "┘"
 
         logger.debug("[AutoValidator] === Summary %s/%s: %d/%d passed ===", standard, item_type, success_count, total)
         logger.debug("[AutoValidator] %s", top())
-        header_parts = [
-            f" {'Параметр':<{w_param}} ", f" {'OK':<{w_ok}} ", f" {'Fail':<{w_fail}} ",
-            f" {'Всего':<{w_total}} ", f" {'Rate':<{w_rate}} ",
-        ]
-        if w_examples > 0:
-            header_parts.append(f" {'Примеры ошибок':<{w_examples}} ")
+        header_parts = [f" {'№':<{w_idx}} ", f" {'Наименование':<{w_text}} ", f" {'Результат':<{w_result}} "]
+        for p in params:
+            header_parts.append(f" {p:<{param_widths[p]}} ")
         logger.debug("[AutoValidator] │" + "│".join(header_parts) + "│")
         logger.debug("[AutoValidator] %s", hline())
         for r in rows:
             row_parts = [
-                f" {r['param']:<{w_param}} ",
-                f" {str(r['ok']):<{w_ok}} ",
-                f" {str(r['fail']):<{w_fail}} ",
-                f" {str(r['total']):<{w_total}} ",
-                f" {r['rate']:<{w_rate}} ",
+                f" {str(r['idx']):<{w_idx}} ",
+                f" {r['text']:<{w_text}} ",
+                f" {r['result']:<{w_result}} ",
             ]
-            if w_examples > 0:
-                row_parts.append(f" {r['examples']:<{w_examples}} ")
+            for p in params:
+                cell = str(r["cells"].get(p, ""))
+                row_parts.append(f" {cell:<{param_widths[p]}} ")
             logger.debug("[AutoValidator] │" + "│".join(row_parts) + "│")
         logger.debug("[AutoValidator] %s", bottom())
 
