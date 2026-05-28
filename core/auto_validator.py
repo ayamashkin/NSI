@@ -246,6 +246,7 @@ class AutoValidator:
         success_count = 0
         details = []
         logger.debug("[AutoValidator] Validating %s/%s against %d examples", standard, item_type, total)
+        logger.debug("[AutoValidator] Pattern: %s", pattern[:120] if pattern else "(empty)")
         for ex in examples:
             result = self._test_pattern(compiled, ex, params, required)
             if result["success"]:
@@ -258,7 +259,7 @@ class AutoValidator:
 
         # === SUMMARY TABLE (always in debug) ===
         if logger.isEnabledFor(logging.DEBUG):
-            self._print_summary_table(standard, item_type, details, required, self._skip_params, total, success_count, self._loose_fields)
+            self._print_summary_table(standard, item_type, details, required, self._skip_params, total, success_count, self._loose_fields, pattern)
 
         # === FAILED DETAILS (only if not passed) ===
         if not passed and logger.isEnabledFor(logging.DEBUG):
@@ -390,7 +391,7 @@ class AutoValidator:
 
     def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
                              required: List[str], skip_params: set, total: int, success_count: int,
-                             loose_fields: set = None) -> None:
+                             loose_fields: set = None, pattern: str = "") -> None:
         """Print transposed summary table: examples as rows, params as columns.
         Cell format: ENS_value/Mask_value for OK, ENS_val≠Mask_val for mismatch, ENS_val/∅ for missing.
         Column widths scaled 1.5x to prevent overflow. Includes both required and optional params."""
@@ -495,6 +496,8 @@ class AutoValidator:
             return "└" + "┴".join(parts) + "┘"
 
         lines = []
+        if pattern:
+            lines.append(f"Pattern: {pattern}")
         lines.append("=== Summary %s/%s: %d/%d passed ===" % (standard, item_type, success_count, total))
         lines.append(top())
         header_parts = [f" {'№':<{w_idx}} ", f" {'Наименование':<{w_text}} ", f" {'Результат':<{w_result}} "]
