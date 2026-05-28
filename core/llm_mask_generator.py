@@ -2,7 +2,7 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-28 13:30:00 — FIX: _sanitize_mask_result removes наименование_1 (LLM-invented meta field)
+# 2026-05-28 14:00:00 — FIX: _is_value_in_name removed no_sep decimal heuristic ("1,5" falsely matched "15")
 # 2026-05-28 13:30:00 — FIX: _fix_pattern and _sanitize_mask_result normalize \\d->\d, \\s->\s, \\w->\w
 # 2026-05-28 13:30:00 — FIX: _default_template uses literal item types (not named group) + split params rule
 # 2026-05-27 21:52:00 — Упрощён промпт: 6 правил вместо 18, убраны избыточные секции
@@ -194,10 +194,11 @@ class LLMMaskGenerator:
         name_lower = name_clean.lower().replace(",", ".")
         if val_str in name_lower:
             return True
-        if re.match(r"^\d+[.,]\d+$", val_raw):
-            no_sep = re.sub(r"[.,]", "", val_str)
-            if no_sep in name_lower:
-                return True
+        # REMOVED: no_sep heuristic caused false positives (e.g., "1,5" matched "15")
+        # if re.match(r"^\d+[.,]\d+$", val_raw):
+        #     no_sep = re.sub(r"[.,]", "", val_str)
+        #     if no_sep in name_lower:
+        #         return True
         if re.search(r"[a-zA-Zа-яА-Я]", val_str):
             tokens = re.split(r"[.\\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]

@@ -2,8 +2,8 @@
 # FILE: core/ens_index_builder.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-28 13:00:00 — Constant fields removed ONLY when not visible (value never appears in names)
-# 2026-05-28 13:00:00 — Moved visible_count computation BEFORE constant removal to protect visible constants
+# 2026-05-28 14:00:00 — FIX: removed no_sep decimal heuristic (false positive: "1,5" in "15")
+# 2026-05-28 14:00:00 — FIX: all наименование fields moved to _meta, not just first (prevents наименование_1 leak)
 # 2026-05-28 12:45:00 — Fixed _norm_field_name to strip underscores (skip_fields now work)
 # 2026-05-28 12:45:00 — Added drop_reasons logging: why each field was removed
 # 2026-05-27 17:46:00 — _meta-поля удаляются из field_meta ДО формирования stats
@@ -52,10 +52,11 @@ class ENSIndexBuilder:
         name_lower = name.lower().replace(",", ".")
         if val_str in name_lower:
             return True
-        if re.match(r"^\d+[.,]\d+$", val_raw):
-            no_sep = re.sub(r"[.,]", "", val_str)
-            if no_sep in name_lower:
-                return True
+        # REMOVED: no_sep heuristic caused false positives (e.g., "1,5" matched "15")
+        # if re.match(r"^\d+[.,]\d+$", val_raw):
+        #     no_sep = re.sub(r"[.,]", "", val_str)
+        #     if no_sep in name_lower:
+        #         return True
         if re.search(r"[a-zA-Zа-яА-Я]", val_str):
             tokens = re.split(r"[.\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
@@ -479,10 +480,13 @@ class ENSIndexBuilder:
             }
             if code_col and code_col in ex:
                 meta["ens_code"] = str(ex.pop(code_col, ""))
-            for k in list(ex.keys()):
-                if "наименование" in k.lower() and "полное" not in k.lower():
+            # Remove ALL наименование fields to _meta, not just first
+            name_keys = [k for k in list(ex.keys()) if "наименование" in k.lower() and "полное" not in k.lower()]
+            for k in name_keys:
+                if "name" not in meta:
                     meta["name"] = ex.pop(k)
-                    break
+                else:
+                    ex.pop(k, None)
             if full_name_col:
                 can_full = self.domain.canonicalize_field_name(full_name_col)
                 if can_full in ex:

@@ -2,7 +2,7 @@
 # FILE: config/domains/hardware.yaml
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-28 12:45:00 — Added шаг_резьбы and тип_резьбы to retain_fields (prevent constant-field removal)
+# 2026-05-28 13:00:00 — Added шаг_резьбы and тип_резьбы to retain_fields (protect visible constants)
 # 2026-05-28 12:45:00 — Expanded skip_fields with габаритные_размеры_масса, технические_характеристики, etc.
 # 2026-05-28 12:30:00 — Added min_examples parameter (default 5; override via CLI --min-examples)
 # 2026-05-27 21:15:00 — Added meta_regex_groups for configurable regex meta-groups
@@ -24,9 +24,6 @@ index:
     - "нтд_1"
     - "нтд_2"
     - "комментарий_эксперта"
-    - "марка_материала.1"
-    - "свойства"
-    - "ссылка"
 
   meta_fields:
     - "тип_изделия"
@@ -40,6 +37,8 @@ index:
     - "группа_прочности"
     - "класс_поле_допуска"
     - "марка_стали"
+    - "шаг_резьбы"
+    - "тип_резьбы"
 
   field_aliases:
     "номинальный диаметр резьбы": "номинальный_диаметр_резьбы"
@@ -51,6 +50,8 @@ index:
     "номинальный диаметр": "номинальный_диаметр_резьбы"
     "поле допуска": "класс_поле_допуска"
     "класс прочности": "группа_прочности"
+    "Наименование типа": "тип_изделия"
+    "наименование типа": "тип_изделия"
 
   twin_threshold: 1.0
   visible_threshold: 0.05
