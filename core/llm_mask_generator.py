@@ -2,11 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g. "2" not matching inside "26")
 # 2026-05-28 18:45:00 — FIX: _fix_pattern normalizes \s+[-\s]+ -> [-\s]+ and fixes GOST 7795-70 cyrillic 'х' separator
 # 2026-05-28 18:45:00 — FIX: _sanitize_mask_result auto-removes duplicate named groups (Python re forbids them)
 # 2026-05-28 18:45:00 — FIX: _format_examples shows structure line with conditional [исполнение]
 # 2026-05-28 18:22:00 — FIX: _format_examples shows ALL per-example visible params (not filtered by global_visible)
-# 2026-05-28 18:22:00 — FIX: _format_examples adds "Метаданные БД" section + per-standard statistics
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class MaskGenerationResult:
@@ -47,7 +46,6 @@ class MaskGenerationResult:
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
 
-
 class LLMMaskGenerator:
     """Generator of masks via LLM with domain ENS index."""
 
@@ -58,12 +56,12 @@ class LLMMaskGenerator:
     }
 
     def __init__(
-            self,
-            clients: Dict[str, Any],
-            settings: Any = None,
-            max_retries: int = 3,
-            domain: str = "hardware",
-            ens_index_path: Optional[str] = None,
+        self,
+        clients: Dict[str, Any],
+        settings: Any = None,
+        max_retries: int = 3,
+        domain: str = "hardware",
+        ens_index_path: Optional[str] = None,
     ):
         self.clients = clients
         self.settings = settings
@@ -200,12 +198,13 @@ class LLMMaskGenerator:
             for tok in tokens:
                 if tok in name_lower:
                     return True
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix and prefix.group(1) in name_lower:
-                return True
+        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+        if prefix and prefix.group(1) in name_lower:
+            return True
+        # FIX 2026-05-28 20:45 UTC+3: check word boundaries so "2" doesn't match inside "26", "31509", "80"
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
-            if int_part and int_part in name_lower:
+            if int_part and re.search(r'(?<!\d)' + re.escape(int_part) + r'(?!\d)', name_lower):
                 return True
         if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
             if val_str in name_lower:
@@ -231,10 +230,10 @@ class LLMMaskGenerator:
         return v
 
     def _filter_unambiguous(
-            self,
-            examples: List[Dict],
-            twin_groups: List[List[str]],
-            standard: str = "",
+        self,
+        examples: List[Dict],
+        twin_groups: List[List[str]],
+        standard: str = "",
     ) -> Tuple[List[Tuple[Dict, Dict[str, str]]], List[Tuple[Dict, Dict[str, str]]]]:
         unambiguous = []
         ambiguous = []
@@ -276,9 +275,9 @@ class LLMMaskGenerator:
         return unambiguous, ambiguous
 
     def _get_global_visible(
-            self,
-            unambiguous: List[Tuple[Dict, Dict[str, str]]],
-            threshold: float = 0.85,
+        self,
+        unambiguous: List[Tuple[Dict, Dict[str, str]]],
+        threshold: float = 0.85,
     ) -> Tuple[set, set]:
         if not unambiguous:
             return set(), set()
@@ -293,14 +292,14 @@ class LLMMaskGenerator:
             ratio = count / total
             if ratio >= threshold:
                 required.add(key)
-            elif ratio >= 0.05:  # FIX: lowered from 0.20 to catch rare params like исполнение
+            elif ratio >= 0.05: # FIX: lowered from 0.20 to catch rare params like исполнение
                 optional.add(key)
         return required, optional
 
     def _format_stats(
-            self,
-            unambiguous: List[Tuple[Dict, Dict[str, str]]],
-            global_visible: set,
+        self,
+        unambiguous: List[Tuple[Dict, Dict[str, str]]],
+        global_visible: set,
     ) -> str:
         if not unambiguous:
             return "(no data)"
@@ -313,7 +312,7 @@ class LLMMaskGenerator:
         lines = []
         lines.append(f"(по {total} однозначным примерам)")
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
-            lines.append(f"  {key}: {count} из {total} ({count / total * 100:.0f}%)")
+            lines.append(f" {key}: {count} из {total} ({count / total * 100:.0f}%)")
         return "\n".join(lines) if len(lines) > 1 else "(нет параметров)"
 
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
@@ -357,12 +356,12 @@ class LLMMaskGenerator:
     _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2", "наименование_1"}
 
     def _format_examples(
-            self,
-            examples: List[Dict],
-            standard: str,
-            item_type: str,
-            unambiguous: List[Tuple[Dict, Dict[str, str]]],
-            global_visible: set,
+        self,
+        examples: List[Dict],
+        standard: str,
+        item_type: str,
+        unambiguous: List[Tuple[Dict, Dict[str, str]]],
+        global_visible: set,
     ) -> str:
         if not examples or not unambiguous:
             return "(нет примеров)"
@@ -438,8 +437,8 @@ class LLMMaskGenerator:
                     m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
                     if m:
                         pos = name.lower().find(m.group().lower())
-                    if pos < 0:
-                        pos = 999
+                if pos < 0:
+                    pos = 999
                 visible_list.append((key, val_str, pos))
             visible_list.sort(key=lambda x: x[2])
 
@@ -571,9 +570,9 @@ class LLMMaskGenerator:
 5. **Исполнение опциональное**: `(?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?`. Используй `(?:\()?` для опциональной скобки. НЕ пиши `\(?P<` — это сломает regex.
 6. **Покрытие**: `[\w.]+`. После покрытия ОБЯЗАТЕЛЬНО `[-\s]+` перед нтд_1. Покрытие НЕ должно включать "ОСТ" или "ГОСТ".
 7. **НТД_1**: `[-\s]+(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `[-\s]+(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
-8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<a>(?P<b>...))`.
+8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<name>(?P<name2>...))`.
 9. **Блок "длина.свойства.покрытие" (ГОСТ 7795-70)**: Это ТРИ ОТДЕЛЬНЫХ целых числа через точку. Правильно: `(?P<длина>\d+)\.(?P<свойства>\d+)\.(?P<покрытие>\d+)`. Неправильно: `\d+(?:[.,]\d+)?` для длины — жадно сожрет все три числа.
-10. **Точка в номенклатуре**: Точка может быть десятичной (12.5 мм) или разделителем (45.46.019). Анализируй примеры: если после точки ровно 2 цифры-кода — это разделитель. При сомнении разделяй: `(?P<a>\d+)\.(?P<b>\d+)`, а не `(?P<x>\d+(?:[.,]\d+)?)`.
+10. **Точка в номенклатуре**: Точка может быть десятичной (12.5 мм) или разделителем (45.46.019). Анализируй примеры: если после точки ровно 2 цифры-кода — это разделитель. При сомнении разделяй: `(?P<длина>\d+)\.(?P<покрытие>\d+)`, а не `(?P<длина>\d+(?:[.,]\d+)?)`.
 11. **НЕ используй неявные параметры**: НЕ создавай группу `тип_резьбы` со значением "M", если "M" нет в строке. НЕ создавай `марка_материала`, `номинальный_диаметр_резьбы` если их нет в наименовании (смотри Метаданные БД).
 
 === ЗАПРЕЩЁННЫЕ ПАРАМЕТРЫ ===
@@ -794,12 +793,12 @@ class LLMMaskGenerator:
             logger.debug("[LLMMaskGenerator] Failed to copy to good/bad: %s", e)
 
     def generate_mask(
-            self,
-            standard: str,
-            item_type: str,
-            examples: Optional[List[Dict]] = None,
-            name: str = "",
-            standard_info: Any = None,
+        self,
+        standard: str,
+        item_type: str,
+        examples: Optional[List[Dict]] = None,
+        name: str = "",
+        standard_info: Any = None,
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
         canon_std = canonicalize_standard(standard)
         if examples is None:
@@ -922,8 +921,8 @@ class LLMMaskGenerator:
                     tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens",
                                                                                         0)
                     tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client,
-                                                                                                "_last_completion_tokens",
-                                                                                                0)
+                                                                                                  "_last_completion_tokens",
+                                                                                                  0)
                     logger.debug("[LLMMaskGenerator] %s returned text (len=%d)", client_type, len(text))
                     return {
                         "text": text,
@@ -1026,15 +1025,15 @@ class LLMMaskGenerator:
         return {"pattern": raw_pattern, "params": params, "required": required}
 
     def _parse_mask_response(
-            self,
-            text: str,
-            standard: str,
-            item_type: str,
-            service: str = "",
-            model: str = "",
-            temperature: float = 0.0,
-            tokens_prompt: int = 0,
-            tokens_completion: int = 0,
+        self,
+        text: str,
+        standard: str,
+        item_type: str,
+        service: str = "",
+        model: str = "",
+        temperature: float = 0.0,
+        tokens_prompt: int = 0,
+        tokens_completion: int = 0,
     ) -> Optional[MaskGenerationResult]:
         if not text:
             logger.debug("[LLMMaskGenerator] _parse_mask_response: empty text")
@@ -1139,20 +1138,20 @@ class LLMMaskGenerator:
                             brace_count += 1
                         elif ch == "}":
                             brace_count -= 1
-                        if brace_count == 0:
-                            candidate = text[pos:i + 1]
-                            try:
-                                data = json.loads(candidate)
-                                logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
-                            except json.JSONDecodeError:
+                            if brace_count == 0:
+                                candidate = text[pos:i + 1]
                                 try:
-                                    import yaml
-                                    data = yaml.safe_load(candidate)
-                                except Exception:
-                                    pass
-                            break
-                if data is not None:
-                    break
+                                    data = json.loads(candidate)
+                                    logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
+                                except json.JSONDecodeError:
+                                    try:
+                                        import yaml
+                                        data = yaml.safe_load(candidate)
+                                    except Exception:
+                                        pass
+                                break
+                    if data is not None:
+                        break
 
         # Stage 5: fallback — direct pattern extraction from text
         if data is None:
@@ -1214,16 +1213,16 @@ class LLMMaskGenerator:
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
             pattern = re.sub(
-                r'(класс_допуска>\\d+[a-z])\\s*\\[-\\s\\]\\+\\s*\\(?(P<длина>)',
-                lambda m: fr'{m.group(1)}[xXхХ×][-\\s]*{m.group(2)}',
+                r'(класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*\(?P<длина>)',
+                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
                 pattern
             )
             pattern = re.sub(
-                r'(класс_допуска>\\d+[a-z]\\)\\?)\\s*\\[-\\s\\]\\+\\s*\\(?(P<длина>)',
-                lambda m: fr'{m.group(1)}[xXхХ×][-\\s]*{m.group(2)}',
+                r'(класс_допуска>\d+[a-z]\)?)\s*\[-\s\]\+\s*\(?P<длина>)',
+                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
                 pattern
             )
-        pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
+        pattern = pattern.replace("\\\d", "\d").replace("\\\s", "\s").replace("\\\w", "\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(r"\(?P<нтд_1>\d+[^\)]*\)", f"(?P<нтд_1>{re.escape(standard)})", pattern)
@@ -1261,7 +1260,7 @@ class LLMMaskGenerator:
         pattern = result.pattern
 
         # FIX: normalize double-escaped regex sequences
-        pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
+        pattern = pattern.replace("\\\d", "\d").replace("\\\s", "\s").replace("\\\w", "\w")
 
         # FIX 2026-05-28 18:45 UTC+3: remove duplicate named groups (Python re forbids them)
         group_names = re.findall(r'\(\?P<([^>]+)>', pattern)
