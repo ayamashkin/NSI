@@ -145,7 +145,7 @@ class LLMMaskGenerator:
         stats = entry.get("stats", {})
         visible = set(stats.get("visible_fields", []))
         metadata = set(stats.get("metadata_fields", []))
-        visible = visible - metadata - self.SKIP_PARAMS
+        visible = visible - metadata - self.SKIP_PARAMS - self._SKIP_META_PARAMS
         total = stats.get("total", 0)
         if total == 0:
             return visible, set()
@@ -239,7 +239,7 @@ class LLMMaskGenerator:
                     continue
                 if v is None or str(v).strip() == "":
                     continue
-                if k in self.SKIP_PARAMS:
+                if k in self.SKIP_PARAMS or k in self._SKIP_META_PARAMS:
                     continue
                 if self._is_value_in_name(str(v), name, param_key=k, standard=standard):
                     vis[k] = str(v)
@@ -1163,12 +1163,15 @@ class LLMMaskGenerator:
             if new_pattern == pattern:
                 break
             pattern = new_pattern
+        # Fix dots in named group names (e.g., наименование.1 -> наименование_1)
+        pattern = re.sub(r'\?P<([a-zA-Zа-яА-Я0-9_]+)\.(\d+)>', r'?P<\1_\2>', pattern)
         return pattern
 
     def _sanitize_mask_result(self, result: MaskGenerationResult) -> MaskGenerationResult:
+        # Fix dots in param names (LLM sometimes generates наименование.1)
+        params = [p.replace(".", "_") for p in list(result.params)]
+        required = [p.replace(".", "_") for p in list(result.required)]
         pattern = result.pattern
-        params = list(result.params)
-        required = list(result.required)
         for sp in self.SKIP_PARAMS:
             if sp in params:
                 params.remove(sp)
