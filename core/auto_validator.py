@@ -443,7 +443,15 @@ class AutoValidator:
                 if status == "ok":
                     ext_val = d.get("extracted", {}).get(p)
                     ext_str = str(ext_val) if ext_val is not None else "—"
-                    sep = "~" if is_loose else "="
+                    # Exact match after normalization?
+                    ext_norm = ext_str.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+                    ens_norm = ens_str.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+                    if ext_norm == ens_norm:
+                        sep = "="  # exact match
+                    elif is_loose:
+                        sep = "~"  # loose (substring) match
+                    else:
+                        sep = "="
                     row["cells"][p] = f"{ext_str}{sep}{ens_str}"
                 elif p in missing:
                     sep = "~" if is_loose else "≠"
