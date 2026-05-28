@@ -2,11 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 16:21:00 — FIX: _filter_unambiguous normalizes values before uniqueness check ('7.0' vs '7')
+# 2026-05-28 16:21:00 — FIX: _default_template removed pattern examples, added rules 9-10 (absent params, coating boundary)
 # 2026-05-28 14:00:00 — FIX: _is_value_in_name removed no_sep decimal heuristic ("1,5" falsely matched "15")
 # 2026-05-28 13:30:00 — FIX: _fix_pattern and _sanitize_mask_result normalize \\d->\d, \\s->\s, \\w->\w
 # 2026-05-28 13:30:00 — FIX: _default_template uses literal item types (not named group) + split params rule
-# 2026-05-27 21:52:00 — Упрощён промпт: 6 правил вместо 18, убраны избыточные секции
-# 2026-05-27 21:15:00 — FIX: _extract_json_fields декодирует JSON escapes через json.loads
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -194,11 +194,6 @@ class LLMMaskGenerator:
         name_lower = name_clean.lower().replace(",", ".")
         if val_str in name_lower:
             return True
-        # REMOVED: no_sep heuristic caused false positives (e.g., "1,5" matched "15")
-        # if re.match(r"^\d+[.,]\d+$", val_raw):
-        #     no_sep = re.sub(r"[.,]", "", val_str)
-        #     if no_sep in name_lower:
-        #         return True
         if re.search(r"[a-zA-Zа-яА-Я]", val_str):
             tokens = re.split(r"[.\\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
@@ -221,6 +216,19 @@ class LLMMaskGenerator:
             if num.lower() in name_lower:
                 return True
         return False
+
+    @staticmethod
+    def _normalize_value_for_comparison(val: str) -> str:
+        """Normalize value string for ambiguity detection.
+
+        Removes formatting differences (spaces, dashes, underscores, comma/dot)
+        and strips trailing .0 so that '7.0' and '7' are treated as identical.
+        """
+        v = str(val).strip().lower()
+        v = v.replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+        if "." in v and v.endswith(".0"):
+            v = v[:-2]
+        return v
 
     def _filter_unambiguous(
         self,
@@ -258,8 +266,9 @@ class LLMMaskGenerator:
                     resolved[ck] = v
                 else:
                     resolved[k] = v
-            values = list(resolved.values())
-            if len(values) != len(set(values)):
+            # FIX: normalize values before checking uniqueness to catch '7.0' vs '7'
+            normalized_values = [self._normalize_value_for_comparison(v) for v in resolved.values()]
+            if len(normalized_values) != len(set(normalized_values)):
                 ambiguous.append((ex, resolved))
             else:
                 unambiguous.append((ex, resolved))
@@ -512,48 +521,21 @@ class LLMMaskGenerator:
 
 {examples_text}
 
-=== ПРАВИЛА (только 8 штук) ===
+=== ПРАВИЛА (8 штук) ===
 
 1. **Тип изделия — ЛИТЕРАЛ, не named group**. Начинай паттерн с ^Болт, ^Винт, ^Шайба или ^Гайка. НЕ используй (?P<тип_изделия>Болт) и НЕ (?P<наименование_1>Болт).
-2. **Разделители — гибкие**. Используй `[-\s]+` между параметрами. НО если параметры слитные (без разделителя), не вставляй разделитель между ними.
+2. **Разделители — гибкие, но обязательный перед нтд_1**. Используй `[-\s]+` между параметрами. Если параметры слитные (без разделителя), не вставляй разделитель между ними. Перед нтд_1 разделитель обязателен.
 3. **Слитные параметры**: "M6" = тип_резьбы "M" + номинальный_диаметр "6" (без разделителя: `M(?P<номинальный_диаметр_резьбы>\d+)`). "22х1,5" = диаметр "22" + шаг "1,5" (`(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)`).
 4. **Порядок групп**: тип (литерал) → исполнение (если есть) → числовые параметры → покрытие → нтд_1.
-5. **Исполнение опциональное**: `(?:\(?(?P<исполнение>\d+)\)?)?` — только если в примерах есть (N).
-6. **Покрытие**: `[\w.]+` (включает точки и кириллицу). Должно стоять ДО нтд_1.
+5. **Исполнение опциональное**: `(?:[-\s]+\(?(?P<исполнение>\d+)\)?)?` — только если в примерах есть (N). Разделитель внутри группы.
+6. **Покрытие**: `[\w.]+` (включает точки и кириллицу). Должно стоять ДО нтд_1. Не захватывай стандарт.
 7. **НТД_1**: полное название стандарта. Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)`. Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
 8. **Полная строка**: `^...$` обязательно. НЕТ nested named groups `(?P<a>(?P<b>...))`.
 
-=== ПРИМЕРЫ ПРАВИЛЬНЫХ ПАТТЕРНОВ ===
+=== ЗАПРЕЩЁННЫЕ ПАРАМЕТРЫ ===
 
-**ОСТ 1 31133-80 / Болт** (с исполнением, покрытием):
-```
-^Болт[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
-```
-
-**ОСТ 1 33049-80 / Гайка** (без шага, без исполнения):
-```
-^Гайка[-\s]+(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<покрытие>[\w.]+)[-\\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
-```
-
-**ГОСТ 7795-70 / Болт** (M + диаметр слитно, длина.группа.покрытие):
-```
-^Болт[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+)\.(?P<группа_прочности>\d+)\.(?P<покрытие>\d+)[-\s]*(?P<нтд_1>ГОСТ\s*7795-70)$
-```
-
-**ОСТ 1 34507-80 / Шайба** (толщина — ном. диаметр — наружный диаметр):
-```
-^Шайба[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)[-\s]+(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]*(?P<нтд_1>ОСТ\s*1\s*34507-80)$
-```
-
-**Винт ОСТ 1 31502-80 / Винт** (с исполнением, покрытием):
-```
-^Винт[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31502-80)$
-```
-
-**Винт ОСТ 1 31503-80 / Винт** (без исполнения, с покрытием):
-```
-^Винт[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31503-80)$
-```
+НЕ включай в список params и не создавай группы для: наименование, наименование_1, стандарт, тип_изделия, нтд, нтд_1, нтд_2, код.
+НЕ включай параметры, которые в примерах помечены как «Отсутствуют».
 
 === ФОРМАТ ОТВЕТА ===
 
