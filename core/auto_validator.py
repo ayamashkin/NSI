@@ -318,6 +318,18 @@ class AutoValidator:
                 f"Pattern used: {pattern.pattern}",
                 f"Expected params from ENS: {', '.join(expected_info)}",
             ]
+            # Detailed diagnostics: try matching prefix by prefix
+            for i in range(len(text), 0, -1):
+                prefix = text[:i]
+                try:
+                    if pattern.search(prefix):
+                        no_match_lines.append(f"Longest matching prefix ({i} chars): {prefix}")
+                        no_match_lines.append(f"Remaining after match: {text[i:]}")
+                        break
+                except Exception:
+                    pass
+            else:
+                no_match_lines.append("No prefix matches at all")
             logger.debug("[AutoValidator]" + sep + "%s", sep.join(no_match_lines))
             return {"success": False, "error": "No match", "text": text, "example": ex, "param_results": param_results}
 
@@ -435,8 +447,10 @@ class AutoValidator:
                     # Show what we expected from ENS but couldn't extract
                     best_key, _ = self._find_expected_key(p, ex)
                     ens_val = ex.get(best_key) if best_key else None
-                    ens_str = str(ens_val) if ens_val is not None else "—"
-                    row["cells"][p] = f"∅≠{ens_str}"
+                    if ens_val is None:
+                        row["cells"][p] = "∅"
+                    else:
+                        row["cells"][p] = f"∅≠{ens_val}"
                     continue
                 # Get ENS expected value
                 best_key, _ = self._find_expected_key(p, ex)

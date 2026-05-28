@@ -2,6 +2,8 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
+# 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
 # 2026-05-28 22:52:00 — FIX: _select_representative_examples shows all examples up to 20, prioritizes rare params (шаг_резьбы, исполнение)
 # 2026-05-28 22:00:00 — FEAT: generate_mask uses prompt_max_examples from settings (default 20)
 # 2026-05-28 21:50:00 — FEAT: passes validation_max_examples from settings to AutoValidator
@@ -1250,6 +1252,19 @@ class LLMMaskGenerator:
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
         pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
+
+        # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
+        # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
+        text_fields = {"покрытие", "покрытие_1", "тип_изделия", "наименование", "стандарт", "нтд", "нтд_1", "нтд_2"}
+        for group_name in re.findall(r'\?P<([^>]+)>', pattern):
+            if group_name in {"исполнение", "variant", "количество"} | text_fields:
+                continue
+            # Look for the group pattern in the string
+            old_group = fr'(?P<{group_name}>\d+)'
+            if old_group in pattern:
+                new_group = fr'(?P<{group_name}>\d+(?:[.,]\d+)?)'
+                pattern = pattern.replace(old_group, new_group)
+                logger.debug("[LLMMaskGenerator] Upgraded %s to decimal: %s", group_name, new_group)
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
