@@ -61,6 +61,7 @@ class AutoValidator:
         self._domain_index: Optional[Dict] = None
         self._all_domain_indices: Optional[Dict[str, Dict]] = None
         self._skip_params = self._build_skip_params()
+        self._loose_fields = self._build_loose_fields()
 
     @staticmethod
     def _norm_field_name(name: str) -> str:
@@ -101,6 +102,20 @@ class AutoValidator:
                 "нтд_1", "нтд_2", "стандарт", "нтд",
                 "марка_материала", "марка_материала_1", "толщина_покрытия", "наличие_бп",
             }
+
+    def _build_loose_fields(self) -> set:
+        """Build loose-match fields set from domain config (e.g. coating)."""
+        if not self.domain:
+            return set()
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            loose = {self._norm_field_name(f) for f in cfg.loose_match_fields}
+            logger.info("[AutoValidator] loose_fields from domain '%s': %s", self.domain, loose)
+            return loose
+        except Exception as e:
+            logger.warning("[AutoValidator] Failed to load domain config for loose_fields: %s", e)
+            return set()
 
     def _load_domain_index(self, path: Optional[str] = None) -> Dict:
         target = Path(path) if path else self.ens_index_path
@@ -243,7 +258,7 @@ class AutoValidator:
 
         # === SUMMARY TABLE (always in debug) ===
         if logger.isEnabledFor(logging.DEBUG):
-            self._print_summary_table(standard, item_type, details, required, self._skip_params, total, success_count)
+            self._print_summary_table(standard, item_type, details, required, self._skip_params, total, success_count, self._loose_fields)
 
         # === FAILED DETAILS (only if not passed) ===
         if not passed and logger.isEnabledFor(logging.DEBUG):
@@ -374,7 +389,8 @@ class AutoValidator:
         }
 
     def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
-                             required: List[str], skip_params: set, total: int, success_count: int) -> None:
+                             required: List[str], skip_params: set, total: int, success_count: int,
+                             loose_fields: set = None) -> None:
         """Print transposed summary table: examples as rows, params as columns.
         Cell format: ENS_value/Mask_value for OK, ENS_val≠Mask_val for mismatch, ENS_val/∅ for missing.
         Column widths scaled 1.5x to prevent overflow. Includes both required and optional params."""
@@ -423,13 +439,15 @@ class AutoValidator:
                 ens_str = str(ens_val) if ens_val is not None else "—"
 
                 status = pr.get(p, "ok")
+                is_loose = loose_fields and self._norm_field_name(p) in loose_fields
                 if status == "ok":
-                    # OK: show Extracted/ENS (mask value first, then ENS reference)
                     ext_val = d.get("extracted", {}).get(p)
                     ext_str = str(ext_val) if ext_val is not None else "—"
-                    row["cells"][p] = f"{ext_str}/{ens_str}"
+                    sep = "~" if is_loose else "="
+                    row["cells"][p] = f"{ext_str}{sep}{ens_str}"
                 elif p in missing:
-                    row["cells"][p] = f"∅/{ens_str}"
+                    sep = "~" if is_loose else "≠"
+                    row["cells"][p] = f"∅{sep}{ens_str}"
                 elif p in mismatches:
                     exp, ext = mismatches[p]
                     ext_str = str(ext) if ext is not None else "—"

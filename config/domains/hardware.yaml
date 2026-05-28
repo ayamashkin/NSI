@@ -62,3 +62,6 @@ index:
 meta_regex_groups:
   - "тип_изделия"
   - "нтд_1"
+loose_match_fields:           # ← ДОБАВИТЬ
+    - "покрытие"
+    - "покрытие_1"

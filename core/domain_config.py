@@ -2,11 +2,11 @@
 # FILE: core/domain_config.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 22:32:00 — Added loose_match_fields for substring-match validation (e.g. coating)
 # 2026-05-28 12:45:00 — Added min_examples field (default 5) for index builder threshold
 # 2026-05-27 21:15:00 — Added meta_regex_groups for configurable regex meta-groups
 # 2026-05-27 18:15:00 — Added prompt_template for domain prompts
 # 2026-05-27 14:05:00 — Created DomainConfig for domain ENS architecture
-# 2026-05-27 14:05:00 — Added skip_fields, meta_fields, retain_fields support
 # =============================================================================
 """
 Domain Configuration Module
@@ -21,7 +21,6 @@ from typing import Dict, List, Optional, Set
 import yaml
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class DomainConfig:
@@ -39,6 +38,7 @@ class DomainConfig:
     max_field_name_len: int = 30
     meta_regex_groups: List[str] = field(default_factory=lambda: ["тип_изделия", "нтд_1"])
     min_examples: int = 5  # minimum examples per (standard, type) to include in index
+    loose_match_fields: Set[str] = field(default_factory=set)  # fields where substring match is OK
 
     @classmethod
     def load(cls, domain: str, base_path: str = "config/domains") -> "DomainConfig":
@@ -64,6 +64,9 @@ class DomainConfig:
         if isinstance(meta_groups, str):
             meta_groups = [g.strip() for g in meta_groups.split(",")]
 
+        # loose_match_fields from index or root
+        loose_fields = set(str(x) for x in idx.get("loose_match_fields", data.get("loose_match_fields", [])))
+
         return cls(
             domain=domain,
             description=data.get("description", ""),
@@ -78,6 +81,7 @@ class DomainConfig:
             max_field_name_len=int(idx.get("max_field_name_len", 30)),
             meta_regex_groups=meta_groups,
             min_examples=int(idx.get("min_examples", 5)),
+            loose_match_fields=loose_fields,
         )
 
     def canonicalize_field_name(self, original: str) -> str:
@@ -106,3 +110,6 @@ class DomainConfig:
 
     def is_retain_field(self, field: str) -> bool:
         return field in self.retain_fields
+
+    def is_loose_match_field(self, field: str) -> bool:
+        return field in self.loose_match_fields
