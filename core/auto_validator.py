@@ -429,8 +429,10 @@ class AutoValidator:
 
                 status = pr.get(p, "ok")
                 if status == "ok":
-                    # OK: show ENS_value/Mask_value (they match)
-                    row["cells"][p] = f"{ens_str}/{ens_str}"
+                    # OK: show ENS_value/Extracted_value (real value from regex match)
+                    ext_val = d.get("extracted", {}).get(p)
+                    ext_str = str(ext_val) if ext_val is not None else "—"
+                    row["cells"][p] = f"{ens_str}/{ext_str}"
                 elif p in missing:
                     row["cells"][p] = f"{ens_str}/∅"
                 elif p in mismatches:
@@ -441,23 +443,17 @@ class AutoValidator:
                     row["cells"][p] = "?"
             rows.append(row)
 
-        w_idx = max(2, len(str(total)), len("№"))
-        w_text = max(len(r["text"]) for r in rows) if rows else 0
-        w_text = min(w_text, 40)
-        w_text = max(int(w_text * 1.5) + 1, 3)
+        w_idx = max(len("№"), len(str(total)), max(len(str(r["idx"])) for r in rows) if rows else 0)
+        w_text = max(len("Наименование"), max(len(r["text"]) for r in rows) if rows else 0)
+        w_text = min(w_text, 50)
         w_result = max(len("Результат"), max(len(r["result"]) for r in rows) if rows else 0)
-        w_result = max(int(w_result * 1.5) + 1, 3)
 
-        # Calculate widths with 1.5x scaling to fit cell contents
+        # Calculate widths as exact max of header and cell contents
         param_widths = {}
         for p in params:
             header_len = len(p)
-            max_cell = 0
-            for r in rows:
-                cell = str(r["cells"].get(p, ""))
-                max_cell = max(max_cell, len(cell))
-            raw_max = max(header_len, max_cell)
-            param_widths[p] = max(int(raw_max * 1.5) + 1, 3)
+            max_cell = max(len(str(r["cells"].get(p, ""))) for r in rows) if rows else 0
+            param_widths[p] = max(header_len, max_cell, 3)
 
         def hline(char="─"):
             parts = [f"{char*(w_idx+2)}", f"{char*(w_text+2)}", f"{char*(w_result+2)}"]
