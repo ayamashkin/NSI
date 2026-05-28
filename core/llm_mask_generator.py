@@ -2,11 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 13:30:00 — FIX: _sanitize_mask_result removes наименование_1 (LLM-invented meta field)
+# 2026-05-28 13:30:00 — FIX: _fix_pattern and _sanitize_mask_result normalize \\d->\d, \\s->\s, \\w->\w
+# 2026-05-28 13:30:00 — FIX: _default_template uses literal item types (not named group) + split params rule
 # 2026-05-27 21:52:00 — Упрощён промпт: 6 правил вместо 18, убраны избыточные секции
-# 2026-05-27 21:52:00 — _default_template сокращён до критичных правил + примеры
 # 2026-05-27 21:15:00 — FIX: _extract_json_fields декодирует JSON escapes через json.loads
-# 2026-05-27 21:15:00 — _build_meta_groups_rules для подстановки meta-групп из домена
-# 2026-05-27 18:15:00 — Added domain prompt_template support
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -204,9 +204,9 @@ class LLMMaskGenerator:
             for tok in tokens:
                 if tok in name_lower:
                     return True
-        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-        if prefix and prefix.group(1) in name_lower:
-            return True
+            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+            if prefix and prefix.group(1) in name_lower:
+                return True
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
             if int_part and int_part in name_lower:
@@ -303,7 +303,7 @@ class LLMMaskGenerator:
         lines = []
         lines.append(f"(по {total} однозначным примерам)")
         for key, count in sorted(param_counts.items(), key=lambda x: -x[1]):
-            lines.append(f" {key}: {count} из {total} ({count/total*100:.0f}%)")
+            lines.append(f"  {key}: {count} из {total} ({count/total*100:.0f}%)")
         return "\n".join(lines) if len(lines) > 1 else "(нет параметров)"
 
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 10) -> List[Dict]:
@@ -344,7 +344,7 @@ class LLMMaskGenerator:
                         break
         return selected
 
-    _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2"}
+    _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2", "наименование_1"}
 
     def _format_examples(
         self,
@@ -441,12 +441,12 @@ class LLMMaskGenerator:
             lines.append(f'{i}. Исходное: "{name}"')
             if visible_list:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible_list])
-                lines.append(f" Видимые: {vis_str}")
+                lines.append(f"   Видимые: {vis_str}")
             if ambiguous_list:
                 amb_str = " ".join([f"(?P<{k}>{v})" for k, v in ambiguous_list])
-                lines.append(f" Неоднозначные: {amb_str}")
+                lines.append(f"   Неоднозначные: {amb_str}")
             if missing_list:
-                lines.append(f" Отсутствуют: {', '.join(missing_list)}")
+                lines.append(f"   Отсутствуют: {', '.join(missing_list)}")
             lines.append("")
 
         return "\n".join(lines)
@@ -511,50 +511,47 @@ class LLMMaskGenerator:
 
 {examples_text}
 
-=== ПРАВИЛА (только 6 штук) ===
+=== ПРАВИЛА (только 8 штук) ===
 
-1. **Разделители — строго `[-\s]+`**. Между ЛЮБЫМИ параметрами используй `[-\s]+` (тире ИЛИ пробел). НИКОГДА не используй `\s+` отдельно — оно не ловит тире.
-2. **Порядок групп**: `тип_изделия` → `исполнение` (если есть в примерах) → числовые параметры → `покрытие` → `нтд_1`.
-3. **Исполнение опциональное**: `(?:\(?(?P<исполнение>\d+)\)?)?` — только если в примерах есть `(N)`.
-4. **Покрытие**: `[\w.]+` (включает точки и кириллицу). Должно стоять ДО `нтд_1`.
-5. **НТД_1**: полное название стандарта. Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)`. Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
-6. **Полная строка**: `^...$` обязательно. НЕТ nested named groups `(?P<a>(?P<b>...))`.
+1. **Тип изделия — ЛИТЕРАЛ, не named group**. Начинай паттерн с ^Болт, ^Винт, ^Шайба или ^Гайка. НЕ используй (?P<тип_изделия>Болт) и НЕ (?P<наименование_1>Болт).
+2. **Разделители — гибкие**. Используй `[-\s]+` между параметрами. НО если параметры слитные (без разделителя), не вставляй разделитель между ними.
+3. **Слитные параметры**: "M6" = тип_резьбы "M" + номинальный_диаметр "6" (без разделителя: `M(?P<номинальный_диаметр_резьбы>\d+)`). "22х1,5" = диаметр "22" + шаг "1,5" (`(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)`).
+4. **Порядок групп**: тип (литерал) → исполнение (если есть) → числовые параметры → покрытие → нтд_1.
+5. **Исполнение опциональное**: `(?:\(?(?P<исполнение>\d+)\)?)?` — только если в примерах есть (N).
+6. **Покрытие**: `[\w.]+` (включает точки и кириллицу). Должно стоять ДО нтд_1.
+7. **НТД_1**: полное название стандарта. Для ОСТ: `(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)`. Для ГОСТ: `(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
+8. **Полная строка**: `^...$` обязательно. НЕТ nested named groups `(?P<a>(?P<b>...))`.
 
 === ПРИМЕРЫ ПРАВИЛЬНЫХ ПАТТЕРНОВ ===
 
 **ОСТ 1 31133-80 / Болт** (с исполнением, покрытием):
 ```
-^(?P<тип_изделия>Болт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
+^Болт[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<наружный_диаметр>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31133-80)$
 ```
 
 **ОСТ 1 33049-80 / Гайка** (без шага, без исполнения):
 ```
-^(?P<тип_изделия>Гайка)[-\s]+(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
+^Гайка[-\s]+(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<покрытие>[\w.]+)[-\\s]+(?P<нтд_1>ОСТ\s*1\s*33049-80)$
 ```
 
-**ГОСТ 7798-70 / Болт** (с классом допуска, длиной, покрытием):
+**ГОСТ 7795-70 / Болт** (M + диаметр слитно, длина.группа.покрытие):
 ```
-^(?P<тип_изделия>Болт)[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_поле_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)?[-\s]*(?P<нтд_1>ГОСТ\s*7798-70)$
-```
-
-**ГОСТ 7795-70 / Болт** (длина.группа.код: 45.46.019):
-```
-^(?P<тип_изделия>Болт)[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_поле_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+)\.(?P<группа_прочности>\d+)\.(?P<код_покрытия>\d+)[-\s]*(?P<нтд_1>ГОСТ\s*7795-70)$
+^Болт[-\s]+M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?[-\s]+(?P<класс_допуска>\d+[a-zA-Zа-яА-Я]+)[xXхХ×](?P<длина>\d+)\.(?P<группа_прочности>\d+)\.(?P<покрытие>\d+)[-\s]*(?P<нтд_1>ГОСТ\s*7795-70)$
 ```
 
 **ОСТ 1 34507-80 / Шайба** (толщина — ном. диаметр — наружный диаметр):
 ```
-^(?P<тип_изделия>Шайба)[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)[-\s]+(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]*(?P<нтд_1>ОСТ\s*1\s*34507-80)$
+^Шайба[-\s]+(?P<толщина>\d+(?:[.,]\d+)?)[-\s]+(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)[-\s]+(?P<наружный_диаметр>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]*(?P<нтд_1>ОСТ\s*1\s*34507-80)$
 ```
 
 **Винт ОСТ 1 31502-80 / Винт** (с исполнением, покрытием):
 ```
-^(?P<тип_изделия>Винт)[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31502-80)$
+^Винт[-\s]+(?:\(?(?P<исполнение>\d+)\)?)?[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31502-80)$
 ```
 
 **Винт ОСТ 1 31503-80 / Винт** (без исполнения, с покрытием):
 ```
-^(?P<тип_изделия>Винт)[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31503-80)$
+^Винт[-\s]+(?P<номинальный_диаметр_резьбы>\d+)[-\s]+(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)[-\s]+(?P<нтд_1>ОСТ\s*1\s*31503-80)$
 ```
 
 === ФОРМАТ ОТВЕТА ===
@@ -564,8 +561,8 @@ class LLMMaskGenerator:
 ```json
 {
   "pattern": "^...$",
-  "params": ["тип_изделия", "..."],
-  "required": ["тип_изделия", "..."]
+  "params": ["номинальный_диаметр_резьбы", "..."],
+  "required": ["номинальный_диаметр_резьбы", "..."]
 }
 ```
 """
@@ -921,7 +918,7 @@ class LLMMaskGenerator:
             if i >= len(text):
                 return None
             raw = text[quote + 1:i]
-            # Decode JSON string escapes: \\ -> \, \" -> ", \n -> newline, etc.
+            # Decode JSON string escapes: \\ -> \, \\" -> ", \n -> newline, etc.
             try:
                 decoded = json.loads('"' + raw + '"')
                 return decoded
@@ -1072,18 +1069,18 @@ class LLMMaskGenerator:
                             brace_count += 1
                         elif ch == "}":
                             brace_count -= 1
-                            if brace_count == 0:
-                                candidate = text[pos:i + 1]
+                        if brace_count == 0:
+                            candidate = text[pos:i + 1]
+                            try:
+                                data = json.loads(candidate)
+                                logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
+                            except json.JSONDecodeError:
                                 try:
-                                    data = json.loads(candidate)
-                                    logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
-                                except json.JSONDecodeError:
-                                    try:
-                                        import yaml
-                                        data = yaml.safe_load(candidate)
-                                    except Exception:
-                                        pass
-                                break
+                                    import yaml
+                                    data = yaml.safe_load(candidate)
+                                except Exception:
+                                    pass
+                            break
                 if data is not None:
                     break
 
@@ -1138,6 +1135,9 @@ class LLMMaskGenerator:
         return self._sanitize_mask_result(result)
 
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
+        # FIX: normalize double-escaped regex sequences
+        pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
+
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(r"\(?P<нтд_1>\d+[^\)]*\)", f"(?P<нтд_1>{re.escape(standard)})", pattern)
         if "ГОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
@@ -1172,6 +1172,18 @@ class LLMMaskGenerator:
         params = [p.replace(".", "_") for p in list(result.params)]
         required = [p.replace(".", "_") for p in list(result.required)]
         pattern = result.pattern
+
+        # FIX: normalize double-escaped regex sequences
+        pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
+
+        # FIX: remove LLM-invented наименование_1 meta-field
+        if "наименование_1" in params:
+            params = [p for p in params if p != "наименование_1"]
+            pattern = re.sub(r'\?P<наименование_1>', '', pattern)
+            logger.debug("[LLMMaskGenerator] Removed наименование_1 from pattern")
+        if "наименование_1" in required:
+            required = [p for p in required if p != "наименование_1"]
+
         for sp in self.SKIP_PARAMS:
             if sp in params:
                 params.remove(sp)
