@@ -527,44 +527,7 @@ python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i cache/
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index cache/ens_hardware.pkl --domain hardware
 ```
 
----
 
-
-### Вызовы для отладки
-
-```bash
-# Построение индекса из тестового файла (с доменом hardware)
-python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/ens_hardware.pkl -d hardware
-
-# Генерация масок для тестового индекса (путь к индексу берётся из домена)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --validate -so output/mask_stats.xlsx
-# Явное указание пути (если отличается от доменного)
-python cli.py generate-masks -d cache/masks.db -i cache/ens_hardware.pkl --domain hardware --llm --validate -so output/mask_stats.xlsx
-
-# Генерация масок (принудительная перегенерация)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force --validate -so output/mask_stats.xlsx
-
-# Генерация масок (перегенерация) без валидации
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force -so output/mask_stats.xlsx
-
-# Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/nomenclature.xlsx
-
-# Batch-обработка (Excel → JSON + result.db)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/nomenclature.json
-
-# Batch с автовыбором домена (перебирает все ens_*.pkl)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db --auto-domain --workers 4 -o output/nomenclature.xlsx
-
-# Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/quality.xlsx -j output/quality.json
-
-# Диагностика отдельной строки + паттерна
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --domain hardware
-
-# Диагностика с явным путём к индексу
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db -i cache/ens_hardware.pkl --domain hardware
-```
 
 ### Prod
 
@@ -597,71 +560,6 @@ python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db --domain
 ```
 
 
-### Вызовы для отладки
-
-```bash
-# Построение индекса из тестового файла (с доменом hardware)
-python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o cache/ens_hardware.pkl -d hardware
-
-# Генерация масок для тестового индекса (путь к индексу берётся из домена)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --validate -so output/mask_stats.xlsx
-# Явное указание пути (если отличается от доменного)
-python cli.py generate-masks -d cache/masks.db -i cache/ens_hardware.pkl --domain hardware --llm --validate -so output/mask_stats.xlsx
-
-# Генерация масок (принудительная перегенерация)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force --validate -so output/mask_stats.xlsx
-
-# Генерация масок (перегенерация) без валидации
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force -so output/mask_stats.xlsx
-
-# Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/nomenclature.xlsx
-
-# Batch-обработка (Excel → JSON + result.db)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/nomenclature.json
-
-# Batch с автовыбором домена (перебирает все ens_*.pkl)
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db --auto-domain --workers 4 -o output/nomenclature.xlsx
-
-# Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/quality.xlsx -j output/quality.json
-
-# Диагностика отдельной строки + паттерна
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --domain hardware
-
-# Диагностика с явным путём к индексу
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db -i cache/ens_hardware.pkl --domain hardware
-```
-
-### Prod
-
-```bash
-# Построение индекса из production-файла
-python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o cache/ens_hardware.pkl -d hardware
-
-# Генерация масок (дозаполнение — путь берётся из доменного конфига)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --validate -so output/mask_stats.xlsx
-
-# Генерация масок (перегенерация)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force --validate -so output/mask_stats.xlsx
-
-# Генерация масок (перегенерация) без валидации
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force -so output/mask_stats.xlsx
-
-# Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 3 -o output/nomenclature1.xlsx
-
-python cli.py batch data/СТИ_КумАПП_из_АСУ_НСИ.xlsx -d cache/masks.db --domain hardware --workers 2 -o output/СТИ_КумАПП_из_АСУ_НСИ.xlsx
-
-# Batch-обработка (Excel → JSON + result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/nomenclature1.json
-
-# Принудительная batch-переобработка (игнорирует кэш result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/results.xlsx --force
-
-# Анализ качества
-python cli.py analyze-quality data/nomenclature1.xlsx -d cache/masks.db --domain hardware -o output/quality.xlsx -j output/quality.json
-```
 
 ## CLI Команды
 
