@@ -329,7 +329,7 @@ class AutoValidator:
 
                 param_results[param] = "missing"
                 continue
-            if not self._values_match(str(extracted_val), str(expected_val)):
+            if not self._values_match(str(extracted_val), str(expected_val), param):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
 
                 param_results[param] = "mismatch"
@@ -353,7 +353,7 @@ class AutoValidator:
 
                 param_results[param] = "mismatch"
                 continue
-            if not self._values_match(str(extracted_val), str(expected_val)):
+            if not self._values_match(str(extracted_val), str(expected_val), param):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
 
                 param_results[param] = "mismatch"
@@ -633,13 +633,18 @@ class AutoValidator:
         return best_key, best_sim
 
     @staticmethod
-    def _values_match(val1: str, val2: str) -> bool:
+    def _values_match(val1: str, val2: str, param_key: str = "") -> bool:
         v1_raw = str(val1).strip()
         v2_raw = str(val2).strip()
         v1 = v1_raw.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
         v2 = v2_raw.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
         if v1 == v2:
             return True
+        # FIX 2026-05-28 22:30 UTC+3: coating — substring match is sufficient
+        # "Ц" in "Ц9.хр" → OK, "Бп" in "Бп" → OK, "Н.Кд" in "Н.Кд6.т.хр" → OK
+        if "покрытие" in param_key:
+            if v1 in v2 or v2 in v1:
+                return True
         # FIX 2026-05-28 21:58 UTC+3: substring match only for minor differences (.0 suffix, ≤2 chars)
         # Reject "22" vs "22х1.5" (different values, one contains other by accident)
         if v1 in v2 or v2 in v1:
