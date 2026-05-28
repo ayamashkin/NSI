@@ -2,11 +2,11 @@
 # FILE: config/domains/hardware.yaml
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 12:45:00 — Added шаг_резьбы and тип_резьбы to retain_fields (prevent constant-field removal)
+# 2026-05-28 12:45:00 — Expanded skip_fields with габаритные_размеры_масса, технические_характеристики, etc.
+# 2026-05-28 12:30:00 — Added min_examples parameter (default 5; override via CLI --min-examples)
 # 2026-05-27 21:15:00 — Added meta_regex_groups for configurable regex meta-groups
 # 2026-05-27 18:15:00 — Added prompt_template pointing to mask_generation_hardware.txt
-# 2026-05-27 17:46:00 — Added retain_fields for twin-group resolution
-# 2026-05-27 17:46:00 — Added meta_fields and skip_fields for index processing
-# 2026-05-27 14:05:00 — Initial domain config for hardware/fasteners
 # =============================================================================
 domain: hardware
 description: "Крепёжные изделия (болты, гайки, шайбы, винты)"
@@ -27,6 +27,8 @@ index:
 
   meta_fields:
     - "тип_изделия"
+    - "нтд_1"
+    - "нтд_2"
     - "стандарт"
     - "нтд"
 
@@ -35,6 +37,8 @@ index:
     - "группа_прочности"
     - "класс_поле_допуска"
     - "марка_стали"
+    - "шаг_резьбы"
+    - "тип_резьбы"
 
   field_aliases:
     "номинальный диаметр резьбы": "номинальный_диаметр_резьбы"
@@ -50,6 +54,7 @@ index:
   twin_threshold: 1.0
   visible_threshold: 0.05
   max_field_name_len: 30
+  min_examples: 5  # production default; use CLI --min-examples 1 for small test samples
 
 # Meta regex groups that are added to every regex pattern but are NOT ENS fields
 meta_regex_groups:
