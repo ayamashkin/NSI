@@ -2,6 +2,8 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
+# 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
 # 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g. "2" not matching inside "26")
 # 2026-05-28 18:45:00 — FIX: _fix_pattern normalizes \s+[-\s]+ -> [-\s]+ and fixes GOST 7795-70 cyrillic 'х' separator
 # 2026-05-28 18:45:00 — FIX: _sanitize_mask_result auto-removes duplicate named groups (Python re forbids them)
@@ -963,10 +965,10 @@ class LLMMaskGenerator:
 
     @staticmethod
     def _extract_json_fields(text: str) -> Optional[Dict]:
-        """Extract pattern/params/required from LLM response text.
+        r"""Extract pattern/params/required from LLM response text.
 
         FIX 2026-05-27: JSON string escapes are now properly decoded via json.loads('"' + raw + '"')
-        so that \\d -> \d, \\s -> \s, etc.
+        so that \d -> \d, \s -> \s, etc.
         """
 
         def _find_quoted_value(text: str, key: str) -> Optional[str]:
@@ -1209,6 +1211,9 @@ class LLMMaskGenerator:
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
         pattern = re.sub(r'\s+\[-\s\]\+', lambda m: r'[-\s]+', pattern)
         pattern = re.sub(r'\[-\s\]\+\s+', lambda m: r'[-\s]+', pattern)
+        # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
+        # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
+        pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
@@ -1222,7 +1227,7 @@ class LLMMaskGenerator:
                 lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
                 pattern
             )
-        pattern = pattern.replace("\\\d", "\d").replace("\\\s", "\s").replace("\\\w", "\w")
+        pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(r"\(?P<нтд_1>\d+[^\)]*\)", f"(?P<нтд_1>{re.escape(standard)})", pattern)
@@ -1260,7 +1265,7 @@ class LLMMaskGenerator:
         pattern = result.pattern
 
         # FIX: normalize double-escaped regex sequences
-        pattern = pattern.replace("\\\d", "\d").replace("\\\s", "\s").replace("\\\w", "\w")
+        pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         # FIX 2026-05-28 18:45 UTC+3: remove duplicate named groups (Python re forbids them)
         group_names = re.findall(r'\(\?P<([^>]+)>', pattern)

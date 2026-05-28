@@ -2,11 +2,13 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 21:20:00 — FIX: SyntaxError resolved (chr(10) instead of \n in logger.debug)
+# 2026-05-28 21:13:00 — FIX: tables output as single logger.debug call (no repeated timestamp prefixes)
+# 2026-05-28 21:06:00 — FIX: _print_summary_table shows ENS/Mask values (e.g. 6.0/6.0), 1.5x column width, includes optional params
 # 2026-05-28 20:45:00 — FIX: _print_summary_table transposed (examples as rows, params as columns)
 # 2026-05-28 20:10:52 — 913cbafd 28.05.2026
 # 2026-05-28 16:11:43 — 4edaece3 28.05.2026
 # 2026-05-28 16:11:38 — 391c9b21 28.05.2026
-# 2026-05-28 15:58:38 — e08274a2 28.05.2026
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -377,8 +379,24 @@ class AutoValidator:
 
     def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
                              required: List[str], skip_params: set, total: int, success_count: int) -> None:
-        """Print transposed summary table: examples as rows, params as columns."""
-        params = [p for p in required if p not in skip_params]
+        """Print transposed summary table: examples as rows, params as columns.
+        Cell format: ENS_value/Mask_value for OK, ENS_val≠Mask_val for mismatch, ENS_val/∅ for missing.
+        Column widths scaled 1.5x to prevent overflow. Includes both required and optional params."""
+        # Collect all params from all details (required + optional)
+        all_params = set()
+        for d in details:
+            pr = d.get("param_results", {})
+            for p in pr:
+                if p not in skip_params:
+                    all_params.add(p)
+            for mm in d.get("mismatches", []):
+                p = mm.get("param")
+                if p and p not in skip_params:
+                    all_params.add(p)
+            for p in d.get("missing", []):
+                if p not in skip_params:
+                    all_params.add(p)
+        params = sorted(all_params)
         if not params:
             return
 
@@ -398,21 +416,26 @@ class AutoValidator:
             else:
                 row["result"] = "OK"
 
+            ex = d.get("example", {})
             for p in params:
                 if error == "No match":
                     row["cells"][p] = "—"
                     continue
+                # Get ENS expected value
+                best_key, _ = self._find_expected_key(p, ex)
+                ens_val = ex.get(best_key) if best_key else None
+                ens_str = str(ens_val) if ens_val is not None else "—"
+
                 status = pr.get(p, "ok")
                 if status == "ok":
-                    ex = d.get("example", {})
-                    best_key, _ = self._find_expected_key(p, ex)
-                    val = ex.get(best_key) if best_key else None
-                    row["cells"][p] = str(val) if val is not None else "—"
+                    # OK: show ENS_value/Mask_value (they match)
+                    row["cells"][p] = f"{ens_str}/{ens_str}"
                 elif p in missing:
-                    row["cells"][p] = "∅"
+                    row["cells"][p] = f"{ens_str}/∅"
                 elif p in mismatches:
                     exp, ext = mismatches[p]
-                    row["cells"][p] = f"✗ {exp}≠{ext}"
+                    ext_str = str(ext) if ext is not None else "—"
+                    row["cells"][p] = f"{ens_str}≠{ext_str}"
                 else:
                     row["cells"][p] = "?"
             rows.append(row)
@@ -422,11 +445,16 @@ class AutoValidator:
         w_text = min(w_text, 40)
         w_result = max(len(r["result"]) for r in rows) if rows else 0
 
+        # Calculate widths with 1.5x scaling to fit cell contents
         param_widths = {}
         for p in params:
             header_len = len(p)
-            max_cell = max(len(str(r["cells"].get(p, ""))) for r in rows) if rows else 0
-            param_widths[p] = max(header_len, max_cell, 3)
+            max_cell = 0
+            for r in rows:
+                cell = str(r["cells"].get(p, ""))
+                max_cell = max(max_cell, len(cell))
+            raw_max = max(header_len, max_cell)
+            param_widths[p] = max(int(raw_max * 1.5) + 1, 3)
 
         def hline(char="─"):
             parts = [f"{char*(w_idx+2)}", f"{char*(w_text+2)}", f"{char*(w_result+2)}"]
@@ -446,13 +474,14 @@ class AutoValidator:
                 parts.append(f"{'─'*(param_widths[p]+2)}")
             return "└" + "┴".join(parts) + "┘"
 
-        logger.debug("[AutoValidator] === Summary %s/%s: %d/%d passed ===", standard, item_type, success_count, total)
-        logger.debug("[AutoValidator] %s", top())
+        lines = []
+        lines.append("=== Summary %s/%s: %d/%d passed ===" % (standard, item_type, success_count, total))
+        lines.append(top())
         header_parts = [f" {'№':<{w_idx}} ", f" {'Наименование':<{w_text}} ", f" {'Результат':<{w_result}} "]
         for p in params:
             header_parts.append(f" {p:<{param_widths[p]}} ")
-        logger.debug("[AutoValidator] │" + "│".join(header_parts) + "│")
-        logger.debug("[AutoValidator] %s", hline())
+        lines.append("│" + "│".join(header_parts) + "│")
+        lines.append(hline())
         for r in rows:
             row_parts = [
                 f" {str(r['idx']):<{w_idx}} ",
@@ -462,8 +491,10 @@ class AutoValidator:
             for p in params:
                 cell = str(r["cells"].get(p, ""))
                 row_parts.append(f" {cell:<{param_widths[p]}} ")
-            logger.debug("[AutoValidator] │" + "│".join(row_parts) + "│")
-        logger.debug("[AutoValidator] %s", bottom())
+            lines.append("│" + "│".join(row_parts) + "│")
+        lines.append(bottom())
+        sep = chr(10)
+        logger.debug("[AutoValidator]" + sep + "%s", sep.join(lines))
 
     def _print_table(self, text: str, required: List[str], ex: Dict, skip_params: set,
                      extracted: Optional[Dict] = None, mismatches: Optional[List] = None,
@@ -507,12 +538,15 @@ class AutoValidator:
         def header():
             return f"│ {'Параметр':<{w_param}} │ {'ЕНС':<{w_ens}} │ {'Маска':<{w_mask}} │ {'В наименовании':<{w_text}} │"
 
-        logger.debug("[AutoValidator] %s", top())
-        logger.debug("[AutoValidator] %s", header())
-        logger.debug("[AutoValidator] %s", line())
+        lines = []
+        lines.append(top())
+        lines.append(header())
+        lines.append(line())
         for r in rows:
-            logger.debug("[AutoValidator] %s", row(r))
-        logger.debug("[AutoValidator] %s", bottom())
+            lines.append(row(r))
+        lines.append(bottom())
+        sep = chr(10)
+        logger.debug("[AutoValidator]" + sep + "%s", sep.join(lines))
 
     @staticmethod
     def _find_in_text(val: Any, text: str) -> str:
