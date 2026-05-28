@@ -255,6 +255,19 @@ class AutoValidator:
         missing = sum(1 for d in details if d.get("error") == "No match")
         logger.info("[AutoValidator] Validation result for %s/%s: score=%.2f, passed=%s",
                     standard, item_type, score, passed)
+        if not passed and logger.isEnabledFor(logging.DEBUG):
+            failed = [d for d in details if not d["success"]]
+            logger.debug("[AutoValidator] Failed examples (%d/%d):", len(failed), total)
+            for fd in failed[:5]:
+                err = fd.get("error", "mismatch")
+                txt = fd.get("text", "")[:60]
+                logger.debug("[AutoValidator]   FAIL: %s — %s", err, txt)
+                if "missing" in fd and fd["missing"]:
+                    logger.debug("[AutoValidator]     Missing: %s", fd["missing"])
+                if "mismatches" in fd and fd["mismatches"]:
+                    for mm in fd["mismatches"]:
+                        logger.debug("[AutoValidator]     Mismatch: param=%s expected=%s extracted=%s",
+                                     mm.get("param"), mm.get("expected"), mm.get("extracted"))
         return ValidationResult(
             score=score, passed=passed, details=details, total=total,
             matched=success_count, mismatched=mismatched, missing=missing,
@@ -277,6 +290,7 @@ class AutoValidator:
         if not text:
             return {"success": False, "error": "Empty text", "example": ex}
 
+        skip_params = self._skip_params
         match = pattern.search(text)
         logger.debug("[AutoValidator] Testing pattern against: %s", text[:100])
         if match:
@@ -285,6 +299,15 @@ class AutoValidator:
         else:
             logger.debug("[AutoValidator] NO MATCH for text: %s", text[:100])
             logger.debug("[AutoValidator] Pattern used: %s", pattern.pattern)
+            # Log expected params from ENS for debugging
+            expected_info = []
+            for param in required:
+                if param in skip_params:
+                    continue
+                best_exp_key, _ = self._find_expected_key(param, ex)
+                expected_val = ex.get(best_exp_key) if best_exp_key else None
+                expected_info.append(f"{param}={expected_val}")
+            logger.debug("[AutoValidator] Expected params from ENS: %s", ", ".join(expected_info))
             try:
                 partial = pattern.match(text)
                 if partial:
@@ -298,7 +321,6 @@ class AutoValidator:
         extracted = match.groupdict()
         mismatches = []
         missing = []
-        skip_params = self._skip_params
         debug_lines = []
 
         for param in required:
