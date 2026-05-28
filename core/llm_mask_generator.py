@@ -1170,24 +1170,24 @@ class LLMMaskGenerator:
 
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
         # FIX: normalize double-escaped regex sequences
-        pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
 
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
-        pattern = re.sub(r'\s+\[-\s\]\+', '[-\s]+', pattern)
-        pattern = re.sub(r'\[-\s\]\+\s+', '[-\s]+', pattern)
+        pattern = re.sub(r'\s+\[-\s\]\+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\[-\s\]\+\s+', lambda m: r'[-\s]+', pattern)
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
             pattern = re.sub(
-                r'(?P<класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*\(?(?P<длина>',
-                r'(?P<класс_допускa>\d+[a-z])[xXхХ×][-\s]*(?P<длина>',
+                r'(класс_допуска>\\d+[a-z])\\s*\\[-\\s\\]\\+\\s*\\(?(P<длина>)',
+                lambda m: fr'{m.group(1)}[xXхХ×][-\\s]*{m.group(2)}',
                 pattern
             )
             pattern = re.sub(
-                r'(?P<класс_допуска>\d+[a-z])\)\?\s*\[-\s\]\+\s*\(?(?P<длина>',
-                r'(?P<класс_допускa>\d+[a-z]))[xXхХ×][-\s]*(?P<длина>',
+                r'(класс_допуска>\\d+[a-z]\\)\\?)\\s*\\[-\\s\\]\\+\\s*\\(?(P<длина>)',
+                lambda m: fr'{m.group(1)}[xXхХ×][-\\s]*{m.group(2)}',
                 pattern
             )
+        pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(r"\(?P<нтд_1>\d+[^\)]*\)", f"(?P<нтд_1>{re.escape(standard)})", pattern)
@@ -1228,7 +1228,7 @@ class LLMMaskGenerator:
         pattern = pattern.replace("\\\\d", "\\d").replace("\\\\s", "\\s").replace("\\\\w", "\\w")
 
         # FIX 2026-05-28 18:45 UTC+3: remove duplicate named groups (Python re forbids them)
-        group_names = re.findall(r'\?P<([^>]+)>', pattern)
+        group_names = re.findall(r'\(\?P<([^>]+)>', pattern)
         from collections import Counter
         dupes = [name for name, count in Counter(group_names).items() if count > 1]
         if dupes:
