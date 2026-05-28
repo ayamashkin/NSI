@@ -52,10 +52,12 @@ class AutoValidator:
         ens_index_path: str = "cache/ens_hardware.pkl",
         activation_threshold: float = 0.85,
         domain: Optional[str] = None,
+        max_examples: int = 10,
     ):
         self.ens_index_path = Path(ens_index_path)
         self.activation_threshold = activation_threshold
         self.domain = domain
+        self.max_examples = max_examples
         self._domain_index: Optional[Dict] = None
         self._all_domain_indices: Optional[Dict[str, Dict]] = None
         self._skip_params = self._build_skip_params()
@@ -155,7 +157,9 @@ class AutoValidator:
                 logger.warning("[AutoValidator] Failed to load %s: %s", p, e)
         return self._all_domain_indices
 
-    def _get_ens_examples(self, standard: str, item_type: str, domain: Optional[str] = None, limit: int = 10) -> List[Dict]:
+    def _get_ens_examples(self, standard: str, item_type: str, domain: Optional[str] = None, limit: Optional[int] = None) -> List[Dict]:
+        """Get examples from domain index. limit=None means use self.max_examples."""
+        use_limit = limit if limit is not None else self.max_examples
         """Get examples from domain index."""
         dom = domain or self.domain
         if dom:
@@ -170,7 +174,7 @@ class AutoValidator:
             if canon_std in idx and itype in idx[canon_std]:
                 entry = idx[canon_std][itype]
                 examples = entry.get("examples", [])
-                return examples[:limit]
+                return examples[:use_limit]
             for s in idx:
                 if canon_std in s or s in canon_std:
                     for t in idx[s]:
@@ -481,7 +485,8 @@ class AutoValidator:
             header_parts.append(f" {p:<{param_widths[p]}} ")
         lines.append("│" + "│".join(header_parts) + "│")
         lines.append(hline())
-        for r in rows:
+        max_display_rows = 15
+        for r in rows[:max_display_rows]:
             row_parts = [
                 f" {str(r['idx']):<{w_idx}} ",
                 f" {r['text']:<{w_text}} ",
@@ -491,6 +496,8 @@ class AutoValidator:
                 cell = str(r["cells"].get(p, ""))
                 row_parts.append(f" {cell:<{param_widths[p]}} ")
             lines.append("│" + "│".join(row_parts) + "│")
+        if len(rows) > max_display_rows:
+            lines.append(f"│ ... и ещё {len(rows) - max_display_rows} строк │")
         lines.append(bottom())
         sep = chr(10)
         logger.debug("[AutoValidator]" + sep + "%s", sep.join(lines))

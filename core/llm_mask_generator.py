@@ -2,6 +2,7 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-28 21:50:00 — FEAT: passes validation_max_examples from settings to AutoValidator
 # 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
 # 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
 # 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g. "2" not matching inside "26")
@@ -171,7 +172,16 @@ class LLMMaskGenerator:
                     ens_path = getattr(self.settings.database, "ens_index_path", None)
                 if not ens_path:
                     ens_path = self._ens_index_path
-                self.validator = AutoValidator(ens_index_path=ens_path, activation_threshold=0.85)
+                # FEAT: configurable validation sample size
+                max_examples = 10
+                if self.settings and hasattr(self.settings, "mask_generation"):
+                    max_examples = getattr(self.settings.mask_generation, "validation_max_examples", 10)
+                self.validator = AutoValidator(
+                    ens_index_path=ens_path,
+                    activation_threshold=0.85,
+                    max_examples=max_examples,
+                )
+                logger.info("[LLMMaskGenerator] Validator init with max_examples=%d", max_examples)
             except Exception as e:
                 logger.warning("[LLMMaskGenerator] Failed to init validator: %s", e)
         return self.validator

@@ -1,3 +1,13 @@
+# =============================================================================
+# FILE: core/settings.py
+# REPO: https://github.com/ayamashkin/NSI
+# LAST 5 CHANGES (UTC+3):
+# 2026-05-28 21:55:00 — FEAT: added validation_max_examples to MaskGenerationConfig
+# 2026-05-21 08:53:16 — 6b906f29 21.05.2026
+# 2026-05-21 08:23:07 — 51f335da 21.05.2026
+# 2026-05-21 08:05:56 — ee843b22 21.05.2026
+# 2026-05-20 17:47:49 — 19e8ca02 20.05.2026
+# =============================================================================
 """
 Configuration Management Module
 Handles loading and validation of application configuration from YAML files.
@@ -8,10 +18,10 @@ LAST 5 COMMITS (UTC+3):
 # 2026-05-20 17:47:49 19e8ca02 20.05.2026
 # 2026-05-20 17:39:23 b00c4b25 20.05.2026
 # FIX 2026-05-25 18:40 UTC+3:
-#   - Added deduplicate_by_standard_type to MaskGenerationConfig
-#   - Added backup_enabled, backup_interval to DatabaseConfig
-#   - Added max_size, backup_count to LoggingConfig
-#   - Suppresses "Unknown field" warnings for these config keys.
+# - Added deduplicate_by_standard_type to MaskGenerationConfig
+# - Added backup_enabled, backup_interval to DatabaseConfig
+# - Added max_size, backup_count to LoggingConfig
+# - Suppresses "Unknown field" warnings for these config keys.
 """
 import os
 import yaml
@@ -26,8 +36,8 @@ logger = logging.getLogger(__name__)
 class DatabaseConfig:
     path: str = "cache/results.db"
     connection_string: str = ""
-    backup_enabled: bool = False      # FIX 2026-05-25: suppress Unknown field warning
-    backup_interval: int = 3600       # FIX 2026-05-25: suppress Unknown field warning
+    backup_enabled: bool = False  # FIX 2026-05-25: suppress Unknown field warning
+    backup_interval: int = 3600     # FIX 2026-05-25: suppress Unknown field warning
 
 @dataclass
 class APIConfig:
@@ -99,6 +109,7 @@ class MaskGenerationConfig:
     activation_threshold: float = 0.85
     retry_threshold: float = 0.50
     deduplicate_by_standard_type: bool = True  # FIX 2026-05-25: suppress Unknown field warning
+    validation_max_examples: int = 10             # FIX 2026-05-28: configurable validation sample size
 
 @dataclass
 class OutputConfig:
@@ -115,8 +126,8 @@ class LoggingConfig:
     level: str = "INFO"
     file: str = "logs/processor.log"
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    max_size: int = 10485760   # FIX 2026-05-25: suppress Unknown field warning
-    backup_count: int = 5      # FIX 2026-05-25: suppress Unknown field warning
+    max_size: int = 10485760  # FIX 2026-05-25: suppress Unknown field warning
+    backup_count: int = 5     # FIX 2026-05-25: suppress Unknown field warning
 
 @dataclass
 class Settings:
@@ -159,7 +170,7 @@ class Settings:
             elif isinstance(cfg, dict):
                 prompt_configs[name] = PromptConfig(**_filter_fields(PromptConfig, cfg))
             else:
-                logger.warning(f"Invalid prompt config for \'{name}\': {type(cfg)}")
+                logger.warning(f"Invalid prompt config for '{name}': {type(cfg)}")
 
         mask_gen_cfg = MaskGenerationConfig(**_filter_fields(MaskGenerationConfig, config_data.get("mask_generation", {})))
         matching_cfg = MatchingConfig(**_filter_fields(MatchingConfig, config_data.get("matching", {})))

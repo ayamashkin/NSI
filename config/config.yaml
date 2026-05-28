@@ -110,8 +110,9 @@ mask_generation:
   keyword_match_from_name: true       # Искать keywords в наименовании для выбора промпта
   prompt_template: "prompts/templates/mask_generation.txt"  # Шаблон системного промпта
   save_debug_prompts: true            # Сохранять промпты и ответы LLM в prompts/debug/
-  debug_prompts_dir: "prompts/debug"
+  debug_prompts_dir: "prompts/debug"  # путь к папке с промптами и ответами
   deduplicate_by_standard_type: true  # Не генерировать маску, если (standard, type) уже есть
+  validation_max_examples: 100        # количество примеров при валидации для пары стандарт+тип
 
 # =============================================================================
 # Output Configuration
