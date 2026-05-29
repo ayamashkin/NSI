@@ -2,11 +2,11 @@
 # FILE: core/domain_config.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-29 13:30:00 — FEAT: added twin_groups field for regex↔DB field mappings (e.g., свойства→группа_прочности)
 # 2026-05-28 22:32:00 — Added loose_match_fields for substring-match validation (e.g. coating)
 # 2026-05-28 12:45:00 — Added min_examples field (default 5) for index builder threshold
 # 2026-05-27 21:15:00 — Added meta_regex_groups for configurable regex meta-groups
 # 2026-05-27 18:15:00 — Added prompt_template for domain prompts
-# 2026-05-27 14:05:00 — Created DomainConfig for domain ENS architecture
 # =============================================================================
 """
 Domain Configuration Module
@@ -39,6 +39,7 @@ class DomainConfig:
     meta_regex_groups: List[str] = field(default_factory=lambda: ["тип_изделия", "нтд_1"])
     min_examples: int = 5  # minimum examples per (standard, type) to include in index
     loose_match_fields: Set[str] = field(default_factory=set)  # fields where substring match is OK
+    twin_groups: List[List[str]] = field(default_factory=list)  # [regex_field, db_field] mappings
 
     @classmethod
     def load(cls, domain: str, base_path: str = "config/domains") -> "DomainConfig":
@@ -67,6 +68,14 @@ class DomainConfig:
         # loose_match_fields from index or root
         loose_fields = set(str(x) for x in idx.get("loose_match_fields", data.get("loose_match_fields", [])))
 
+        # twin_groups from index
+        twin_groups_raw = idx.get("twin_groups", [])
+        twin_groups: List[List[str]] = []
+        if isinstance(twin_groups_raw, list):
+            for item in twin_groups_raw:
+                if isinstance(item, list) and len(item) >= 2:
+                    twin_groups.append([str(x) for x in item])
+
         return cls(
             domain=domain,
             description=data.get("description", ""),
@@ -82,6 +91,7 @@ class DomainConfig:
             meta_regex_groups=meta_groups,
             min_examples=int(idx.get("min_examples", 5)),
             loose_match_fields=loose_fields,
+            twin_groups=twin_groups,
         )
 
     def canonicalize_field_name(self, original: str) -> str:
@@ -96,7 +106,7 @@ class DomainConfig:
 
         if len(name) > self.max_field_name_len:
             # Remove duplicate words and articles
-            name = re.sub(r"\b(ди|de|la|le|et|du)\b", "", name)
+            name = re.sub(r"(ди|de|la|le|et|du)", "", name)
             name = re.sub(r"_+", "_", name).strip("_")
             name = name[:self.max_field_name_len]
 

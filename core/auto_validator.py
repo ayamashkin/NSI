@@ -1,7 +1,8 @@
 # =============================================================================
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
+# 2026-05-29 13:30:00 — FEAT: GOST7795Normalizer integration for .029→покрытие+толщина, .46→группа_прочности
+# 2026-05-29 13:30:00 — FIX: _find_expected_key twin mapping свойства↔группа_прочности
 # 2026-05-28 21:20:00 — FIX: SyntaxError resolved (chr(10) instead of \n in logger.debug)
 # 2026-05-28 21:13:00 — FIX: tables output as single logger.debug call (no repeated timestamp prefixes)
 # 2026-05-28 21:06:00 — FIX: _print_summary_table shows ENS/Mask values (e.g. 6.0/6.0), 1.5x column width, includes optional params
@@ -62,6 +63,7 @@ class AutoValidator:
         self._all_domain_indices: Optional[Dict[str, Dict]] = None
         self._skip_params = self._build_skip_params()
         self._loose_fields = self._build_loose_fields()
+        self._twin_groups = self._build_twin_groups()
 
     @staticmethod
     def _norm_field_name(name: str) -> str:
@@ -117,6 +119,20 @@ class AutoValidator:
             logger.warning("[AutoValidator] Failed to load domain config for loose_fields: %s", e)
             return set()
 
+
+    def _build_twin_groups(self) -> List[List[str]]:
+        """Build twin groups from domain config (regex field → DB field)."""
+        if not self.domain:
+            return []
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            twins = getattr(cfg, "twin_groups", [])
+            logger.info("[AutoValidator] twin_groups from domain %s: %s", self.domain, twins)
+            return twins
+        except Exception as e:
+            logger.warning("[AutoValidator] Failed to load twin_groups: %s", e)
+            return []
     def _load_domain_index(self, path: Optional[str] = None) -> Dict:
         target = Path(path) if path else self.ens_index_path
         try:
@@ -334,6 +350,10 @@ class AutoValidator:
             return {"success": False, "error": "No match", "text": text, "example": ex, "param_results": param_results}
 
         extracted = match.groupdict()
+        # FEAT 2026-05-29 13:30 UTC+3: normalize GOST 7795-70 extracted values
+        from core.gost_normalizer import GOST7795Normalizer
+        extracted = GOST7795Normalizer.normalize(extracted, standard)
+
         mismatches = []
         missing = []
         for param in required:
@@ -677,6 +697,20 @@ class AutoValidator:
             for k in ["наименование_типа", "тип_изделия", "тип"]:
                 if k in ex:
                     return k, 1.0
+        if param_lower in ("свойства", "группапрочности", "группа_прочности"):
+            for k in ["группа_прочности", "свойства", "группапрочности"]:
+                if k in ex:
+                    return k, 1.0
+        # FEAT 2026-05-29 13:30 UTC+3: twin group resolution (regex field → DB field)
+        for twin in self._twin_groups:
+            if len(twin) >= 2:
+                regex_field = twin[0]
+                db_fields = twin[1:]
+                if param_lower == self._norm_field_name(regex_field):
+                    for dbf in db_fields:
+                        for k in ex:
+                            if self._norm_field_name(k) == self._norm_field_name(dbf):
+                                return k, 1.0
         return best_key, best_sim
 
     @staticmethod
