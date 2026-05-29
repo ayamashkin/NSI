@@ -3,8 +3,8 @@
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
 # 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
+# 2026-05-29 12:15:00 — FEAT: batch mode with --responses-dir processes only standards with response files (no --force needed)
 # 2026-05-29 12:15:00 — FEAT: generate-masks creates generator for --responses-dir even without --llm
-# 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
 # 2026-05-29 09:42:00 — FIX: parsers/__init__.py stale import removed (cascade module no longer exists)
 # 2026-05-28 22:43:00 — FIX: generate-masks shows prompt_max/validation_max in initial output
 # 2026-05-28 22:00:00 — FEAT: generate-masks uses prompt_max_examples and validation_max_examples from config
@@ -980,7 +980,29 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             old_pattern = old_mask.pattern if old_mask else None
             old_score = old_mask.auto_score if old_mask else None
             old_is_active = old_mask.is_active if old_mask else None
-            if old_mask and old_mask.is_active and not force:
+            # FEAT 2026-05-29 12:15 UTC+3: with --responses-dir, process standards that have response files
+            # even without --force. Only skip if no file exists.
+            has_response_file = False
+            if responses_dir:
+                from pathlib import Path
+                rd = Path(responses_dir)
+                std_safe = std.replace(' ', '_')
+                itype_safe = itype.replace(' ', '_')
+                for attempt in range(1, 4):
+                    candidates = [
+                        rd / f'{itype}_{std}_a{attempt}.txt',
+                        rd / f'{itype}_{std_safe}_a{attempt}.txt',
+                        rd / f'{itype_safe}_{std}_a{attempt}.txt',
+                        rd / f'{itype_safe}_{std_safe}_a{attempt}.txt',
+                        rd / f'{itype}_{std}.txt',
+                        rd / f'{itype}_{std_safe}.txt',
+                        rd / f'{itype_safe}_{std}.txt',
+                        rd / f'{itype_safe}_{std_safe}.txt',
+                    ]
+                    if any(c.exists() for c in candidates):
+                        has_response_file = True
+                        break
+            if old_mask and old_mask.is_active and not force and not has_response_file:
                 click.echo(f"  ⏭️ Skipping {std}/{itype} (already active, use --force)")
                 stats['existing'] += 1
                 stats_rows.append({

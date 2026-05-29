@@ -516,7 +516,7 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/en
 # Генерация масок для тестового индекса
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --force --llm --domain hardware --validate -so output/mask_stats.xlsx
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --force --llm --domain hardware --validate --standard "ОСТ 1 31133-80" -so output/mask_stats.xlsx
-python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --force --responses-dir prompts/answers --validate --domain hardware
+python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --responses-dir prompts/answers --validate --domain hardware
 
 # Batch-обработка
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i cache/ens_hardware_test.pkl --workers 4 -o output/nomenclature.xlsx --domain hardware
