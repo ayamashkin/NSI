@@ -2,6 +2,7 @@
 # Nomenclature Processor CLI
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
+# 2026-05-29 15:55:00 — FIX: batch() added no_cache parameter, --no-cache flag now works
 # 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
 # 2026-05-29 12:15:00 — FEAT: batch mode with --responses-dir processes only standards with response files (no --force needed)
 # 2026-05-29 12:15:00 — FEAT: generate-masks creates generator for --responses-dir even without --llm
@@ -378,7 +379,8 @@ def process_parametric(text, db, ens_index, llm, domain):
     processor = AutomatedParametricProcessor(
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm,
-        settings=settings, result_db_path='cache/result.db'
+        settings=settings, result_db_path='cache/result.db',
+        no_cache=False
     )
     result = processor.process(text)
     click.echo(f"📄 Текст: {result.text}")
@@ -407,10 +409,11 @@ def process_parametric(text, db, ens_index, llm, domain):
 @click.option('--coating-map', '-c', help='Путь к Excel-файлу с картой покрытий')
 @click.option('--workers', '-w', type=int, default=4, help='Количество параллельных workers')
 @click.option('--result-db', '-r', default='cache/result.db', help='Путь к SQLite БД результатов')
+@click.option('--no-cache', is_flag=True, help='Пропустить кэш result.db (переобработать все)')
 @click.option('--domain', default='hardware', help='Домен ENS')
 @click.option('--auto-domain', is_flag=True, help='Автоматический выбор домена из всех ens_*.pkl')
 def batch(input_file, db, ens_index, output, llm, validate, success_only,
-          include_details, coating_map, workers, result_db, domain, auto_domain):
+          include_details, coating_map, workers, result_db, no_cache, domain, auto_domain):
     """Пакетная обработка номенклатуры параметрическим методом"""
     import pandas as pd
     from tqdm import tqdm
@@ -463,7 +466,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
     processor = AutomatedParametricProcessor(
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm,
-        settings=settings, result_db_path=result_db
+        settings=settings, result_db_path=result_db,
+        no_cache=no_cache
     )
     logger.debug("[CLI] result_db_path set to: %s", result_db)
     click.echo("🔍 Обработка...")
@@ -668,7 +672,8 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
-        ens_index_path=ens_index, use_llm_generation=llm, settings=settings
+        ens_index_path=ens_index, use_llm_generation=llm, settings=settings,
+        no_cache=False
     )
     if coating_map:
         from core.coating_mapper import init_mapper
@@ -730,7 +735,8 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
     mask_db = MaskDatabase(db_path=db)
     processor = AutomatedParametricProcessor(
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
-        ens_index_path=ens_index, use_llm_generation=llm, settings=settings
+        ens_index_path=ens_index, use_llm_generation=llm, settings=settings,
+        no_cache=False
     )
     click.echo(f"{'='*60}")
     click.echo(f"🔍 ДИАГНОСТИКА: {text}")

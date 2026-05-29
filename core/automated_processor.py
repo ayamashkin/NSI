@@ -8,6 +8,10 @@
 # 2026-05-20 17:47:49 19e8ca02 20.05.2026
 # 2026-05-20 17:39:23 b00c4b25 20.05.2026
 # =============================================================================
+# FIX 2026-05-29 15:55 UTC+3:
+# Added no_cache parameter to bypass result.db cache.
+# Cache skip: process() now checks 'not self.no_cache' before reading cache.
+# =============================================================================
 # FIX 2026-05-22 08:50 UTC+3:
 # _get_matching_config now reads from config.yaml matching section directly.
 # All thresholds/weights loaded from config; no hardcoded fallbacks.
@@ -225,7 +229,8 @@ class AutomatedParametricProcessor:
         use_llm_generation: bool = True,
         settings: Optional[Any] = None,
         result_db_path: Optional[str] = None,
-        cache_ttl_days: int = 7
+        cache_ttl_days: int = 7,
+        no_cache: bool = False
     ):
         self.mask_db = mask_db
         self.llm_clients = llm_clients or {}
@@ -236,6 +241,7 @@ class AutomatedParametricProcessor:
         self.settings = settings
         self.result_db_path = result_db_path
         self.cache_ttl_days = cache_ttl_days
+        self.no_cache = no_cache
         self._cache_stats = {'hits': 0, 'misses': 0}
         if result_db_path:
             db_file = Path(result_db_path)
@@ -382,7 +388,7 @@ class AutomatedParametricProcessor:
         # CACHE CHECK
         logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
                  clean_text[:50], extracted_standard, self.result_db_path)
-        if not force and self.result_db_path:
+        if not force and self.result_db_path and not self.no_cache:
             cached = self._check_cache(clean_text, extracted_standard)
             if cached:
                 logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
