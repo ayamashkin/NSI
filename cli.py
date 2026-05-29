@@ -2,12 +2,12 @@
 # Nomenclature Processor CLI
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
+# 2026-05-29 10:54:00 — FEAT: generate-masks added --service option; _init_llm_clients supports override_service
+# 2026-05-29 09:42:00 — FIX: parsers/__init__.py stale import removed (cascade module no longer exists)
 # 2026-05-28 22:43:00 — FIX: generate-masks shows prompt_max/validation_max in initial output
 # 2026-05-28 22:00:00 — FEAT: generate-masks uses prompt_max_examples and validation_max_examples from config
 # 2026-05-27 17:00:00 — Добавлена команда build-index с доменной архитектурой
 # 2026-05-27 14:25:00 — generate-masks, batch, diagnose обновлены с --domain
-# 2026-05-27 14:25:00 — Добавлен --auto-domain для multi-domain сопоставления
-# 2026-05-27 14:25:00 — ens build-index теперь использует ENSIndexBuilder
 # =============================================================================
 
 import click
@@ -92,11 +92,11 @@ def prompts():
     click.echo("📋 Доступные промпты:")
     for pid, cfg in settings.prompts.items():
         click.echo(f"🔹 {pid}")
-        click.echo(f"  Название: {cfg.name}")
-        click.echo(f"  Категория: {cfg.category}")
-        click.echo(f"  Сервис: {cfg.resolve_service(settings)}")
-        click.echo(f"  Модель: {cfg.resolve_model(settings)}")
-        click.echo(f"  Ключевые слова: {', '.join(cfg.keywords[:5])}...")
+        click.echo(f"   Название: {cfg.name}")
+        click.echo(f"   Категория: {cfg.category}")
+        click.echo(f"   Сервис: {cfg.resolve_service(settings)}")
+        click.echo(f"   Модель: {cfg.resolve_model(settings)}")
+        click.echo(f"   Ключевые слова: {', '.join(cfg.keywords[:5])}...")
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -235,24 +235,24 @@ def models(api_name):
             click.echo(f"❌ {service}: не найден")
             continue
         click.echo(f"🔧 {service.upper()}:")
-        click.echo(f"  URL: {cfg.base_url}")
+        click.echo(f"   URL: {cfg.base_url}")
         try:
             if service == 'openwebui':
                 if not cfg.api_key and not (cfg.username and cfg.password):
-                    click.echo("  ⚠️ Нет credentials")
+                    click.echo("   ⚠️ Нет credentials")
                     continue
                 from api_clients.openwebui import OpenWebUIClient
                 client = OpenWebUIClient(base_url=cfg.base_url, api_key=cfg.api_key,
                                          username=cfg.username, password=cfg.password)
             elif service == 'mws':
                 if not cfg.api_key:
-                    click.echo("  ⚠️ Нет api_key")
+                    click.echo("   ⚠️ Нет api_key")
                     continue
                 from api_clients.mws_gpt import MWSGPTClient
                 client = MWSGPTClient(base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout)
             elif service == 'gigachat':
                 if not cfg.api_key:
-                    click.echo("  ⚠️ Нет api_key")
+                    click.echo("   ⚠️ Нет api_key")
                     continue
                 from api_clients.gigachat import GigaChatClient
                 client = GigaChatClient(base_url=cfg.base_url, api_key=cfg.api_key,
@@ -260,33 +260,37 @@ def models(api_name):
                                         timeout=cfg.timeout, verify_ssl=False)
             elif service == 'mts_ai':
                 if not cfg.api_key:
-                    click.echo("  ⚠️ Нет api_key")
+                    click.echo("   ⚠️ Нет api_key")
                     continue
                 from api_clients.mts_ai import MTSAIClient
                 client = MTSAIClient(base_url=cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout)
             else:
-                click.echo(f"  ⚠️ Неизвестный сервис")
+                click.echo("   ⚠️ Неизвестный сервис")
                 continue
             model_list = client.get_models()
             if model_list:
-                click.echo(f"  Модели ({len(model_list)}):")
+                click.echo(f"   Модели ({len(model_list)}):")
                 for m in model_list[:10]:
-                    click.echo(f"    - {m}")
+                    click.echo(f"     - {m}")
                 if len(model_list) > 10:
-                    click.echo(f"    ... и еще {len(model_list) - 10}")
+                    click.echo(f"     ... и еще {len(model_list) - 10}")
             else:
-                click.echo("  ⚠️ Не удалось получить список моделей")
+                click.echo("   ⚠️ Не удалось получить список моделей")
         except Exception as e:
-            click.echo(f"  ❌ Ошибка: {e}")
+            click.echo(f"   ❌ Ошибка: {e}")
 
 # ============================
 # PARAMETRIC COMMANDS (New)
 # ============================
 
-def _init_llm_clients(settings, all_services=False):
-    """Инициализация LLM клиентов."""
+def _init_llm_clients(settings, all_services=False, override_service=None):
+    """Инициализация LLM клиентов.
+    FIX 2026-05-29 10:54 UTC+3: supports override_service for CLI --service option."""
     llm_clients = {}
-    if all_services:
+    if override_service:
+        services = [override_service]
+        logger.info("LLM: override service='%s'", override_service)
+    elif all_services:
         services = list(settings.api.keys())
         logger.info("LLM: initializing all configured services: %s", services)
     else:
@@ -384,10 +388,10 @@ def process_parametric(text, db, ens_index, llm, domain):
         click.echo(f"📋 Параметры:")
         for key, value in result.params.items():
             if not key.startswith('_'):
-                click.echo(f"  {key}: {value}")
+                click.echo(f"   {key}: {value}")
     if result.ens_code:
         click.echo(f"🔗 ЕНС совпадение:")
-        click.echo(f"  Код: {result.ens_code}")
+        click.echo(f"   Код: {result.ens_code}")
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True))
@@ -809,9 +813,10 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
 @click.option('--force', '-f', is_flag=True, help='Принудительная перегенерация')
 @click.option('--stats-output', '-so', type=click.Path(), help='Excel-файл статистики')
 @click.option('--domain', default='hardware', help='Домен ENS (hardware, rolled_metal, eri)')
-def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit, force, stats_output, domain):
+@click.option('--service', default=None, help='Переопределить LLM сервис (openwebui, mts_ai, mws, gigachat)')
+def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit, force, stats_output, domain, service):
     """Генерация масок для стандартов из индекса ЕНС."""
-    print(f"[DEBUG] generate_masks called: db={db}, ens_index={ens_index}, llm={llm}, force={force}, domain={domain}", flush=True)
+    print(f"[DEBUG] generate_masks called: db={db}, ens_index={ens_index}, llm={llm}, force={force}, domain={domain}, service={service}", flush=True)
     from core.mask_database import MaskDatabase, MaskRecord
     from core.llm_mask_generator import LLMMaskGenerator
     from core.auto_validator import AutoValidator
@@ -834,7 +839,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
     mask_db = MaskDatabase(db_path=db)
     llm_clients = {}
     if llm:
-        llm_clients = _init_llm_clients(settings, all_services=False)
+        llm_clients = _init_llm_clients(settings, all_services=False, override_service=service)
         if not llm_clients:
             click.echo("❌ LLM requested but no clients available", err=True)
             return
@@ -1126,7 +1131,7 @@ def info(pkl_file):
         click.echo(f"📋 Топ-10 стандартов:")
         for std, types in sorted(data.items(), key=lambda x: -len(x[1]))[:10]:
             ex_count = sum(len(entry.get('examples', [])) for entry in types.values())
-            click.echo(f"    {std}: {len(types)} типов, {ex_count} примеров")
+            click.echo(f"  {std}: {len(types)} типов, {ex_count} примеров")
     else:
         # Legacy формат
         items = data.get('items', [])
@@ -1141,10 +1146,10 @@ def info(pkl_file):
             type_counter[itype] += 1
         click.echo(f"📋 Топ-10 стандартов:")
         for std, count in std_counter.most_common(10):
-            click.echo(f"    {std}: {count}")
+            click.echo(f"  {std}: {count}")
         click.echo(f"📋 Топ-10 типов:")
         for itype, count in type_counter.most_common(10):
-            click.echo(f"    {itype}: {count}")
+            click.echo(f"  {itype}: {count}")
 
 @ens.command()
 @click.argument('pkl_file', type=click.Path(exists=True))

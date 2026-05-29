@@ -2,11 +2,11 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-29 10:49:00 — SYNC: aligned with llm_mask_generator reasoning strip fix
 # 2026-05-29 08:30:00 — SYNC: aligned with llm_mask_generator GOST 7795-70 artifact fixes
 # 2026-05-29 07:50:00 — SYNC: aligned with llm_mask_generator decimal upgrade (no functional changes)
 # 2026-05-28 21:20:00 — FIX: SyntaxError resolved (chr(10) instead of \n in logger.debug)
 # 2026-05-28 21:13:00 — FIX: tables output as single logger.debug call (no repeated timestamp prefixes)
-# 2026-05-28 21:06:00 — FIX: _print_summary_table shows ENS/Mask values (e.g. 6.0/6.0), 1.5x column width, includes optional params
 # 2026-05-28 20:45:00 — FIX: _print_summary_table transposed (examples as rows, params as columns)
 # 2026-05-28 20:10:52 — 913cbafd 28.05.2026
 # 2026-05-28 16:11:43 — 4edaece3 28.05.2026

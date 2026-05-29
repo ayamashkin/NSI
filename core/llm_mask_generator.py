@@ -2,11 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-29 10:49:00 — FIX: _extract_json_from_text strips reasoning/thinking sections (<think>, 0x00 blocks) before JSON parsing
+# 2026-05-29 10:30:00 — FIX: _extract_json_from_text robust JSON extraction for OpenWebUI/Qwen3 reasoning+markdown responses
 # 2026-05-29 08:30:00 — FIX: _sanitize_mask_result fixes GOST 7795-70 LLM artifacts (class_допуска typo, $ artifacts, missing свойства/покрытие groups, nested исполнение)
 # 2026-05-29 07:50:00 — FIX: _select_representative_examples prioritizes decimal examples; _fix_pattern uses re.sub for global upgrade
 # 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
-# 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
-# 2026-05-28 22:52:00 — FIX: _select_representative_examples shows all examples up to 20, prioritizes rare params (шаг_резьбы, исполнение)
 # 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
 # 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
 # 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g., "2" not matching inside "26")
@@ -1093,6 +1093,83 @@ class LLMMaskGenerator:
         required = _find_array(text, '"required"')
         return {"pattern": raw_pattern, "params": params, "required": required}
 
+    def _extract_json_from_text(self, text: str) -> Optional[Dict]:
+        """Robust JSON extraction from LLM response with reasoning and markdown.
+        FIX 2026-05-29 10:49 UTC+3: strip reasoning section (\x00\x00\x00\x00\x00\x00\x00\x00... or <think>...</think>) before parsing."""
+        if not text:
+            return None
+
+        # 0. Strip reasoning / thinking sections
+        # OpenWebUI/Qwen3 may wrap reasoning in special tokens or <think> tags
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        # Some models use 0x00-prefixed blocks for reasoning
+        text = re.sub(r'\x00+.*?\x00+', '', text, flags=re.DOTALL)
+        # Strip leading/trailing whitespace after cleanup
+        text = text.strip()
+
+        # 1. Find markdown code blocks (try LAST occurrence first, as reasoning may have earlier blocks)
+        for prefix in ["```json", "```python", "```"]:
+            start = 0
+            last_match = -1
+            while True:
+                pos = text.find(prefix, start)
+                if pos == -1:
+                    break
+                last_match = pos
+                start = pos + len(prefix)
+
+            if last_match >= 0:
+                candidate_start = last_match + len(prefix)
+                end = text.find("```", candidate_start)
+                if end >= 0:
+                    candidate = text[candidate_start:end].strip()
+                else:
+                    candidate = text[candidate_start:].strip()
+
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    # Try to extract JSON object from candidate (handle trailing text)
+                    json_match = re.search(r'{.*}', candidate, re.DOTALL)
+                    if json_match:
+                        try:
+                            return json.loads(json_match.group())
+                        except json.JSONDecodeError:
+                            pass
+
+        # 2. Look for raw JSON object with "pattern" key (last occurrence to skip reasoning examples)
+        pattern_starts = list(re.finditer(r'{\s*"pattern"\s*:', text))
+        if pattern_starts:
+            last_match = pattern_starts[-1]
+            pos = last_match.start()
+            brace_count = 0
+            in_string = False
+            escape = False
+            for i, ch in enumerate(text[pos:], start=pos):
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\' and not escape:
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if ch == "{":
+                        brace_count += 1
+                    elif ch == "}":
+                        brace_count -= 1
+                        if brace_count == 0:
+                            try:
+                                return json.loads(text[pos:i+1])
+                            except json.JSONDecodeError:
+                                break
+                            break
+
+        # 3. Fallback: _extract_json_fields
+        return self._extract_json_fields(text)
+
     def _parse_mask_response(
         self,
         text: str,
@@ -1111,124 +1188,9 @@ class LLMMaskGenerator:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         logger.debug("[LLMMaskGenerator] _parse_mask_response: text len=%d", len(text))
 
-        data = None
-        candidate = None
-
-        # Stage 1: ast.literal_eval
-        try:
-            import ast
-            parsed = ast.literal_eval(text)
-            if isinstance(parsed, dict):
-                if "content" in parsed and isinstance(parsed["content"], dict):
-                    data = parsed["content"]
-                elif "raw" in parsed and isinstance(parsed["raw"], str):
-                    text = parsed["raw"]
-                else:
-                    data = parsed
-                logger.debug("[LLMMaskGenerator] Parsed via ast.literal_eval")
-        except (ValueError, SyntaxError, TypeError) as e:
-            logger.debug("[LLMMaskGenerator] ast.literal_eval failed: %s", e)
-
-        # Stage 2: yaml
-        if data is None:
-            try:
-                import yaml
-                data = yaml.safe_load(text)
-                if isinstance(data, dict):
-                    if "content" in data and isinstance(data["content"], dict):
-                        data = data["content"]
-                    elif "raw" in data and isinstance(data["raw"], str):
-                        raw_text = data["raw"]
-                        for prefix in ["```json", "```python", "```"]:
-                            if raw_text.startswith(prefix):
-                                raw_text = raw_text[len(prefix):].strip()
-                                break
-                        if raw_text.endswith("```"):
-                            raw_text = raw_text[:-3].strip()
-                        try:
-                            data = json.loads(raw_text)
-                        except json.JSONDecodeError:
-                            try:
-                                data = yaml.safe_load(raw_text)
-                            except Exception:
-                                data = None
-                    else:
-                        logger.debug("[LLMMaskGenerator] Parsed via yaml")
-                else:
-                    data = None
-            except Exception as e:
-                logger.debug("[LLMMaskGenerator] yaml failed: %s", e)
-
-        # Stage 3: markdown code block
-        if data is None:
-            for prefix in ["```json", "```python", "```"]:
-                start = text.find(prefix)
-                if start >= 0:
-                    start += len(prefix)
-                    end = text.find("```", start)
-                    if end >= 0:
-                        candidate = text[start:end].strip()
-                    else:
-                        candidate = text[start:].strip()
-                    break
-            if candidate:
-                try:
-                    data = json.loads(candidate)
-                    logger.debug("[LLMMaskGenerator] Parsed via json.loads from markdown")
-                except json.JSONDecodeError as e:
-                    logger.debug("[LLMMaskGenerator] json.loads from markdown failed: %s", e)
-                    json_match = re.search(r"\{.*\}", candidate, re.DOTALL)
-                    if json_match:
-                        try:
-                            data = json.loads(json_match.group())
-                            logger.debug("[LLMMaskGenerator] Parsed via regex JSON match inside markdown")
-                        except Exception as e2:
-                            logger.debug("[LLMMaskGenerator] regex JSON match failed: %s", e2)
-
-        # Stage 4: brace scanner
-        if data is None:
-            for start_match in re.finditer(r"(?m)^[ \t]*\{", text):
-                pos = start_match.start()
-                brace_count = 0
-                in_string = False
-                escape = False
-                for i, ch in enumerate(text[pos:], start=pos):
-                    if escape:
-                        escape = False
-                        continue
-                    if ch == '\\' and not escape:
-                        escape = True
-                        continue
-                    if ch == '"' and not escape:
-                        in_string = not in_string
-                        continue
-                    if not in_string:
-                        if ch == "{":
-                            brace_count += 1
-                        elif ch == "}":
-                            brace_count -= 1
-                            if brace_count == 0:
-                                candidate = text[pos:i + 1]
-                                try:
-                                    data = json.loads(candidate)
-                                    logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
-                                except json.JSONDecodeError:
-                                    try:
-                                        import yaml
-                                        data = yaml.safe_load(candidate)
-                                    except Exception:
-                                        pass
-                                break
-                if data is not None:
-                    break
-
-        # Stage 5: fallback — direct pattern extraction from text
-        if data is None:
-            logger.debug("[LLMMaskGenerator] Trying direct pattern extraction from text")
-            data = self._extract_json_fields(text)
-            if data:
-                logger.info("[LLMMaskGenerator] Extracted pattern directly: %d params, %d required",
-                            len(data.get("params", [])), len(data.get("required", [])))
+        data = self._extract_json_from_text(text)
+        if data:
+            logger.debug("[LLMMaskGenerator] Parsed JSON via _extract_json_from_text")
 
         if data is None or not isinstance(data, dict):
             logger.warning(
@@ -1396,9 +1358,9 @@ class LLMMaskGenerator:
                 required = [good if p == bad else p for p in required]
                 pattern = pattern.replace(f"(?P<{bad}>", f"(?P<{good}>")
 
-        # FIX 2026-05-29 08:30 UTC+3: remove $ artifacts around numbers (e.g., \$\d+\$)
-        pattern = re.sub(r'\\\$(\d+)\\\$', r'\1', pattern)
-        pattern = re.sub(r'\\\$\(?P<', r'(?P<', pattern)
+        # FIX 2026-05-29 10:30 UTC+3: remove $ artifacts around numbers (e.g., \$\d+\$)
+        pattern = pattern.replace(r'\$\d+\$', r'\d+')
+        pattern = pattern.replace(r'\$\(?P<', r'(?P<')
 
         # FIX 2026-05-29 08:30 UTC+3: simplify исполнение nested capturing groups
         # (?P<исполнение>(?:[-\s]+(?:\()?\(\d+\)(?:\))?)?) -> (?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?)
