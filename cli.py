@@ -2,7 +2,9 @@
 # Nomenclature Processor CLI
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
-# 2026-05-29 10:54:00 — FEAT: generate-masks added --service option; _init_llm_clients supports override_service
+# 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
+# 2026-05-29 12:15:00 — FEAT: generate-masks creates generator for --responses-dir even without --llm
+# 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
 # 2026-05-29 09:42:00 — FIX: parsers/__init__.py stale import removed (cascade module no longer exists)
 # 2026-05-28 22:43:00 — FIX: generate-masks shows prompt_max/validation_max in initial output
 # 2026-05-28 22:00:00 — FEAT: generate-masks uses prompt_max_examples and validation_max_examples from config
@@ -814,9 +816,10 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
 @click.option('--stats-output', '-so', type=click.Path(), help='Excel-файл статистики')
 @click.option('--domain', default='hardware', help='Домен ENS (hardware, rolled_metal, eri)')
 @click.option('--service', default=None, help='Переопределить LLM сервис (openwebui, mts_ai, mws, gigachat)')
-def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit, force, stats_output, domain, service):
+@click.option('--responses-dir', '-rd', type=click.Path(exists=True), help='Папка с txt-файлами ответов LLM (пропускает LLM-вызовы)')
+def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score, limit, force, stats_output, domain, service, responses_dir):
     """Генерация масок для стандартов из индекса ЕНС."""
-    print(f"[DEBUG] generate_masks called: db={db}, ens_index={ens_index}, llm={llm}, force={force}, domain={domain}, service={service}", flush=True)
+    print(f"[DEBUG] generate_masks called: db={db}, ens_index={ens_index}, llm={llm}, force={force}, domain={domain}, service={service}, responses_dir={responses_dir}", flush=True)
     from core.mask_database import MaskDatabase, MaskRecord
     from core.llm_mask_generator import LLMMaskGenerator
     from core.auto_validator import AutoValidator
@@ -838,17 +841,21 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
     settings = get_settings()
     mask_db = MaskDatabase(db_path=db)
     llm_clients = {}
-    if llm:
-        llm_clients = _init_llm_clients(settings, all_services=False, override_service=service)
-        if not llm_clients:
-            click.echo("❌ LLM requested but no clients available", err=True)
-            return
-        click.echo("🤖 LLM клиенты инициализированы")
+    # FEAT 2026-05-29 12:15 UTC+3: create generator for file responses even without --llm
+    if llm or responses_dir:
+        llm_clients = {}
+        if llm:
+            llm_clients = _init_llm_clients(settings, all_services=False, override_service=service)
+            if not llm_clients:
+                click.echo("❌ LLM requested but no clients available", err=True)
+                return
+            click.echo("🤖 LLM клиенты инициализированы")
+        if responses_dir and not llm:
+            click.echo(f"📂 Режим загрузки из файлов: {responses_dir}")
         generator = LLMMaskGenerator(clients=llm_clients, settings=settings, max_retries=3, domain=domain, ens_index_path=ens_index)
     else:
         generator = None
         click.echo("⚠️ Режим без LLM — только просмотр/валидация")
-
     # === РЕЖИМ 1: Одиночная генерация ===
     if standard and item_type:
         canon_std = canonicalize_standard(standard)
@@ -866,7 +873,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             return
         click.echo(f"🎯 Генерация маски для {canon_std} / {item_type}...")
         prompt_examples = examples[:prompt_max]
-        mask, meta = generator.generate_mask(canon_std, item_type, prompt_examples)
+        mask, meta = generator.generate_mask(canon_std, item_type, prompt_examples, responses_dir=responses_dir)
         if mask:
             click.echo(f"✅ Маска сгенерирована:")
             click.echo(f"  Паттерн: {mask['pattern'][:80]}...")
@@ -991,7 +998,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
             if generator:
                 # prompt_max/validation_max already defined above
                 limited_examples = examples[:prompt_max]
-                mask, meta = generator.generate_mask(std, itype, limited_examples)
+                mask, meta = generator.generate_mask(std, itype, limited_examples, responses_dir=responses_dir)
                 if mask:
                     auto_score = 0.0
                     is_active = True

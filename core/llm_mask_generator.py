@@ -2,18 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-29 12:15:00 — FEAT: generate_mask supports responses_dir for loading LLM answers from txt files
+# 2026-05-29 12:15:00 — FIX: _parse_mask_response strips <thinks>/<thinking>/  sections before JSON parsing
 # 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
 # 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
 # 2026-05-28 22:52:00 — FIX: _select_representative_examples shows all examples up to 20, prioritizes rare params (шаг_резьбы, исполнение)
-# 2026-05-28 22:00:00 — FEAT: generate_mask uses prompt_max_examples from settings (default 20)
-# 2026-05-28 21:50:00 — FEAT: passes validation_max_examples from settings to AutoValidator
-# 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
-# 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
-# 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g. "2" not matching inside "26")
-# 2026-05-28 18:45:00 — FIX: _fix_pattern normalizes \s+[-\s]+ -> [-\s]+ and fixes GOST 7795-70 cyrillic 'х' separator
-# 2026-05-28 18:45:00 — FIX: _sanitize_mask_result auto-removes duplicate named groups (Python re forbids them)
-# 2026-05-28 18:45:00 — FIX: _format_examples shows structure line with conditional [исполнение]
-# 2026-05-28 18:22:00 — FIX: _format_examples shows ALL per-example visible params (not filtered by global_visible)
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -828,6 +821,48 @@ class LLMMaskGenerator:
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to copy to good/bad: %s", e)
 
+    def _load_response_from_file(self, responses_dir: Path, standard: str, item_type: str, attempt: int = 1) -> Optional[str]:
+        """Load raw LLM response from saved txt file (debug format with header).
+
+        FEAT 2026-05-29 12:15 UTC+3: supports loading pre-generated responses for validation
+        without calling LLM API. Handles both OpenWebUI (<thinks> sections) and MTS AI formats.
+        """
+        # Try multiple filename patterns
+        std_safe = standard.replace(" ", "_")
+        candidates = [
+            responses_dir / f"{item_type}_{standard}_a{attempt}.txt",
+            responses_dir / f"{item_type}_{std_safe}_a{attempt}.txt",
+            responses_dir / f"{item_type}_{standard}.txt",
+            responses_dir / f"{item_type}_{std_safe}.txt",
+        ]
+        path = None
+        for c in candidates:
+            if c.exists():
+                path = c
+                break
+        if not path:
+            return None
+        try:
+            content = path.read_text(encoding="utf-8")
+            # Skip header lines (lines starting with #)
+            lines_file = content.split("\n")
+            raw_lines = []
+            in_header = True
+            for line in lines_file:
+                if in_header and line.startswith("#"):
+                    continue
+                if in_header and line.strip() == "":
+                    in_header = False
+                    continue
+                in_header = False
+                raw_lines.append(line)
+            raw_text = "\n".join(raw_lines).strip()
+            logger.info("[LLMMaskGenerator] Loaded response from file: %s (len=%d)", path.name, len(raw_text))
+            return raw_text
+        except Exception as e:
+            logger.warning("[LLMMaskGenerator] Failed to load response from %s: %s", path, e)
+            return None
+
     def generate_mask(
         self,
         standard: str,
@@ -835,6 +870,7 @@ class LLMMaskGenerator:
         examples: Optional[List[Dict]] = None,
         name: str = "",
         standard_info: Any = None,
+        responses_dir: Optional[str] = None,
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
         canon_std = canonicalize_standard(standard)
         if examples is None:
@@ -848,6 +884,41 @@ class LLMMaskGenerator:
         service, model, temperature = self._resolve_service()
         logger.info("[LLMMaskGenerator] Generating mask for %s/%s via %s (examples=%d)",
                     canon_std, item_type, service, len(examples))
+        # FEAT 2026-05-29 12:15 UTC+3: load from files if responses_dir provided
+        responses_path = Path(responses_dir) if responses_dir else None
+        if responses_path and responses_path.exists():
+            logger.info("[LLMMaskGenerator] responses_dir=%s — using file responses, skipping LLM", responses_path)
+            for attempt in range(1, self.max_retries + 1):
+                raw_text = self._load_response_from_file(responses_path, canon_std, item_type, attempt)
+                if raw_text:
+                    mask = self._parse_mask_response(
+                        raw_text, canon_std, item_type,
+                        service="file",
+                        model="from_file",
+                        temperature=temperature,
+                        tokens_prompt=0,
+                        tokens_completion=0,
+                    )
+                    if mask:
+                        try:
+                            re.compile(mask.pattern, re.IGNORECASE)
+                        except re.error as re_err:
+                            logger.warning("[LLMMaskGenerator] File-loaded mask fails to compile: %s — %s",
+                                           mask.pattern[:80], re_err)
+                            continue
+                        meta = {
+                            "provider": "file",
+                            "model": "from_file",
+                            "temperature": temperature,
+                            "tokens_prompt": 0,
+                            "tokens_completion": 0,
+                            "attempts": attempt,
+                        }
+                        logger.info("[LLMMaskGenerator] Loaded mask from file (attempt %d)", attempt)
+                        return mask, meta
+            logger.error("[LLMMaskGenerator] No valid mask found in files for %s/%s", canon_std, item_type)
+            return None, None
+
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             for svc_name, client in self.clients.items():
@@ -1078,6 +1149,12 @@ class LLMMaskGenerator:
         if not text:
             logger.debug("[LLMMaskGenerator] _parse_mask_response: empty text")
             return None
+
+        # FIX 2026-05-29 12:15 UTC+3: strip <thinks>..</thinks> and other reasoning sections
+        text = re.sub(r"<thinks>.*?</thinks>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
+        text = re.sub(r"\s*<think>.*?</think>", "", text, flags=re.DOTALL)
+        text = text.strip()
 
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         logger.debug("[LLMMaskGenerator] _parse_mask_response: text len=%d", len(text))
