@@ -2,14 +2,14 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-29 07:50:00 — FIX: _select_representative_examples prioritizes decimal examples; _fix_pattern uses re.sub for global upgrade
 # 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
 # 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
 # 2026-05-28 22:52:00 — FIX: _select_representative_examples shows all examples up to 20, prioritizes rare params (шаг_резьбы, исполнение)
 # 2026-05-28 22:00:00 — FEAT: generate_mask uses prompt_max_examples from settings (default 20)
-# 2026-05-28 21:50:00 — FEAT: passes validation_max_examples from settings to AutoValidator
 # 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
 # 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
-# 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g. "2" not matching inside "26")
+# 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g., "2" not matching inside "26")
 # 2026-05-28 18:45:00 — FIX: _fix_pattern normalizes \s+[-\s]+ -> [-\s]+ and fixes GOST 7795-70 cyrillic 'х' separator
 # 2026-05-28 18:45:00 — FIX: _sanitize_mask_result auto-removes duplicate named groups (Python re forbids them)
 # 2026-05-28 18:45:00 — FIX: _format_examples shows structure line with conditional [исполнение]
@@ -214,26 +214,18 @@ class LLMMaskGenerator:
             for tok in tokens:
                 if tok in name_lower:
                     return True
-        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-        if prefix and prefix.group(1) in name_lower:
-            return True
+            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+            if prefix and prefix.group(1) in name_lower:
+                return True
         # FIX 2026-05-28 20:45 UTC+3: check word boundaries so "2" doesn't match inside "26", "31509", "80"
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
-            if int_part and re.search(r'(?<!\d)' + re.escape(int_part) + r'(?!\d)', name_lower):
-                return True
-        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
-            if val_str in name_lower:
-                return True
-        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
-        if m_match:
-            num = m_match.group(1)
-            if num.lower() in name_lower:
+            if int_part and re.search(r'(?<![0-9])' + re.escape(int_part) + r'(?![0-9])', name_lower):
                 return True
         return False
 
     @staticmethod
-    def _normalize_value_for_comparison(val: str) -> str:
+    def _normalize_value_for_comparison(val: Any) -> str:
         """Normalize value string for ambiguity detection.
 
         Removes formatting differences (spaces, dashes, underscores, comma/dot)
@@ -332,8 +324,8 @@ class LLMMaskGenerator:
         return "\n".join(lines) if len(lines) > 1 else "(нет параметров)"
 
     def _select_representative_examples(self, examples: List[Dict], max_count: int = 20) -> List[Dict]:
-        """Select examples ensuring rare params (шаг_резьбы, исполнение) are represented.
-        FIX 2026-05-28 22:52: show ALL examples up to max_count, prioritize rare params."""
+        """Select examples ensuring rare params (шаг_резьбы, исполнение) AND decimal values are represented.
+        FIX 2026-05-29 07:50 UTC+3: prioritize decimal examples so LLM generates \d+(?:[.,]\d+)? patterns."""
         if len(examples) <= max_count:
             return examples
 
@@ -351,33 +343,57 @@ class LLMMaskGenerator:
                     vis.add(k)
             return vis
 
-        # Priority: examples with rare params (шаг_резьбы, исполнение) first
+        def _has_decimal(ex: Dict) -> bool:
+            """Check if any numeric visible param contains decimal separator (, or .)."""
+            name = ex.get("_meta", {}).get("name", "")
+            if not name:
+                name = ex.get("_meta", {}).get("full_name", "")
+            for k, v in ex.items():
+                if k.startswith("_"):
+                    continue
+                if v is None:
+                    continue
+                val_str = str(v).strip()
+                if not self._is_value_in_name(val_str, name, param_key=k):
+                    continue
+                # Skip text fields (coating, etc.)
+                if k in {"покрытие", "покрытие_1", "марка_материала", "тип_изделия"}:
+                    continue
+                if re.search(r'\d+[.,]\d+', val_str):
+                    return True
+            return False
+
+        # Priority: examples with rare params (шаг_резьбы, исполнение) first, then decimal
         rare_params = {"шаг_резьбы", "исполнение", "класс_допуска"}
         scored = []
         for ex in examples:
             vis = _visible_params(ex)
             has_rare = bool(vis & rare_params)
-            scored.append((ex, vis, has_rare))
+            has_decimal = _has_decimal(ex)
+            scored.append((ex, vis, has_rare, has_decimal))
 
-        # Sort: has_rare first, then by param count desc
-        scored.sort(key=lambda x: (-x[2], -len(x[1])))
+        # Sort: has_rare first, then has_decimal, then by param count desc
+        scored.sort(key=lambda x: (-x[2], -x[3], -len(x[1])))
 
         selected = []
         covered = set()
         rare_covered = set()
+        decimal_covered = False  # at least one decimal example
 
-        # Phase 1: pick examples covering rare params
-        for ex, vis, has_rare in scored:
+        # Phase 1: pick examples covering rare params and decimal values
+        for ex, vis, has_rare, has_decimal in scored:
             if len(selected) >= max_count:
                 break
             new_rare = (vis & rare_params) - rare_covered
-            if new_rare:
+            if new_rare or (has_decimal and not decimal_covered):
                 selected.append(ex)
                 covered |= vis
                 rare_covered |= new_rare
+                if has_decimal:
+                    decimal_covered = True
 
         # Phase 2: fill remaining slots with diverse examples
-        for ex, vis, has_rare in scored:
+        for ex, vis, has_rare, has_decimal in scored:
             if len(selected) >= max_count:
                 break
             if ex in selected:
@@ -387,6 +403,9 @@ class LLMMaskGenerator:
                 selected.append(ex)
                 covered |= vis
 
+        logger.info(
+            "[LLMMaskGenerator] Selected %d examples (decimal covered=%s, rare covered=%s)",
+            len(selected), decimal_covered, bool(rare_covered))
         return selected
 
     _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2", "наименование_1"}
@@ -417,6 +436,16 @@ class LLMMaskGenerator:
         structure_parts.append("<параметры> <покрытие> <стандарт>")
         lines.append(f"Структура: {' '.join(structure_parts)}")
         lines.append("")
+        # FIX 2026-05-29 07:50 UTC+3: warn LLM about decimal values in examples
+        has_decimal_in_examples = any(
+            re.search(r'\d+[.,]\d+', str(ex.get(k, '')))
+            for ex in examples
+            for k in ex if not k.startswith('_')
+        )
+        if has_decimal_in_examples:
+            lines.append("⚠️ Внимание: в выборке присутствуют дробные значения (например, 2,5; 7.0; 3.5).")
+            lines.append("   Числовые группы regex должны поддерживать десятичные: \d+(?:[.,]\d+)?")
+            lines.append("")
         twin_groups = self._get_twin_groups(standard, item_type)
 
         # Build param_counts for statistics
@@ -473,8 +502,8 @@ class LLMMaskGenerator:
                     m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
                     if m:
                         pos = name.lower().find(m.group().lower())
-                if pos < 0:
-                    pos = 999
+                    if pos < 0:
+                        pos = 999
                 visible_list.append((key, val_str, pos))
             visible_list.sort(key=lambda x: x[2])
 
@@ -497,16 +526,16 @@ class LLMMaskGenerator:
             lines.append(f'{i}. Исходное: "{name}"')
             if visible_list:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible_list])
-                lines.append(f"   Видимые в строке: {vis_str}")
+                lines.append(f" Видимые в строке: {vis_str}")
             if ambiguous_keys:
                 amb_items = [(k, resolved[k]) for k in sorted(ambiguous_keys)]
                 amb_str = " ".join([f"(?P<{k}>{v})" for k, v in amb_items])
-                lines.append(f"   Неоднозначные: {amb_str}")
+                lines.append(f" Неоднозначные: {amb_str}")
             if missing_list:
-                lines.append(f"   Отсутствуют: {', '.join(missing_list)}")
+                lines.append(f" Отсутствуют: {', '.join(missing_list)}")
             if meta_list:
                 meta_str = ", ".join([f"{k}={v}" for k, v in meta_list])
-                lines.append(f"   Метаданные БД: {meta_str}")
+                lines.append(f" Метаданные БД: {meta_str}")
             lines.append("")
 
         # Statistics block (inspired by old prompt)
@@ -515,7 +544,7 @@ class LLMMaskGenerator:
         for key in sorted(global_visible):
             count = param_counts.get(key, 0)
             lines.append(
-                f"  {key}: {count} из {total_unambiguous} ({count / total_unambiguous * 100:.0f}%) — видим в строке")
+                f" {key}: {count} из {total_unambiguous} ({count / total_unambiguous * 100:.0f}%) — видим в строке")
         # Meta-data stats
         meta_counts: Dict[str, int] = {}
         for ex, _ in unambiguous:
@@ -530,10 +559,10 @@ class LLMMaskGenerator:
                 meta_counts[k] = meta_counts.get(k, 0) + 1
         if meta_counts:
             lines.append("")
-            lines.append("  --- Метаданные БД (не для regex) ---")
+            lines.append(" --- Метаданные БД (не для regex) ---")
             for key, count in sorted(meta_counts.items()):
-                lines.append(f"  {key}: {count} из {total_unambiguous} — [в БД, не в строке]")
-        lines.append("")
+                lines.append(f" {key}: {count} из {total_unambiguous} — [в БД, не в строке]")
+            lines.append("")
 
         return "\n".join(lines)
 
@@ -584,7 +613,7 @@ class LLMMaskGenerator:
 
 === ЗАДАЧА ===
 
-Создай regex-паттерн с named groups (?P<name>...) для извлечения параметров из строки номенклатуры крепежа по стандартам ОСТ и ГОСТ.
+Создай regex-паттерн с named groups (?P...) для извлечения параметров из строки номенклатуры крепежа по стандартам ОСТ и ГОСТ.
 
 Стандарт: {standard}
 Тип изделия: {item_type}
@@ -606,7 +635,7 @@ class LLMMaskGenerator:
 5. **Исполнение опциональное**: `(?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?`. Используй `(?:\()?` для опциональной скобки. НЕ пиши `\(?P<` — это сломает regex.
 6. **Покрытие**: `[\w.]+`. После покрытия ОБЯЗАТЕЛЬНО `[-\s]+` перед нтд_1. Покрытие НЕ должно включать "ОСТ" или "ГОСТ".
 7. **НТД_1**: `[-\s]+(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `[-\s]+(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
-8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<name>(?P<name2>...))`.
+8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P(?P...))`.
 9. **Блок "длина.свойства.покрытие" (ГОСТ 7795-70)**: Это ТРИ ОТДЕЛЬНЫХ целых числа через точку. Правильно: `(?P<длина>\d+)\.(?P<свойства>\d+)\.(?P<покрытие>\d+)`. Неправильно: `\d+(?:[.,]\d+)?` для длины — жадно сожрет все три числа.
 10. **Точка в номенклатуре**: Точка может быть десятичной (12.5 мм) или разделителем (45.46.019). Анализируй примеры: если после точки ровно 2 цифры-кода — это разделитель. При сомнении разделяй: `(?P<длина>\d+)\.(?P<покрытие>\d+)`, а не `(?P<длина>\d+(?:[.,]\d+)?)`.
 11. **НЕ используй неявные параметры**: НЕ создавай группу `тип_резьбы` со значением "M", если "M" нет в строке. НЕ создавай `марка_материала`, `номинальный_диаметр_резьбы` если их нет в наименовании (смотри Метаданные БД).
@@ -640,11 +669,11 @@ class LLMMaskGenerator:
         lines = []
         for g in groups:
             if g == "тип_изделия":
-                lines.append(f"- `{g}` всегда добавляется в начало паттерна (имя изделия: Болт, Гайка, Шайба...)")
+                lines.append(f"- \`{g}\` всегда добавляется в начало паттерна (имя изделия: Болт, Гайка, Шайба...)")
             elif g == "нтд_1":
-                lines.append(f"- `{g}` всегда добавляется в конец паттерна (стандарт: ГОСТ 7798-70, ОСТ 1 31133-80...)")
+                lines.append(f"- \`{g}\` всегда добавляется в конец паттерна (стандарт: ГОСТ 7798-70, ОСТ 1 31133-80...)")
             else:
-                lines.append(f"- `{g}` — техническая regex-группа")
+                lines.append(f"- \`{g}\` — техническая regex-группа")
         lines.append("")
         lines.append('Они НЕ должны появляться в списке "Параметры из ЕНС" и НЕ должны учитываться')
         lines.append("в статистике заполнения — они не являются полями базы данных.")
@@ -972,7 +1001,7 @@ class LLMMaskGenerator:
                     }
                 else:
                     logger.warning("[LLMMaskGenerator] %s returned empty/short text: %r", client_type,
-                                   text[:50] if text else None)
+                                     text[:50] if text else None)
             except Exception as e:
                 logger.warning("[LLMMaskGenerator] %s chat/generate failed: %s", client_type, e)
 
@@ -1167,7 +1196,7 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == "\\" and not escape:
+                    if ch == '\\' and not escape:
                         escape = True
                         continue
                     if ch == '"' and not escape:
@@ -1190,8 +1219,8 @@ class LLMMaskGenerator:
                                     except Exception:
                                         pass
                                 break
-                    if data is not None:
-                        break
+                if data is not None:
+                    break
 
         # Stage 5: fallback — direct pattern extraction from text
         if data is None:
@@ -1251,20 +1280,21 @@ class LLMMaskGenerator:
         pattern = re.sub(r'\[-\s\]\+\s+', lambda m: r'[-\s]+', pattern)
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
-        pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
+        pattern = re.sub(r'\)\?(?P\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
 
-        # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
+        # FIX 2026-05-29 07:50 UTC+3: robust decimal upgrade using re.sub (global, all occurrences)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
         text_fields = {"покрытие", "покрытие_1", "тип_изделия", "наименование", "стандарт", "нтд", "нтд_1", "нтд_2"}
+        skip_numeric = {"исполнение", "variant", "количество"} | text_fields
         for group_name in re.findall(r'\?P<([^>]+)>', pattern):
-            if group_name in {"исполнение", "variant", "количество"} | text_fields:
+            if group_name in skip_numeric:
                 continue
-            # Look for the group pattern in the string
-            old_group = fr'(?P<{group_name}>\d+)'
-            if old_group in pattern:
-                new_group = fr'(?P<{group_name}>\d+(?:[.,]\d+)?)'
-                pattern = pattern.replace(old_group, new_group)
-                logger.debug("[LLMMaskGenerator] Upgraded %s to decimal: %s", group_name, new_group)
+            # Use regex substitution to replace ALL occurrences of \d+ in this named group
+            old_pattern = rf'(?P<{re.escape(group_name)}>\d+)'
+            new_pattern = rf'(?P<{group_name}>\d+(?:[.,]\d+)?)'
+            if re.search(old_pattern, pattern):
+                pattern = re.sub(old_pattern, new_pattern, pattern)
+                logger.debug("[LLMMaskGenerator] Upgraded %s to decimal", group_name)
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
