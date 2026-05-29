@@ -2,11 +2,9 @@
 # FILE: core/auto_validator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
-# 2026-05-29 10:49:00 — SYNC: aligned with llm_mask_generator reasoning strip fix
-# 2026-05-29 08:30:00 — SYNC: aligned with llm_mask_generator GOST 7795-70 artifact fixes
-# 2026-05-29 07:50:00 — SYNC: aligned with llm_mask_generator decimal upgrade (no functional changes)
 # 2026-05-28 21:20:00 — FIX: SyntaxError resolved (chr(10) instead of \n in logger.debug)
 # 2026-05-28 21:13:00 — FIX: tables output as single logger.debug call (no repeated timestamp prefixes)
+# 2026-05-28 21:06:00 — FIX: _print_summary_table shows ENS/Mask values (e.g. 6.0/6.0), 1.5x column width, includes optional params
 # 2026-05-28 20:45:00 — FIX: _print_summary_table transposed (examples as rows, params as columns)
 # 2026-05-28 20:10:52 — 913cbafd 28.05.2026
 # 2026-05-28 16:11:43 — 4edaece3 28.05.2026
@@ -347,24 +345,24 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if extracted_empty and expected_empty:
-                # Both empty — OK (param not present in this example)
+
                 param_results[param] = "ok"
                 continue
             elif expected_empty and not extracted_empty:
-                # Expected empty but extracted something — OK (extra param)
+
                 param_results[param] = "ok"
                 continue
             elif extracted_empty or extracted_val == "":
                 missing.append(param)
-                # Missing required param
+
                 param_results[param] = "missing"
                 continue
             if not self._values_match(str(extracted_val), str(expected_val), param):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
-                # Mismatch
+
                 param_results[param] = "mismatch"
             else:
-                # Match
+
                 param_results[param] = "ok"
 
         optional_params = set(params) - set(required) - skip_params
@@ -375,20 +373,20 @@ class AutoValidator:
             extracted_empty = extracted_val is None or str(extracted_val).strip() == ""
             expected_empty = expected_val is None or str(expected_val).strip() == ""
             if expected_empty:
-                # Optional param not expected — OK
+
                 param_results[param] = "ok"
                 continue
             if extracted_empty:
                 mismatches.append({"param": param, "expected": expected_val, "extracted": None})
-                # Optional param expected but missing
+
                 param_results[param] = "mismatch"
                 continue
             if not self._values_match(str(extracted_val), str(expected_val), param):
                 mismatches.append({"param": param, "expected": expected_val, "extracted": extracted_val})
-                # Optional param mismatch
+
                 param_results[param] = "mismatch"
             else:
-                # Optional param match
+
                 param_results[param] = "ok"
 
         success = len(missing) == 0 and len(mismatches) == 0
@@ -468,9 +466,9 @@ class AutoValidator:
                     ext_norm = ext_str.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
                     ens_norm = ens_str.lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
                     if ext_norm == ens_norm:
-                        sep = "=" # exact match
+                        sep = "="  # exact match
                     elif is_loose:
-                        sep = "~" # loose (substring) match
+                        sep = "~"  # loose (substring) match
                     else:
                         sep = "="
                     row["cells"][p] = f"{ext_str}{sep}{ens_str}"
@@ -757,14 +755,14 @@ class AutoValidator:
         if val_str in name_lower:
             return True
         if re.search(r"[a-zA-Zа-яА-Я]", val_str):
-            tokens = re.split(r"[.\\-]", val_str)
+            tokens = re.split(r"[.\-]", val_str)
             tokens = [t for t in tokens if t and re.search(r"[a-zA-Zа-яА-Я]", t)]
             for tok in tokens:
                 if tok in name_lower:
                     return True
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix and prefix.group(1) in name_lower:
-                return True
+        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+        if prefix and prefix.group(1) in name_lower:
+            return True
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
             if int_part and int_part in name_lower:
