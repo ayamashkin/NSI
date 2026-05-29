@@ -1345,16 +1345,14 @@ class LLMMaskGenerator:
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
-            pattern = re.sub(
-                r'(класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*\(?P<длина>)',
-                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
-                pattern
-            )
-            pattern = re.sub(
-                r'(класс_допуска>\d+[a-z]\)?)\s*\[-\s\]\+\s*\(?P<длина>)',
-                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
-                pattern
-            )
+            try:
+                pattern = re.sub(
+                    r"(?P<класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*(?P<длина>\d+)",
+                    r"(?P<класс_допуска>\d+[a-z])[xXхХ×][-\s]*(?P<длина>\d+)",
+                    pattern
+                )
+            except re.error as e:
+                logger.debug("[LLMMaskGenerator] _fix_pattern 7795-70 regex fix skipped: %s", e)
         pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
