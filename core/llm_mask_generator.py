@@ -2,11 +2,11 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-05-29 08:30:00 — FIX: _sanitize_mask_result fixes GOST 7795-70 LLM artifacts (class_допуска typo, $ artifacts, missing свойства/покрытие groups, nested исполнение)
 # 2026-05-29 07:50:00 — FIX: _select_representative_examples prioritizes decimal examples; _fix_pattern uses re.sub for global upgrade
 # 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
 # 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
 # 2026-05-28 22:52:00 — FIX: _select_representative_examples shows all examples up to 20, prioritizes rare params (шаг_резьбы, исполнение)
-# 2026-05-28 22:00:00 — FEAT: generate_mask uses prompt_max_examples from settings (default 20)
 # 2026-05-28 21:30:00 — FIX: _fix_pattern lambda instead of string replacement (bad escape \s crash)
 # 2026-05-28 21:20:00 — FIX: _fix_pattern adds optional separator between )? and next named group (Болт 31104-80)
 # 2026-05-28 20:45:00 — FIX: _is_value_in_name checks word boundaries for .0 stripped ints (e.g., "2" not matching inside "26")
@@ -1388,12 +1388,51 @@ class LLMMaskGenerator:
             "тип_2изделия": "тип_изделия",
             "тип_изделия2": "тип_изделия",
             "тип_изделеия": "тип_изделия",
+            "class_допуска": "класс_допуска",  # FIX 2026-05-29 08:30 UTC+3: latin typo
         }
         for bad, good in typo_fixes.items():
             if bad in params:
                 params = [good if p == bad else p for p in params]
                 required = [good if p == bad else p for p in required]
                 pattern = pattern.replace(f"(?P<{bad}>", f"(?P<{good}>")
+
+        # FIX 2026-05-29 08:30 UTC+3: remove $ artifacts around numbers (e.g., \$\d+\$)
+        pattern = re.sub(r'\\\$(\d+)\\\$', r'\1', pattern)
+        pattern = re.sub(r'\\\$\(?P<', r'(?P<', pattern)
+
+        # FIX 2026-05-29 08:30 UTC+3: simplify исполнение nested capturing groups
+        # (?P<исполнение>(?:[-\s]+(?:\()?\(\d+\)(?:\))?)?) -> (?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?)
+        pattern = re.sub(
+            r'\(\?P<исполнение>\(\?:\[-\\s\]\+\(\?:\\\(\\\)\?\)\?\(\d\+\)\(\?:\\\)\\\)\?\)\?\)',
+            r'(?:[-\\s]+(?:\\()?(?P<исполнение>\d+)(?:\\))?)?',
+            pattern
+        )
+
+        # FIX 2026-05-29 08:30 UTC+3: GOST 7795-70 — restore missing named groups for свойства/покрытие
+        if "7795-70" in standard:
+            # If длина is followed by \.\d+\.\d+ without named groups
+            pattern = re.sub(
+                r'(?P<длина>\d+)\\.\d+\\.\d+',
+                r'(?P<длина>\d+)\\.(?P<свойства>\d+)\\.(?P<покрытие>\d+)',
+                pattern
+            )
+            if "свойства" not in params:
+                params.append("свойства")
+            if "покрытие" not in params:
+                params.append("покрытие")
+            if "свойства" not in required:
+                required.append("свойства")
+            if "покрытие" not in required:
+                required.append("покрытие")
+
+        # FIX 2026-05-29 08:30 UTC+3: remove extra capturing group around optional named groups
+        # \(((?P<шаг_резьбы>[xXхХ×]...))\) -> (?P<шаг_резьбы>[xXхХ×]...)
+        pattern = re.sub(
+            r'\(\(\?P<шаг_резьбы>(\[xXхХ×\][^)]+)\)\)',
+            r'(?P<шаг_резьбы>\1)',
+            pattern
+        )
+
         required = [p for p in required if p in params]
         try:
             pattern = re.sub(r"\(?P<[^>]+>\)\?", "", pattern)
