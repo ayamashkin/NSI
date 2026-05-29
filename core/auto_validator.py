@@ -264,7 +264,7 @@ class AutoValidator:
         logger.debug("[AutoValidator] Validating %s/%s against %d examples", standard, item_type, total)
         logger.debug("[AutoValidator] Pattern: %s", pattern[:120] if pattern else "(empty)")
         for ex in examples:
-            result = self._test_pattern(compiled, ex, params, required)
+            result = self._test_pattern(compiled, ex, params, required, standard)
             if result["success"]:
                 success_count += 1
             details.append(result)
@@ -307,8 +307,8 @@ class AutoValidator:
         ex: Dict,
         params: List[str],
         required: List[str],
+        standard: str = "",
     ) -> Dict:
-        """Check one ENS example against regex."""
         meta = ex.get("_meta", {})
         text = meta.get("full_name", meta.get("name", ""))
         if not text:
