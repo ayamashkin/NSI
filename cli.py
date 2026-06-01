@@ -1001,6 +1001,7 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
         return
     stats = {'existing': 0, 'generated': 0, 'activated': 0}
     stats_rows = []
+    validation_rows = []  # FEAT 2026-06-01 21:15: per-example validation details for XLSX
     with click.progressbar(standards.items(), label='Генерация') as bar:
         for (std, itype), examples in bar:
             item_type_normalized = itype.upper()
@@ -1063,6 +1064,16 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
                         auto_score = validation.score
                         is_active = auto_score >= min_score
                         click.echo(f"   🔍 Маска {std}/{itype}: score={auto_score:.2f}, active={is_active}")
+                        # FEAT 2026-06-01 21:15: collect validation details for XLSX
+                        for vd in validation.details:
+                            validation_rows.append({
+                                'стандарт': std,
+                                'тип': itype,
+                                'наименование': vd.get('text', ''),
+                                'результат': 'OK' if vd.get('success') else (vd.get('error') or 'FAIL'),
+                                **(vd.get('expected', {}) or {}),
+                                **(vd.get('extracted', {}) or {}),
+                            })
                     temp_mask = MaskRecord(
                         standard=std, item_type=item_type_normalized,
                         pattern=mask['pattern'], params=mask['params'],
@@ -1112,8 +1123,16 @@ def generate_masks(db, ens_index, standard, item_type, llm, validate, min_score,
         df_stats = pd.DataFrame(stats_rows)
         if 'old_mask_id' not in df_stats.columns:
             df_stats['old_mask_id'] = None
-        df_stats.to_excel(stats_output, index=False)
-        click.echo(f"📊 Статистика сохранена: {stats_output}")
+        # FEAT 2026-06-01 21:15: save validation details as separate sheet
+        if validation_rows:
+            with pd.ExcelWriter(stats_output, engine='openpyxl') as writer:
+                df_stats.to_excel(writer, sheet_name='Summary', index=False)
+                df_val = pd.DataFrame(validation_rows)
+                df_val.to_excel(writer, sheet_name='Validation', index=False)
+            click.echo(f"📊 Статистика сохранена: {stats_output} (Summary + Validation)")
+        else:
+            df_stats.to_excel(stats_output, index=False)
+            click.echo(f"📊 Статистика сохранена: {stats_output}")
 
 @cli.command()
 @click.option('--db', '-d', default='cache/masks.db', help='Путь к БД масок')

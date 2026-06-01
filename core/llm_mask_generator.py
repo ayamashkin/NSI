@@ -1,10 +1,10 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens — data-driven фикс скобок на основе статистики ENS
+# 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: _fix_param_separators — data-driven разделители для всех параметров
+# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens — data-driven скобок на основе статистики ENS
 # 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: _fix_pattern — 7 вариантов разделителя после опционального исполнения
 # 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: правило 5 шаблона — дефис-разделитель )?[-\s]+ вместо \s+
-# 2026-06-01 13:55:25 — ИСПРАВЛЕНИЕ: _load_response_from_file — одинарные кавычки для строк
 # 2026-06-01 13:55:25 — ОТКАТ: возврат к baseline 2026-05-28, удалён сломанный re.sub покрытия
 # =============================================================================
 """
@@ -1383,6 +1383,107 @@ class LLMMaskGenerator:
 
         return pattern
 
+    def _fix_param_separators(self, pattern: str, standard: str, item_type: str) -> str:
+        """Data-driven fix: analyze separators between params in real ENS examples.
+
+        Detects if LLM used wrong separator (e.g. \\s+ instead of [-
+        when examples consistently use hyphens.
+        """
+        try:
+            examples = self._get_ens_examples(standard, item_type, max_examples=50)
+        except Exception:
+            return pattern
+
+        if not examples:
+            return pattern
+
+        # Extract all named group names from pattern
+        group_names = re.findall(r'\?P<([^>]+)>', pattern)
+        if not group_names:
+            return pattern
+
+        for param_name in group_names:
+            if param_name in self.SKIP_PARAMS | self._SKIP_META_PARAMS:
+                continue
+
+            # Collect separators found before this param in real examples
+            sep_stats = Counter()
+            for ex in examples:
+                name = ex.get("_meta", {}).get("name", "")
+                val = ex.get(param_name)
+                if val is None or str(val).strip() == "":
+                    continue
+                val_str = str(val).strip()
+                # Find value position in name
+                pos = name.find(val_str)
+                if pos < 0:
+                    # Try normalized search
+                    val_norm = val_str.lower().replace(',', '.')
+                    name_norm = name.lower().replace(',', '.')
+                    pos = name_norm.find(val_norm)
+                if pos > 0:
+                    sep = name[pos - 1]
+                    if sep in ' \t':
+                        sep_stats['space'] += 1
+                    elif sep == '-':
+                        sep_stats['hyphen'] += 1
+                    elif sep in 'xXхХ×':
+                        sep_stats['x'] += 1
+                    elif sep == '.':
+                        sep_stats['dot'] += 1
+                    elif sep == '/':
+                        sep_stats['slash'] += 1
+
+            if not sep_stats:
+                continue
+
+            total = sum(sep_stats.values())
+            dominant_sep = sep_stats.most_common(1)[0]
+            sep_name, sep_count = dominant_sep
+            ratio = sep_count / total
+
+            if ratio < 0.8:
+                continue  # Not consistent enough
+
+            # Find current separator before this param in pattern
+            # Look for the group in pattern and check what precedes it
+            group_pattern = f'(?P<{param_name}>'
+            gpos = pattern.find(group_pattern)
+            if gpos < 0:
+                continue
+
+            # Check what separator is used right before the group
+            prefix = pattern[:gpos]
+            # Common separator patterns: \\s+, [-\\s]+, \\s*, [xXхХ×], \\.
+            current_sep = None
+            if prefix.rstrip().endswith('[-\\s]+'):
+                current_sep = 'flex'
+            elif prefix.rstrip().endswith('\\s+'):
+                current_sep = 'space'
+            elif prefix.rstrip().endswith('\\s*'):
+                current_sep = 'space_opt'
+            elif prefix.rstrip().endswith('[-\\s]*'):
+                current_sep = 'flex_opt'
+
+            # Determine what separator should be used
+            if sep_name == 'hyphen' and current_sep == 'space':
+                # Change \\s+ to [-\\s]+ before this param
+                last_splus = prefix.rfind('\\s+')
+                if last_splus >= 0:
+                    pattern = pattern[:last_splus] + '[-\\\\s]+' + pattern[last_splus + 3:]
+                    logger.debug("[_fix_param_separators] %s/%s: \\s+ to hyph-flex before %s (%d%% hyphens)",
+                                 standard, item_type, param_name, int(ratio * 100))
+            elif sep_name == 'x' and current_sep in ('space', 'flex'):
+                # Should use [xXхХ×] instead of flex for params like шаг_резьбы
+                if 'шаг_резьбы' in param_name or 'шаг' in param_name:
+                    last_flex = prefix.rfind('[-\\s]+')
+                    if last_flex >= 0:
+                        pattern = pattern[:last_flex] + '[xXхХ×]' + pattern[last_flex + 6:]
+                        logger.debug("[_fix_param_separators] %s/%s: flex to x-sep before %s (%d%% x)",
+                                     standard, item_type, param_name, int(ratio * 100))
+
+        return pattern
+
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
         # FIX: normalize double-escaped regex sequences
 
@@ -1410,6 +1511,9 @@ class LLMMaskGenerator:
         # FIX 2026-06-01 21:00 UTC+3: data-driven fix for execution parentheses
         # Analyzes real ENS examples to determine: mandatory parens, optional, or bare
         pattern = self._fix_execution_parens(pattern, standard, item_type)
+
+        # FIX 2026-06-01 21:15 UTC+3: data-driven separator correction for all params
+        pattern = self._fix_param_separators(pattern, standard, item_type)
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
