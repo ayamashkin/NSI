@@ -1,8 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/auto_validator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: TokenParser fallback — гибридный парсер когда regexp не матчит
+# 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: _preprocess_bare_execution — скобки к bare-исполнению
 # 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: таблица валидации теперь выводится при 0% match (NO MATCH), + XLSX лист
-# 2026-06-01 21:15:00 — ДОБАВЛЕНИЕ: expected-параметры сохраняются при NO MATCH для таблицы и XLSX
 # 2026-05-29 13:30:00 — FEAT: GOST7795Normalizer для .029→покрытие+толщина, .46→группа_прочности
 # 2026-05-29 13:30:00 — ИСПРАВЛЕНИЕ: _find_expected_key twin mapping свойства↔группа_прочности
 # 2026-05-28 21:06:00 — ИСПРАВЛЕНИЕ: _print_summary_table с ENS/Mask значениями
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.standard_utils import canonicalize_standard
+from core.token_parser import TokenParser
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ class AutoValidator:
         self._all_domain_indices: Optional[Dict[str, Dict]] = None
         self._skip_params = self._build_skip_params()
         self._loose_fields = self._build_loose_fields()
+        self._token_parser = TokenParser()
         self._twin_groups = self._build_twin_groups()
 
     @staticmethod
@@ -259,8 +262,9 @@ class AutoValidator:
         details = []
         logger.debug("[AutoValidator] Validating %s/%s against %d examples", standard, item_type, total)
         logger.debug("[AutoValidator] Pattern: %s", pattern[:120] if pattern else "(empty)")
+        optional_params = set(params) - set(required)
         for ex in examples:
-            result = self._test_pattern(compiled, ex, params, required, standard)
+            result = self._test_pattern(compiled, ex, params, required, standard, optional_params, item_type)
             if result["success"]:
                 success_count += 1
             details.append(result)
@@ -304,6 +308,8 @@ class AutoValidator:
         params: List[str],
         required: List[str],
         standard: str = "",
+        optional_params: set = None,
+        item_type: str = "",
     ) -> Dict:
         meta = ex.get("_meta", {})
         text = meta.get("full_name", meta.get("name", ""))
@@ -320,6 +326,34 @@ class AutoValidator:
         param_results: Dict[str, str] = {}
 
         if not match:
+            # FEAT 2026-06-01 22:00: fallback to TokenParser when regex fails
+            if optional_params and item_type and hasattr(self, '_token_parser'):
+                token_result = self._token_parser.parse(
+                    text, standard, item_type, params, optional_params
+                )
+                if token_result:
+                    logger.debug("[AutoValidator] TokenParser fallback for: %s", text[:50])
+                    for param in params:
+                        if param in skip_params:
+                            continue
+                        val = token_result.get(param)
+                        best_exp_key, _ = self._find_expected_key(param, ex)
+                        expected_val = ex.get(best_exp_key) if best_exp_key else None
+                        extracted_val = val
+                        if val is not None and isinstance(val, str):
+                            try:
+                                fval = float(val)
+                                extracted_val = int(fval) if fval == int(fval) else fval
+                            except ValueError:
+                                extracted_val = val
+                        param_results[param] = {
+                            "matched": val is not None,
+                            "extracted": extracted_val,
+                            "expected": expected_val,
+                        }
+                    return {"success": True, "error": None, "text": text, "example": ex,
+                            "token_parsed": True, "param_results": param_results}
+
             expected_info = []
             for param in required:
                 if param in skip_params:
