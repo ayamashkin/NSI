@@ -1,12 +1,12 @@
 # =============================================================================
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
-# LAST 5 COMMITS (UTC+3):
-# 2026-05-29 13:06:00 — FIX: _default_template rules 3,5,8,11 updated per other LLM recommendations
-# 2026-05-29 12:15:00 — FEAT: generate_mask supports responses_dir for loading LLM answers from txt files
-# 2026-05-29 12:15:00 — FEAT: generate_mask supports responses_dir for loading LLM answers from txt files
-# 2026-05-29 12:15:00 — FIX: _parse_mask_response strips <think> sections before JSON parsing
+# LAST 5 CHANGES (UTC+3):
+# 2026-06-01 13:55:25 — FIX: _load_response_from_file string literals (split/join) use single quotes to avoid newline breaks
+# 2026-06-01 13:55:25 — RESTORE: reverted to 2026-05-28 baseline; removed broken re.sub for покрытие (bad escape \s)
+# 2026-06-01 16:50:00 — RESTORE: removed text-wiping re.sub(r"\s*.*", ...) from _parse_mask_response
 # 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
+# 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -207,20 +207,26 @@ class LLMMaskGenerator:
             for tok in tokens:
                 if tok in name_lower:
                     return True
-            prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
-            if prefix and prefix.group(1) in name_lower:
-                return True
+        prefix = re.match(r"^([a-zA-Zа-яА-Я]+)", val_str)
+        if prefix and prefix.group(1) in name_lower:
+            return True
         # FIX 2026-05-28 20:45 UTC+3: check word boundaries so "2" doesn't match inside "26", "31509", "80"
         if "." in val_str and val_str.endswith(".0"):
             int_part = val_str[:-2]
-            if int_part and re.search(r'(?<![0-9])' + re.escape(int_part) + r'(?![0-9])', name_lower):
+            if int_part and re.search(r'(?<!\d)' + re.escape(int_part) + r'(?!\d)', name_lower):
                 return True
-        elif re.search(r'(?<![0-9])' + re.escape(val_str) + r'(?![0-9])', name_lower):
-            return True
+        if re.match(r"^\d+[a-zA-Zа-яА-Я]+$", val_str):
+            if val_str in name_lower:
+                return True
+        m_match = re.match(r"^[мm](\d+(?:[.,]\d+)?)$", val_raw, re.IGNORECASE)
+        if m_match:
+            num = m_match.group(1)
+            if num.lower() in name_lower:
+                return True
         return False
 
     @staticmethod
-    def _normalize_value_for_comparison(val) -> str:
+    def _normalize_value_for_comparison(val: str) -> str:
         """Normalize value string for ambiguity detection.
 
         Removes formatting differences (spaces, dashes, underscores, comma/dot)
@@ -295,7 +301,7 @@ class LLMMaskGenerator:
             ratio = count / total
             if ratio >= threshold:
                 required.add(key)
-            elif ratio >= 0.05:  # FIX: lowered from 0.20 to catch rare params like исполнение
+            elif ratio >= 0.05: # FIX: lowered from 0.20 to catch rare params like исполнение
                 optional.add(key)
         return required, optional
 
@@ -460,8 +466,8 @@ class LLMMaskGenerator:
                     m = re.search(r"[a-zA-Zа-яА-Я0-9]+", val_str)
                     if m:
                         pos = name.lower().find(m.group().lower())
-                    if pos < 0:
-                        pos = 999
+                if pos < 0:
+                    pos = 999
                 visible_list.append((key, val_str, pos))
             visible_list.sort(key=lambda x: x[2])
 
@@ -484,16 +490,16 @@ class LLMMaskGenerator:
             lines.append(f'{i}. Исходное: "{name}"')
             if visible_list:
                 vis_str = " ".join([f"(?P<{k}>{v})" for k, v, _ in visible_list])
-                lines.append(f" Видимые в строке: {vis_str}")
+                lines.append(f"   Видимые в строке: {vis_str}")
             if ambiguous_keys:
                 amb_items = [(k, resolved[k]) for k in sorted(ambiguous_keys)]
                 amb_str = " ".join([f"(?P<{k}>{v})" for k, v in amb_items])
-                lines.append(f" Неоднозначные: {amb_str}")
+                lines.append(f"   Неоднозначные: {amb_str}")
             if missing_list:
-                lines.append(f" Отсутствуют: {', '.join(missing_list)}")
+                lines.append(f"   Отсутствуют: {', '.join(missing_list)}")
             if meta_list:
                 meta_str = ", ".join([f"{k}={v}" for k, v in meta_list])
-                lines.append(f" Метаданные БД: {meta_str}")
+                lines.append(f"   Метаданные БД: {meta_str}")
             lines.append("")
 
         # Statistics block (inspired by old prompt)
@@ -502,7 +508,7 @@ class LLMMaskGenerator:
         for key in sorted(global_visible):
             count = param_counts.get(key, 0)
             lines.append(
-                f" {key}: {count} из {total_unambiguous} ({count / total_unambiguous * 100:.0f}%) — видим в строке")
+                f"  {key}: {count} из {total_unambiguous} ({count / total_unambiguous * 100:.0f}%) — видим в строке")
         # Meta-data stats
         meta_counts: Dict[str, int] = {}
         for ex, _ in unambiguous:
@@ -517,10 +523,10 @@ class LLMMaskGenerator:
                 meta_counts[k] = meta_counts.get(k, 0) + 1
         if meta_counts:
             lines.append("")
-            lines.append(" --- Метаданные БД (не для regex) ---")
+            lines.append("  --- Метаданные БД (не для regex) ---")
             for key, count in sorted(meta_counts.items()):
-                lines.append(f" {key}: {count} из {total_unambiguous} — [в БД, не в строке]")
-            lines.append("")
+                lines.append(f"  {key}: {count} из {total_unambiguous} — [в БД, не в строке]")
+        lines.append("")
 
         return "\n".join(lines)
 
@@ -584,20 +590,19 @@ class LLMMaskGenerator:
 
 {examples_text}
 
-=== ПРАВИЛА (12 штук) ===
+=== ПРАВИЛА (11 штук) ===
 
 1. **Тип изделия — ЛИТЕРАЛ, не named group**. Начинай паттерн с ^Болт, ^Винт, ^Шайба или ^Гайка. НЕ используй (?P<тип_изделия>Болт) и НЕ (?P<наименование_1>Болт).
 2. **Разделители — гибкие, но обязательный перед нтд_1**. Между параметрами используй `[-\s]+` (дефис или пробел). Если параметры слитные (M6, 22х1,5), не вставляй разделитель между ними. Перед нтд_1 ОБЯЗАТЕЛЬНО ставь `[-\s]+`. НЕ используй `\s*` или `\s+` перед нтд_1.
-3. **Слитные параметры**: "M6" → `M(?P<номинальный_диаметр_резьбы>\d+)`. "22х1,5" → `(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)` — это ДВЕ РАЗНЫЕ named groups, НЕ duplicate. Если шаг опционален: `(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?`.
+3. **Слитные параметры**: "M6" → `M(?P<номинальный_диаметр_резьбы>\d+)`. "22х1,5" → `(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)`.
 4. **Порядок групп**: тип → исполнение → числовые параметры → покрытие → нтд_1.
-5. **Исполнение опциональное**: включай ТОЛЬКО если в примерах есть хотя бы один пример с исполнением. Если исполнение ВСЕГДА в скобках (например, "(6)"), используй `(?:[-\s]+\((?P<исполнение>\d+)\))?` — скобки ОБЯЗАТЕЛЬНЫ, иначе `\d+` съест диаметр. Если скобок нет — `(?:[-\s]+(?P<исполнение>\d+))?`. НЕ пиши `\(?P<` — это сломает regex.
-6. **Покрытие**: `[\w.]+`. Между покрытием и предыдущим параметром (длина/диаметр) — ВСЕГДА `[-\s]+`, НЕ `\.`! После покрытия ОБЯЗАТЕЛЬНО `[-\s]+` перед нтд_1. Покрытие НЕ должно включать "ОСТ" или "ГОСТ".
+5. **Исполнение опциональное**: `(?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?`. Используй `(?:\()?` для опциональной скобки. НЕ пиши `\(?P<` — это сломает regex.
+6. **Покрытие**: `[\w.]+`. После покрытия ОБЯЗАТЕЛЬНО `[-\s]+` перед нтд_1. Покрытие НЕ должно включать "ОСТ" или "ГОСТ".
 7. **НТД_1**: `[-\s]+(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `[-\s]+(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
-8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<name>(?P<name2>...))`. НЕТ duplicate group names — одно имя `(?P<name>)` нельзя использовать дважды. Для опционального параметра (шаг резьбы) используй ОПЦИОНАЛЬНУЮ named group внутри основной: `(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+))?` — это НЕ duplicate, это две РАЗНЫЕ группы.
+8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<name>(?P<name2>...))`.
 9. **Блок "длина.свойства.покрытие" (ГОСТ 7795-70)**: Это ТРИ ОТДЕЛЬНЫХ целых числа через точку. Правильно: `(?P<длина>\d+)\.(?P<свойства>\d+)\.(?P<покрытие>\d+)`. Неправильно: `\d+(?:[.,]\d+)?` для длины — жадно сожрет все три числа.
 10. **Точка в номенклатуре**: Точка может быть десятичной (12.5 мм) или разделителем (45.46.019). Анализируй примеры: если после точки ровно 2 цифры-кода — это разделитель. При сомнении разделяй: `(?P<длина>\d+)\.(?P<покрытие>\d+)`, а не `(?P<длина>\d+(?:[.,]\d+)?)`.
-11. **Опциональные параметры — без duplicate group names**: Если параметр опционален (например, шаг резьбы), используй опциональную named group внутри основной: `(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?))?`. Это НЕ duplicate — это две РАЗНЫЕ группы. НЕ дублируй ОДНО имя `(?P<name>)` в разных ветках альтернативы `|`.
-12. **Разделитель перед покрытием — ВСЕГДА дефис/пробел**: Покрытие типа `Кд3.фос.окс` или `Ц3.хр` содержит точки ВНУТРИ значения. Разделитель между последним числовым параметром (длина/диаметр) и покрытием — это `[-\s]+`, НЕ `\.`! Правильно: `(?P<длина>\d+(?:[.,]\d+)?)[-\s]+(?P<покрытие>[\w.]+)`. Неправильно: `(?P<длина>\d+(?:[.,]\d+)?)\.(?P<покрытие>[\w.]+)`.
+11. **НЕ используй неявные параметры**: НЕ создавай группу `тип_резьбы` со значением "M", если "M" нет в строке. НЕ создавай `марка_материала`, `номинальный_диаметр_резьбы` если их нет в наименовании (смотри Метаданные БД).
 
 === ЗАПРЕЩЁННЫЕ ПАРАМЕТРЫ ===
 
@@ -707,7 +712,7 @@ class LLMMaskGenerator:
 # Температура: {temperature}
 # Время: {datetime.now().isoformat()}
 # =================================================="""
-        prompt = header + '\n' + template + task_section + format_section
+        prompt = header + "\n" + template + task_section + format_section
         return prompt
 
     def _extract_visible_params(self, examples: List[Dict]) -> List[str]:
@@ -747,6 +752,48 @@ class LLMMaskGenerator:
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to save prompt: %s", e)
 
+    def _load_response_from_file(self, responses_dir: Path, standard: str, item_type: str, attempt: int = 1) -> Optional[str]:
+        """Load raw LLM response from saved txt file (debug format with header).
+
+        FEAT 2026-05-29 12:15 UTC+3: supports loading pre-generated responses for validation
+        without calling LLM API. Handles both OpenWebUI (thinking sections) and MTS AI formats.
+        """
+        # Try multiple filename patterns
+        std_safe = standard.replace(" ", "_")
+        candidates = [
+            responses_dir / f"{item_type}_{standard}_a{attempt}.txt",
+            responses_dir / f"{item_type}_{std_safe}_a{attempt}.txt",
+            responses_dir / f"{item_type}_{standard}.txt",
+            responses_dir / f"{item_type}_{std_safe}.txt",
+        ]
+        path = None
+        for c in candidates:
+            if c.exists():
+                path = c
+                break
+        if not path:
+            return None
+        try:
+            content_file = path.read_text(encoding="utf-8")
+            # Skip header lines (lines starting with #)
+            lines_file = content_file.split('\n')
+            raw_lines = []
+            in_header = True
+            for line in lines_file:
+                if in_header and line.startswith("#"):
+                    continue
+                if in_header and line.strip() == "":
+                    in_header = False
+                    continue
+                in_header = False
+                raw_lines.append(line)
+            raw_text = '\n'.join(raw_lines).strip()
+            logger.info("[LLMMaskGenerator] Loaded response from file: %s (len=%d)", path.name, len(raw_text))
+            return raw_text
+        except Exception as e:
+            logger.warning("[LLMMaskGenerator] Failed to load response from %s: %s", path, e)
+            return None
+
     def _save_debug_response(self, standard: str, item_type: str, response: str,
                              service: str, attempt: int) -> None:
         base_dir = self._get_debug_dir()
@@ -775,7 +822,7 @@ class LLMMaskGenerator:
                 "",
                 raw_content,
             ]
-            path.write_text('\n'.join(lines), encoding='utf-8')
+            path.write_text("\n".join(lines), encoding='utf-8')
             logger.debug("[LLMMaskGenerator] Response saved to %s", path)
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to save response: %s", e)
@@ -815,48 +862,6 @@ class LLMMaskGenerator:
             logger.info("[LLMMaskGenerator] %s/%s -> %s (validation=%s)", standard, item_type, subfolder, is_good)
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to copy to good/bad: %s", e)
-
-    def _load_response_from_file(self, responses_dir: Path, standard: str, item_type: str, attempt: int = 1) -> Optional[str]:
-        """Load raw LLM response from saved txt file (debug format with header).
-
-        FEAT 2026-05-29 12:15 UTC+3: supports loading pre-generated responses for validation
-        without calling LLM API. Handles both OpenWebUI (<think> sections) and MTS AI formats.
-        """
-        # Try multiple filename patterns
-        std_safe = standard.replace(" ", "_")
-        candidates = [
-            responses_dir / f"{item_type}_{standard}_a{attempt}.txt",
-            responses_dir / f"{item_type}_{std_safe}_a{attempt}.txt",
-            responses_dir / f"{item_type}_{standard}.txt",
-            responses_dir / f"{item_type}_{std_safe}.txt",
-        ]
-        path = None
-        for c in candidates:
-            if c.exists():
-                path = c
-                break
-        if not path:
-            return None
-        try:
-            content = path.read_text(encoding="utf-8")
-            # Skip header lines (lines starting with #)
-            lines_file = content.split('\n')
-            raw_lines = []
-            in_header = True
-            for line in lines_file:
-                if in_header and line.startswith("#"):
-                    continue
-                if in_header and line.strip() == "":
-                    in_header = False
-                    continue
-                in_header = False
-                raw_lines.append(line)
-            raw_text = '\n'.join(raw_lines).strip()
-            logger.info("[LLMMaskGenerator] Loaded response from file: %s (len=%d)", path.name, len(raw_text))
-            return raw_text
-        except Exception as e:
-            logger.warning("[LLMMaskGenerator] Failed to load response from %s: %s", path, e)
-            return None
 
     def generate_mask(
         self,
@@ -1025,10 +1030,10 @@ class LLMMaskGenerator:
                     text = str(response)
                 if text and len(text) > 10:
                     tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens",
-                                                                                          0)
+                                                                                        0)
                     tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client,
-                                                                                                "_last_completion_tokens",
-                                                                                                0)
+                                                                                                  "_last_completion_tokens",
+                                                                                                  0)
                     logger.debug("[LLMMaskGenerator] %s returned text (len=%d)", client_type, len(text))
                     return {
                         "text": text,
@@ -1093,7 +1098,7 @@ class LLMMaskGenerator:
             if i >= len(text):
                 return None
             raw = text[quote + 1:i]
-            # Decode JSON string escapes: \ -> \, \" -> ", -> newline, etc.
+            # Decode JSON string escapes: \\ -> \, \\" -> ", \n -> newline, etc.
             try:
                 decoded = json.loads('"' + raw + '"')
                 return decoded
@@ -1145,13 +1150,7 @@ class LLMMaskGenerator:
             logger.debug("[LLMMaskGenerator] _parse_mask_response: empty text")
             return None
 
-        # FIX 2026-05-29 12:15 UTC+3: strip <think> and other reasoning sections
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
-        text = re.sub(r"\s*<think>.*", "", text, flags=re.DOTALL)
-        text = text.strip()
-
-        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         logger.debug("[LLMMaskGenerator] _parse_mask_response: text len=%d", len(text))
 
         data = None
@@ -1230,7 +1229,7 @@ class LLMMaskGenerator:
 
         # Stage 4: brace scanner
         if data is None:
-            for start_match in re.finditer(r"(?m)^[ 	]*\{", text):
+            for start_match in re.finditer(r"(?m)^[ \t]*\{", text):
                 pos = start_match.start()
                 brace_count = 0
                 in_string = False
@@ -1250,18 +1249,18 @@ class LLMMaskGenerator:
                             brace_count += 1
                         elif ch == "}":
                             brace_count -= 1
-                        if brace_count == 0:
-                            candidate = text[pos:i + 1]
-                            try:
-                                data = json.loads(candidate)
-                                logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
-                            except json.JSONDecodeError:
+                            if brace_count == 0:
+                                candidate = text[pos:i + 1]
                                 try:
-                                    import yaml
-                                    data = yaml.safe_load(candidate)
-                                except Exception:
-                                    pass
-                            break
+                                    data = json.loads(candidate)
+                                    logger.debug("[LLMMaskGenerator] Parsed via brace scanner")
+                                except json.JSONDecodeError:
+                                    try:
+                                        import yaml
+                                        data = yaml.safe_load(candidate)
+                                    except Exception:
+                                        pass
+                                break
                     if data is not None:
                         break
 
@@ -1299,7 +1298,7 @@ class LLMMaskGenerator:
             return None
 
         if not params:
-            params = re.findall(r'\?P<([^>]+)>', pattern)
+            params = re.findall(r"\?P<([^>]+)>", pattern)
             logger.debug("[LLMMaskGenerator] Extracted params from pattern: %s", params)
 
         if not required:
@@ -1316,28 +1315,22 @@ class LLMMaskGenerator:
         return self._sanitize_mask_result(result)
 
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
-        # FIX 2026-05-29 13:06 UTC+3: remove \$ artifacts from LLM reasoning
-        pattern = pattern.replace(r"(\$)?", "")
-        pattern = pattern.replace(r"\$", "")
-        pattern = pattern.replace(r"(\\\$)?", "")
         # FIX: normalize double-escaped regex sequences
 
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
-        pattern = re.sub(r'\s+\[-\\s\]+', lambda m: r'[-\s]+', pattern)
-        pattern = re.sub(r'\[-\\s\]+\s+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\s+\[-\s\]\+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\[-\s\]\+\s+', lambda m: r'[-\s]+', pattern)
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
-        pattern = pattern.replace(')?(?P<<', ')?(?:[-\\s]+)?(?P<<')
+        pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
 
-        # FIX 2026-06-01 11:55 UTC+3: auto-fix dot separator before покрытие -> [-\s]+
-        # LLM sometimes generates \.(?P<покрытие>...) because coating values contain dots (Кд3.фос.окс)
-        # But the actual separator in text is always hyphen or space.
+        # FIX 2026-06-01 17:05 UTC+3: after optional execution block, ensure [-\s]+ separator before first param
+        # LLM generates (?:\s*(?P<name>...) which fails when execution is present with hyphen separator like "(2)-9"
         pattern = re.sub(
-            r'\\.\(\?P<покрытие>',
-            r'[-\s]+(?P<покрытие>',
-            pattern,
+            r'\(\?:\\s\*\(\?P<исполнение>\d+\)\)\?\(\?:\\s\*\(\?P<([^>]+)>',
+            lambda m: rf'(?:\s*\(?P<исполнение>\d+\)\))?(?:[-\s]+\(?P<{m.group(1)}>',
+            pattern
         )
-        logger.debug("[LLMMaskGenerator] _fix_pattern: applied dot->separator fix for покрытие")
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
@@ -1354,22 +1347,24 @@ class LLMMaskGenerator:
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
         if "7795-70" in standard:
-            try:
-                pattern = re.sub(
-                    r"(?P<класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*(?P<длина>\d+)",
-                    r"(?P<класс_допуска>\d+[a-z])[xXхХ×][-\s]*(?P<длина>\d+)",
-                    pattern
-                )
-            except re.error as e:
-                logger.debug("[LLMMaskGenerator] _fix_pattern 7795-70 regex fix skipped: %s", e)
-        pattern = pattern.replace(r"\d", r"\d").replace(r"\s", r"\s").replace(r"\w", r"\w")
+            pattern = re.sub(
+                r'(класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*\(?P<длина>)',
+                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
+                pattern
+            )
+            pattern = re.sub(
+                r'(класс_допуска>\d+[a-z]\)?)\s*\[-\s\]\+\s*\(?P<длина>)',
+                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
+                pattern
+            )
+        pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(r"\(?P<нтд_1>\d+[^\)]*\)", f"(?P<нтд_1>{re.escape(standard)})", pattern)
         if "ГОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
             pattern = re.sub(r"\(?P<нтд_1>\d+[^\)]*\)", f"(?P<нтд_1>{re.escape(standard)})", pattern)
-        if r"\|" in pattern:
-            pattern = pattern.replace(r"\|", "|")
+        if r"\\|" in pattern:
+            pattern = pattern.replace(r"\\|", "|")
         if "наименование_типа" in pattern and "тип_изделия" not in pattern:
             pattern = pattern.replace("наименование_типа", "тип_изделия")
         nested_fix = re.sub(
@@ -1390,7 +1385,7 @@ class LLMMaskGenerator:
                 break
             pattern = new_pattern
         # Fix dots in named group names (e.g., наименование.1 -> наименование_1)
-        pattern = re.sub(r'\?P<([a-zA-Zа-яА-Я0-9_]+)\.(\d+)>', r'?P<_>', pattern)
+        pattern = re.sub(r'\?P<([a-zA-Zа-яА-Я0-9_]+)\.(\d+)>', r'?P<\1_\2>', pattern)
         return pattern
 
     def _sanitize_mask_result(self, result: MaskGenerationResult) -> MaskGenerationResult:
@@ -1400,7 +1395,7 @@ class LLMMaskGenerator:
         pattern = result.pattern
 
         # FIX: normalize double-escaped regex sequences
-        pattern = pattern.replace(r"\d", r"\d").replace(r"\s", r"\s").replace(r"\w", r"\w")
+        pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         # FIX 2026-05-28 18:45 UTC+3: remove duplicate named groups (Python re forbids them)
         group_names = re.findall(r'\(\?P<([^>]+)>', pattern)
@@ -1417,7 +1412,7 @@ class LLMMaskGenerator:
                     return '(?:'
 
                 pattern = re.sub(rf'\(\?P<{re.escape(name)}>', _repl, pattern)
-                logger.debug("[LLMMaskGenerator] Removed duplicate groups: %s", dupes)
+            logger.debug("[LLMMaskGenerator] Removed duplicate groups: %s", dupes)
 
         # FIX: remove LLM-invented наименование_1 meta-field
         if "наименование_1" in params:
