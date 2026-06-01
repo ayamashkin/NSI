@@ -1529,6 +1529,10 @@ class LLMMaskGenerator:
         return pattern
 
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
+        # FIX 2026-06-02: decode Unicode escapes LLM may emit in JSON (\u003C → <)
+        pattern = pattern.replace('\\u003C', '<').replace('\\u003c', '<')
+        pattern = pattern.replace('\\u003E', '>').replace('\\u003e', '>')
+
         # FIX: normalize double-escaped regex sequences
 
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
@@ -1569,6 +1573,10 @@ class LLMMaskGenerator:
         text_fields = {"покрытие", "покрытие_1", "тип_изделия", "наименование", "стандарт", "нтд", "нтд_1", "нтд_2"}
         for group_name in re.findall(r'\?P<([^>]+)>', pattern):
             if group_name in {"исполнение", "variant", "количество"} | text_fields:
+                continue
+            # FIX 2026-06-02: skip corrupted group names (e.g. from Unicode escapes \u003C)
+            if not group_name or group_name.startswith('<') or '<' in group_name or ' ' in group_name:
+                logger.warning("[LLMMaskGenerator] Skipping corrupted group name: %r", group_name)
                 continue
             # Look for the group pattern in the string
             old_group = fr'(?P<{group_name}>\d+)'
