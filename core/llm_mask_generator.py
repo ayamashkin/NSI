@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: скобки вокруг исполнения теперь опциональные — "Винт (1)-" и "Винт 1-" оба работают
+# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens — data-driven фикс скобок на основе статистики ENS
 # 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: _fix_pattern — 7 вариантов разделителя после опционального исполнения
 # 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: правило 5 шаблона — дефис-разделитель )?[-\s]+ вместо \s+
 # 2026-06-01 13:55:25 — ИСПРАВЛЕНИЕ: _load_response_from_file — одинарные кавычки для строк
@@ -25,6 +25,7 @@ from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class MaskGenerationResult:
     pattern: str = ""
@@ -45,6 +46,7 @@ class MaskGenerationResult:
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
 
+
 class LLMMaskGenerator:
     """Generator of masks via LLM with domain ENS index."""
 
@@ -55,12 +57,12 @@ class LLMMaskGenerator:
     }
 
     def __init__(
-        self,
-        clients: Dict[str, Any],
-        settings: Any = None,
-        max_retries: int = 3,
-        domain: str = "hardware",
-        ens_index_path: Optional[str] = None,
+            self,
+            clients: Dict[str, Any],
+            settings: Any = None,
+            max_retries: int = 3,
+            domain: str = "hardware",
+            ens_index_path: Optional[str] = None,
     ):
         self.clients = clients
         self.settings = settings
@@ -238,10 +240,10 @@ class LLMMaskGenerator:
         return v
 
     def _filter_unambiguous(
-        self,
-        examples: List[Dict],
-        twin_groups: List[List[str]],
-        standard: str = "",
+            self,
+            examples: List[Dict],
+            twin_groups: List[List[str]],
+            standard: str = "",
     ) -> Tuple[List[Tuple[Dict, Dict[str, str]]], List[Tuple[Dict, Dict[str, str]]]]:
         unambiguous = []
         ambiguous = []
@@ -283,9 +285,9 @@ class LLMMaskGenerator:
         return unambiguous, ambiguous
 
     def _get_global_visible(
-        self,
-        unambiguous: List[Tuple[Dict, Dict[str, str]]],
-        threshold: float = 0.85,
+            self,
+            unambiguous: List[Tuple[Dict, Dict[str, str]]],
+            threshold: float = 0.85,
     ) -> Tuple[set, set]:
         if not unambiguous:
             return set(), set()
@@ -300,14 +302,14 @@ class LLMMaskGenerator:
             ratio = count / total
             if ratio >= threshold:
                 required.add(key)
-            elif ratio >= 0.05: # FIX: lowered from 0.20 to catch rare params like исполнение
+            elif ratio >= 0.05:  # FIX: lowered from 0.20 to catch rare params like исполнение
                 optional.add(key)
         return required, optional
 
     def _format_stats(
-        self,
-        unambiguous: List[Tuple[Dict, Dict[str, str]]],
-        global_visible: set,
+            self,
+            unambiguous: List[Tuple[Dict, Dict[str, str]]],
+            global_visible: set,
     ) -> str:
         if not unambiguous:
             return "(no data)"
@@ -384,12 +386,12 @@ class LLMMaskGenerator:
     _SKIP_META_PARAMS = {"нтд_1", "тип_изделия", "наименование", "стандарт", "код", "нтд", "нтд_2", "наименование_1"}
 
     def _format_examples(
-        self,
-        examples: List[Dict],
-        standard: str,
-        item_type: str,
-        unambiguous: List[Tuple[Dict, Dict[str, str]]],
-        global_visible: set,
+            self,
+            examples: List[Dict],
+            standard: str,
+            item_type: str,
+            unambiguous: List[Tuple[Dict, Dict[str, str]]],
+            global_visible: set,
     ) -> str:
         if not examples or not unambiguous:
             return "(нет примеров)"
@@ -751,7 +753,8 @@ class LLMMaskGenerator:
         except Exception as e:
             logger.debug("[LLMMaskGenerator] Failed to save prompt: %s", e)
 
-    def _load_response_from_file(self, responses_dir: Path, standard: str, item_type: str, attempt: int = 1) -> Optional[str]:
+    def _load_response_from_file(self, responses_dir: Path, standard: str, item_type: str, attempt: int = 1) -> \
+    Optional[str]:
         """Load raw LLM response from saved txt file (debug format with header).
 
         FEAT 2026-05-29 12:15 UTC+3: supports loading pre-generated responses for validation
@@ -863,13 +866,13 @@ class LLMMaskGenerator:
             logger.debug("[LLMMaskGenerator] Failed to copy to good/bad: %s", e)
 
     def generate_mask(
-        self,
-        standard: str,
-        item_type: str,
-        examples: Optional[List[Dict]] = None,
-        name: str = "",
-        standard_info: Any = None,
-        responses_dir: Optional[str] = None,
+            self,
+            standard: str,
+            item_type: str,
+            examples: Optional[List[Dict]] = None,
+            name: str = "",
+            standard_info: Any = None,
+            responses_dir: Optional[str] = None,
     ) -> Tuple[Optional[MaskGenerationResult], Optional[Dict]]:
         canon_std = canonicalize_standard(standard)
         if examples is None:
@@ -1031,8 +1034,8 @@ class LLMMaskGenerator:
                     tokens_prompt = getattr(client, "last_tokens_prompt", 0) or getattr(client, "_last_prompt_tokens",
                                                                                         0)
                     tokens_completion = getattr(client, "last_tokens_completion", 0) or getattr(client,
-                                                                                                  "_last_completion_tokens",
-                                                                                                  0)
+                                                                                                "_last_completion_tokens",
+                                                                                                0)
                     logger.debug("[LLMMaskGenerator] %s returned text (len=%d)", client_type, len(text))
                     return {
                         "text": text,
@@ -1135,15 +1138,15 @@ class LLMMaskGenerator:
         return {"pattern": raw_pattern, "params": params, "required": required}
 
     def _parse_mask_response(
-        self,
-        text: str,
-        standard: str,
-        item_type: str,
-        service: str = "",
-        model: str = "",
-        temperature: float = 0.0,
-        tokens_prompt: int = 0,
-        tokens_completion: int = 0,
+            self,
+            text: str,
+            standard: str,
+            item_type: str,
+            service: str = "",
+            model: str = "",
+            temperature: float = 0.0,
+            tokens_prompt: int = 0,
+            tokens_completion: int = 0,
     ) -> Optional[MaskGenerationResult]:
         if not text:
             logger.debug("[LLMMaskGenerator] _parse_mask_response: empty text")
@@ -1313,6 +1316,73 @@ class LLMMaskGenerator:
         )
         return self._sanitize_mask_result(result)
 
+    def _fix_execution_parens(self, pattern: str, standard: str, item_type: str) -> str:
+        """Data-driven fix: determine execution parentheses format from real ENS examples.
+
+        If ≥90% examples have parentheses → mandatory \((?P<...>\d+)\)
+        If mixed → optional (?:\()?(?P<...>\d+)(?:\))?
+        If all bare → (?P<...>\d+) without parens
+        """
+        try:
+            examples = self._get_ens_examples(standard, item_type, max_examples=50)
+        except Exception:
+            return pattern
+
+        for param_name in ['исполнение', 'variant']:
+            total = 0
+            paren_count = 0
+            bare_count = 0
+
+            for ex in examples:
+                name = ex.get("_meta", {}).get("name", "")
+                val = ex.get(param_name)
+                if val is None or str(val).strip() == "":
+                    continue
+                val_str = str(val).strip()
+                total += 1
+                if f"({val_str})" in name:
+                    paren_count += 1
+                elif re.search(rf'(?:^|[^\d]){re.escape(val_str)}(?:[^\d]|$)', name):
+                    bare_count += 1
+
+            if total == 0:
+                continue
+
+            paren_ratio = paren_count / total
+
+            if paren_ratio >= 0.9:
+                # Mandatory parentheses: restore if LLM made them optional
+                if f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?' in pattern:
+                    pattern = pattern.replace(
+                        f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?',
+                        f'\\((?P<{param_name}>\\d+)\\)'
+                    )
+                    logger.debug("[_fix_execution_parens] %s/%s: restored mandatory parens for %s",
+                                 standard, item_type, param_name)
+            elif paren_count > 0 and bare_count > 0:
+                # Mixed: optional parentheses
+                if f'\\((?P<{param_name}>\\d+)\\)' in pattern:
+                    pattern = pattern.replace(
+                        f'\\((?P<{param_name}>\\d+)\\)',
+                        f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?'
+                    )
+                    logger.debug("[_fix_execution_parens] %s/%s: made parens optional for %s",
+                                 standard, item_type, param_name)
+            elif bare_count > 0 and paren_count == 0:
+                # All bare: remove parentheses
+                pattern = pattern.replace(
+                    f'\\((?P<{param_name}>\\d+)\\)',
+                    f'(?P<{param_name}>\\d+)'
+                )
+                pattern = pattern.replace(
+                    f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?',
+                    f'(?P<{param_name}>\\d+)'
+                )
+                logger.debug("[_fix_execution_parens] %s/%s: removed parens for %s",
+                             standard, item_type, param_name)
+
+        return pattern
+
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
         # FIX: normalize double-escaped regex sequences
 
@@ -1337,13 +1407,9 @@ class LLMMaskGenerator:
         for _old, _new in _exec_replacements:
             pattern = pattern.replace(_old, _new)
 
-        # FIX 2026-06-01 21:00 UTC+3: make parentheses optional around исполнение/variant
-        # Some standards use bare numbers: "Винт 1-5-14" (no parentheses around execution)
-        for _name in ['исполнение', 'variant']:
-            pattern = pattern.replace(
-                rf'\((?P<{_name}>\d+)\)',
-                rf'(?:\()?(?P<{_name}>\d+)(?:\))?'
-            )
+        # FIX 2026-06-01 21:00 UTC+3: data-driven fix for execution parentheses
+        # Analyzes real ENS examples to determine: mandatory parens, optional, or bare
+        pattern = self._fix_execution_parens(pattern, standard, item_type)
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
