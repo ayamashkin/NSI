@@ -1084,7 +1084,7 @@ class LLMMaskGenerator:
                 return None
             i = quote + 1
             while i < len(text):
-                if text[i] == '\' and i + 1 < len(text):
+                if text[i] == '\\' and i + 1 < len(text):
                     i += 2
                 elif text[i] == '"':
                     break
@@ -1093,8 +1093,7 @@ class LLMMaskGenerator:
             if i >= len(text):
                 return None
             raw = text[quote + 1:i]
-            # Decode JSON string escapes: \ -> \, \" -> ",
- -> newline, etc.
+            # Decode JSON string escapes: \ -> \, \" -> ", -> newline, etc.
             try:
                 decoded = json.loads('"' + raw + '"')
                 return decoded
@@ -1240,7 +1239,7 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == "\" and not escape:
+                    if ch == "\\" and not escape:
                         escape = True
                         continue
                     if ch == '"' and not escape:
@@ -1324,8 +1323,8 @@ class LLMMaskGenerator:
         # FIX: normalize double-escaped regex sequences
 
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
-        pattern = re.sub(r'\s+\[-\s\]\+', lambda m: r'[-\s]+', pattern)
-        pattern = re.sub(r'\[-\s\]\+\s+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\s+\[-\\s\]\+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\[-\\s\]\+\s+', lambda m: r'[-\s]+', pattern)
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
         pattern = re.sub(r'\)\?(?P\(\?P<[^>]+>)', lambda m: f')?(?:[-\s]+)?{m.group("next")}', pattern)
