@@ -1326,10 +1326,9 @@ class LLMMaskGenerator:
 
         # FIX 2026-06-01 17:05 UTC+3: after optional execution block, ensure [-\s]+ separator before first param
         # LLM generates (?:\s*(?P<name>...) which fails when execution is present with hyphen separator like "(2)-9"
-        pattern = re.sub(
-            r'\(\?:\\s\*\(\?P<исполнение>\d+\)\)\?\(\?:\\s\*\(\?P<([^>]+)>',
-            lambda m: rf'(?:\s*\(?P<исполнение>\d+\)\))?(?:[-\s]+\(?P<{m.group(1)}>',
-            pattern
+        pattern = pattern.replace(
+            r'(?:\s*\((?P<исполнение>\d+)\))?(?:\s*(?P<',
+            r'(?:\s*\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<',
         )
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
