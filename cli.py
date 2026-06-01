@@ -2,6 +2,7 @@
 # Nomenclature Processor CLI
 # Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
 #
+# 2026-05-29 16:05:00 — FIX: ens_params_mask now human-readable in Excel (dict/list normalization)
 # 2026-05-29 15:55:00 — FIX: batch() added no_cache parameter, --no-cache flag now works
 # 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
 # 2026-05-29 12:15:00 — FEAT: batch mode with --responses-dir processes only standards with response files (no --force needed)
@@ -574,6 +575,31 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             mism = result.fuzzy_mismatched_params
             out_row['Несовпавшие параметры'] = json.dumps(mism, ensure_ascii=False) if mism else None
             out_row['маска'] = str(result.mask_pattern)[:1000] if result.mask_pattern else ''
+            # Human-readable parameters from mask
+            if result.ens_params_mask:
+                if isinstance(result.ens_params_mask, dict):
+                    out_row['параметры_маски'] = ', '.join(
+                        f"{k}={v}" for k, v in result.ens_params_mask.items() if v is not None
+                    )
+                elif isinstance(result.ens_params_mask, list):
+                    readable = []
+                    for item in result.ens_params_mask:
+                        try:
+                            import json
+                            parsed = json.loads(item)
+                            if isinstance(parsed, list):
+                                readable.extend(str(x) for x in parsed)
+                            elif isinstance(parsed, dict):
+                                readable.extend(f"{k}={v}" for k, v in parsed.items() if v is not None)
+                            else:
+                                readable.append(str(parsed))
+                        except (json.JSONDecodeError, TypeError):
+                            readable.append(str(item))
+                    out_row['параметры_маски'] = ', '.join(readable)
+                else:
+                    out_row['параметры_маски'] = str(result.ens_params_mask)
+            else:
+                out_row['параметры_маски'] = ''
             out_row['стандарт'] = str(result.standard) if result.standard else ''
             out_row['тип'] = str(result.item_type) if result.item_type else ''
             has_mask = False

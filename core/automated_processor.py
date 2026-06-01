@@ -8,6 +8,10 @@
 # 2026-05-20 17:47:49 19e8ca02 20.05.2026
 # 2026-05-20 17:39:23 b00c4b25 20.05.2026
 # =============================================================================
+# FIX 2026-05-29 16:05 UTC+3:
+# mask.params normalized to dict before passing to ProcessingResult.ens_params_mask.
+# Prevents Unicode-escaped JSON strings in output.
+# =============================================================================
 # FIX 2026-05-29 15:55 UTC+3:
 # Added no_cache parameter to bypass result.db cache.
 # Cache skip: process() now checks 'not self.no_cache' before reading cache.
@@ -192,7 +196,7 @@ class ProcessingResult:
             'ens_code': self.ens_code,
             'ens_name': self.ens_name,
             'ens_params': self.ens_params,
-            'ens_params_mask': self.ens_params_mask,
+            'ens_params_mask': (self.ens_params_mask if isinstance(self.ens_params_mask, dict) else {}),
             'confidence': self.confidence,
             'processing_time_ms': self.processing_time_ms,
             'item_type': self.item_type,
@@ -1028,13 +1032,36 @@ class AutomatedParametricProcessor:
         if fuzzy_mismatched_params:
             details['fuzzy_mismatched_params'] = fuzzy_mismatched_params
 
+        # Normalize mask.params to human-readable dict
+        mask_params_norm = mask.params
+        if isinstance(mask_params_norm, str):
+            try:
+                mask_params_norm = json.loads(mask_params_norm)
+            except Exception:
+                mask_params_norm = {}
+        elif isinstance(mask_params_norm, list):
+            flat = []
+            for item in mask_params_norm:
+                if isinstance(item, str):
+                    try:
+                        parsed = json.loads(item)
+                        if isinstance(parsed, list):
+                            flat.extend(parsed)
+                        else:
+                            flat.append(parsed)
+                    except Exception:
+                        flat.append(item)
+                else:
+                    flat.append(item)
+            mask_params_norm = {p: None for p in flat} if flat else {}
+
         result = ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
             success=success,
             params=params,
             ens_params=ens_params_from_match,
-            ens_params_mask=mask.params,
+            ens_params_mask=mask_params_norm,
             ens_match=ens_match,
             confidence=round(confidence, 3),
             processing_time_ms=round(processing_time, 2),
