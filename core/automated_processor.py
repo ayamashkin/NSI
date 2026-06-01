@@ -1,7 +1,4 @@
 # =============================================================================
-# FILE: core/automated_processor.py
-# REPO: https://github.com/ayamashkin/NSI
-# =============================================================================
 # FIX 2026-06-01 16:02:00 UTC+3:
 # Fixed imports: generators.llm_mask_generator -> core.llm_mask_generator,
 # database.mask_database -> core.mask_database. Fixed list_masks -> get_all_masks.
@@ -40,6 +37,28 @@ from enum import Enum
 from pathlib import Path
 
 from utils.standard_utils import canonicalize_standard
+
+
+def _get_candidate_code(candidate: dict) -> Optional[str]:
+    """Extract ENS code from candidate record (handles both flat and _meta structures)."""
+    return (
+        candidate.get('код')
+        or candidate.get('mdm_key')
+        or candidate.get('_meta', {}).get('mdm_key')
+        or candidate.get('_meta', {}).get('id')
+        or candidate.get('_meta', {}).get('code')
+    )
+
+
+def _get_candidate_name(candidate: dict) -> Optional[str]:
+    """Extract ENS name from candidate record (handles both flat and _meta structures)."""
+    return (
+        candidate.get('наименование')
+        or candidate.get('полное_наименование')
+        or candidate.get('_meta', {}).get('name')
+        or candidate.get('_meta', {}).get('full_name')
+    )
+
 
 # Lazy import to avoid circular dependency
 _matching_config = None
@@ -757,8 +776,8 @@ class AutomatedParametricProcessor:
             total_weight = 0.0
             matched_weight = 0.0
             candidate_debug = {
-                'name': candidate.get('наименование', candidate.get('полное_наименование', 'N/A')),
-                'ens_code': candidate.get('код', candidate.get('mdm_key', 'N/A')),
+                'name': _get_candidate_name(candidate) or 'N/A',
+                'ens_code': _get_candidate_code(candidate) or 'N/A',
                 'params_matched': {},
                 'params_mismatched': {},
                 'params_missing': [],
@@ -919,7 +938,7 @@ class AutomatedParametricProcessor:
 
         # Try exact match first
         for candidate in candidates:
-            cand_name = candidate.get('наименование', candidate.get('полное_наименование', ''))
+            cand_name = _get_candidate_name(candidate) or ''
             if cand_name and generic_pattern:
                 cand_generic = self._get_generic_pattern(standard, item_type, candidate, mask)
                 if generic_pattern.strip() == cand_generic.strip():
@@ -982,8 +1001,8 @@ class AutomatedParametricProcessor:
 
         # Build ENS match dict
         ens_match = {
-            'code': best_match.get('код', best_match.get('mdm_key')),
-            'name': best_match.get('наименование', best_match.get('полное_наименование')),
+            'code': _get_candidate_code(best_match),
+            'name': _get_candidate_name(best_match),
             'mdm_key': best_match.get('mdm_key'),
             'score': best_score,
             'type': match_type,
