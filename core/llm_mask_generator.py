@@ -1,10 +1,10 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-01 21:30:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens_regex — обработка префиксов (flex-sep, \\s+) перед \(
 # 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: _fix_param_separators — data-driven разделители для всех параметров
 # 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens — data-driven скобок на основе статистики ENS
 # 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: _fix_pattern — 7 вариантов разделителя после опционального исполнения
-# 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: правило 5 шаблона — дефис-разделитель )?[-\s]+ вместо \s+
 # 2026-06-01 13:55:25 — ОТКАТ: возврат к baseline 2026-05-28, удалён сломанный re.sub покрытия
 # =============================================================================
 """
@@ -1353,38 +1353,53 @@ class LLMMaskGenerator:
             paren_ratio = paren_count / total
             grp = f'(?P<{param_name}>'
 
-            if paren_ratio >= 0.9:
-                # Mandatory: restore if LLM made them optional
-                old_opt = r'(?:\()?' + grp + r'\d+)(?:\))?'
-                new_mand = r'\(' + grp + r'\d+)\)'
-                if old_opt in pattern:
-                    pattern = pattern.replace(old_opt, new_mand)
-                    logger.debug("[_fix_parens] %s/%s: restored mandatory parens for %s",
-                                 standard, item_type, param_name)
+            # FEAT 2026-06-01 21:30: handle prefixes like flex-sep or \\s+ before parens
+            flex = '[-' + r'\s]+'
+            prefixes = ['', flex, r'\s+', r'\s*', '[-' + r'\s]*']
+
+            if bare_count > 0 and paren_count == 0:
+                # All bare: remove parens with any prefix
+                for prefix in prefixes:
+                    old_mand = prefix + r'\(' + grp + r'\d+)\)'
+                    old_opt = prefix + r'(?:\()?' + grp + r'\d+)(?:\))?'
+                    new_bare = prefix + grp + r'\d+)' if prefix else grp + r'\d+)'
+                    if old_mand in pattern:
+                        pattern = pattern.replace(old_mand, new_bare)
+                        logger.debug("[_fix_parens] %s/%s: removed parens for %s (pfx=%s)",
+                                     standard, item_type, param_name, repr(prefix))
+                        break
+                    if old_opt in pattern:
+                        pattern = pattern.replace(old_opt, new_bare)
+                        logger.debug("[_fix_parens] %s/%s: removed opt parens for %s (pfx=%s)",
+                                     standard, item_type, param_name, repr(prefix))
+                        break
             elif paren_count > 0 and bare_count > 0:
-                # Mixed: optional parentheses (regex handles prefix before \()
-                old_mand = r'\(' + grp + r'\d+)\)'
-                new_opt = r'(?:\()?' + grp + r'\d+)(?:\))?'
-                pattern = pattern.replace(old_mand, new_opt)
-                logger.debug("[_fix_parens] %s/%s: made parens optional for %s",
-                             standard, item_type, param_name)
-            elif bare_count > 0 and paren_count == 0:
-                # All bare: remove parens
-                old_mand = r'\(' + grp + r'\d+)\)'
-                old_opt = r'(?:\()?' + grp + r'\d+)(?:\))?'
-                new_bare = grp + r'\d+)'
-                pattern = pattern.replace(old_mand, new_bare)
-                pattern = pattern.replace(old_opt, new_bare)
-                logger.debug("[_fix_parens] %s/%s: removed parens for %s",
-                             standard, item_type, param_name)
+                # Mixed: optional parens with any prefix
+                for prefix in prefixes:
+                    old_mand = prefix + r'\(' + grp + r'\d+)\)'
+                    new_opt = prefix + r'(?:\()?' + grp + r'\d+)(?:\))?'
+                    if old_mand in pattern:
+                        pattern = pattern.replace(old_mand, new_opt)
+                        logger.debug("[_fix_parens] %s/%s: made parens optional for %s (pfx=%s)",
+                                     standard, item_type, param_name, repr(prefix))
+                        break
+            elif paren_ratio >= 0.9:
+                # Mandatory: restore if LLM made them optional
+                for prefix in prefixes:
+                    old_opt = prefix + r'(?:\()?' + grp + r'\d+)(?:\))?'
+                    new_mand = prefix + r'\(' + grp + r'\d+)\)'
+                    if old_opt in pattern:
+                        pattern = pattern.replace(old_opt, new_mand)
+                        logger.debug("[_fix_parens] %s/%s: restored mandatory parens for %s",
+                                     standard, item_type, param_name)
+                        break
 
         return pattern
 
     def _fix_param_separators(self, pattern: str, standard: str, item_type: str) -> str:
         """Data-driven fix: analyze separators between params in real ENS examples.
 
-        Detects if LLM used wrong separator (e.g. \\s+ instead of [-
-        when examples consistently use hyphens.
+        Detects if LLM used wrong separator (e.g. space instead of flex-sep).
         """
         try:
             examples = self._get_ens_examples(standard, item_type, max_examples=50)

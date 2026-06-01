@@ -492,11 +492,8 @@ class AutoValidator:
         # FEAT 2026-06-01 21:15: order params as in pattern, not alphabetically
         ordered = self._extract_param_order(pattern)
         if ordered:
-            # Keep only params that appear in details, in pattern order
-            pattern_params = [n for n, o in ordered if n in all_params]
-            # Add any remaining params not in pattern (shouldn't happen)
-            remaining = sorted(all_params - set(pattern_params))
-            params = pattern_params + remaining
+            # Keep only params that are IN the pattern, in pattern order
+            params = [n for n, o in ordered if n in all_params]
         else:
             params = sorted(all_params)
         if not params:
