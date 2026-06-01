@@ -1317,12 +1317,13 @@ class LLMMaskGenerator:
         )
         return self._sanitize_mask_result(result)
 
-    def _fix_execution_parens(self, pattern: str, standard: str, item_type: str) -> str:
+    def _fix_execution_parens_regex(self, pattern: str, standard: str, item_type: str) -> str:
         """Data-driven fix: determine execution parentheses format from real ENS examples.
+        Uses regex (not str.replace) to handle prefixes before parens.
 
-        If ≥90% examples have parentheses → mandatory \((?P<...>\d+)\)
-        If mixed → optional (?:\()?(?P<...>\d+)(?:\))?
-        If all bare → (?P<...>\d+) without parens
+        If >=90%% examples have parentheses -> mandatory parens
+        If mixed -> optional parens
+        If all bare -> no parens
         """
         try:
             examples = self._get_ens_examples(standard, item_type, max_examples=50)
@@ -1350,36 +1351,31 @@ class LLMMaskGenerator:
                 continue
 
             paren_ratio = paren_count / total
+            grp = f'(?P<{param_name}>'
 
             if paren_ratio >= 0.9:
-                # Mandatory parentheses: restore if LLM made them optional
-                if f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?' in pattern:
-                    pattern = pattern.replace(
-                        f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?',
-                        f'\\((?P<{param_name}>\\d+)\\)'
-                    )
-                    logger.debug("[_fix_execution_parens] %s/%s: restored mandatory parens for %s",
+                # Mandatory: restore if LLM made them optional
+                old_opt = r'(?:\()?' + grp + r'\d+)(?:\))?'
+                new_mand = r'\(' + grp + r'\d+)\)'
+                if old_opt in pattern:
+                    pattern = pattern.replace(old_opt, new_mand)
+                    logger.debug("[_fix_parens] %s/%s: restored mandatory parens for %s",
                                  standard, item_type, param_name)
             elif paren_count > 0 and bare_count > 0:
-                # Mixed: optional parentheses
-                if f'\\((?P<{param_name}>\\d+)\\)' in pattern:
-                    pattern = pattern.replace(
-                        f'\\((?P<{param_name}>\\d+)\\)',
-                        f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?'
-                    )
-                    logger.debug("[_fix_execution_parens] %s/%s: made parens optional for %s",
-                                 standard, item_type, param_name)
+                # Mixed: optional parentheses (regex handles prefix before \()
+                old_mand = r'\(' + grp + r'\d+)\)'
+                new_opt = r'(?:\()?' + grp + r'\d+)(?:\))?'
+                pattern = pattern.replace(old_mand, new_opt)
+                logger.debug("[_fix_parens] %s/%s: made parens optional for %s",
+                             standard, item_type, param_name)
             elif bare_count > 0 and paren_count == 0:
-                # All bare: remove parentheses
-                pattern = pattern.replace(
-                    f'\\((?P<{param_name}>\\d+)\\)',
-                    f'(?P<{param_name}>\\d+)'
-                )
-                pattern = pattern.replace(
-                    f'(?:\\()?(?P<{param_name}>\\d+)(?:\\))?',
-                    f'(?P<{param_name}>\\d+)'
-                )
-                logger.debug("[_fix_execution_parens] %s/%s: removed parens for %s",
+                # All bare: remove parens
+                old_mand = r'\(' + grp + r'\d+)\)'
+                old_opt = r'(?:\()?' + grp + r'\d+)(?:\))?'
+                new_bare = grp + r'\d+)'
+                pattern = pattern.replace(old_mand, new_bare)
+                pattern = pattern.replace(old_opt, new_bare)
+                logger.debug("[_fix_parens] %s/%s: removed parens for %s",
                              standard, item_type, param_name)
 
         return pattern
@@ -1511,7 +1507,8 @@ class LLMMaskGenerator:
 
         # FIX 2026-06-01 21:00 UTC+3: data-driven fix for execution parentheses
         # Analyzes real ENS examples to determine: mandatory parens, optional, or bare
-        pattern = self._fix_execution_parens(pattern, standard, item_type)
+        # Uses regex (not str.replace) to handle prefixes like flex-sep before \(
+        pattern = self._fix_execution_parens_regex(pattern, standard, item_type)
 
         # FIX 2026-06-01 21:15 UTC+3: data-driven separator correction for all params
         pattern = self._fix_param_separators(pattern, standard, item_type)

@@ -426,6 +426,40 @@ class AutoValidator:
             "extracted": extracted,
         }
 
+    @staticmethod
+    def _extract_param_order(pattern: str) -> List[Tuple[str, bool]]:
+        """Extract named groups from pattern in order of appearance.
+        Returns list of (name, is_optional). Handles nested parens."""
+        if not pattern:
+            return []
+        params = []
+        i = 0
+        while i < len(pattern):
+            idx = pattern.find('(?P<', i)
+            if idx == -1:
+                break
+            gt = pattern.find('>', idx)
+            if gt == -1:
+                break
+            name = pattern[idx + 4:gt]
+            start = gt + 1
+            depth = 1
+            j = start
+            while j < len(pattern) and depth > 0:
+                if pattern[j] == '(':
+                    depth += 1
+                elif pattern[j] == ')':
+                    depth -= 1
+                j += 1
+            end = j
+            after = pattern[end:end + 6]
+            # Two forms of optional: \))? (exec in parens) or )? (direct)
+            is_opt = (after.startswith('\\))') and len(after) > 3 and after[3] == '?') or \
+                      after.startswith(')?')
+            params.append((name, is_opt))
+            i = end
+        return params
+
     def _print_summary_table(self, standard: str, item_type: str, details: List[Dict],
                              required: List[str], skip_params: set, total: int, success_count: int,
                              loose_fields: set = None, pattern: str = "") -> None:
@@ -455,7 +489,16 @@ class AutoValidator:
                         continue
                     if ex.get(key) is not None and str(ex.get(key)).strip() != "":
                         all_params.add(key)
-        params = sorted(all_params)
+        # FEAT 2026-06-01 21:15: order params as in pattern, not alphabetically
+        ordered = self._extract_param_order(pattern)
+        if ordered:
+            # Keep only params that appear in details, in pattern order
+            pattern_params = [n for n, o in ordered if n in all_params]
+            # Add any remaining params not in pattern (shouldn't happen)
+            remaining = sorted(all_params - set(pattern_params))
+            params = pattern_params + remaining
+        else:
+            params = sorted(all_params)
         if not params:
             return
 
@@ -521,10 +564,12 @@ class AutoValidator:
         w_text = min(w_text, 50)
         w_result = max(len("Результат"), max(len(r["result"]) for r in rows) if rows else 0)
 
-        # Calculate widths as exact max of header and cell contents
+        # FEAT 2026-06-01 21:15: mark optional params, use pattern order for headers
+        optional_map = {n: o for n, o in ordered}
         param_widths = {}
         for p in params:
-            header_len = len(p)
+            display_name = f"{p} (опц.)" if optional_map.get(p) else p
+            header_len = len(display_name)
             max_cell = max(len(str(r["cells"].get(p, ""))) for r in rows) if rows else 0
             param_widths[p] = max(header_len, max_cell, 3)
 
@@ -553,7 +598,8 @@ class AutoValidator:
         lines.append(top())
         header_parts = [f" {'№':<{w_idx}} ", f" {'Наименование':<{w_text}} ", f" {'Результат':<{w_result}} "]
         for p in params:
-            header_parts.append(f" {p:<{param_widths[p]}} ")
+            display_name = f"{p} (опц.)" if optional_map.get(p) else p
+            header_parts.append(f" {display_name:<{param_widths[p]}} ")
         lines.append("│" + "│".join(header_parts) + "│")
         lines.append(hline())
         for r in rows:
