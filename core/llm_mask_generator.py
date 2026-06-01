@@ -1084,7 +1084,7 @@ class LLMMaskGenerator:
                 return None
             i = quote + 1
             while i < len(text):
-                if text[i] == '\\' and i + 1 < len(text):
+                if text[i] == '\' and i + 1 < len(text):
                     i += 2
                 elif text[i] == '"':
                     break
@@ -1093,7 +1093,8 @@ class LLMMaskGenerator:
             if i >= len(text):
                 return None
             raw = text[quote + 1:i]
-            # Decode JSON string escapes: \ -> \, \" -> ", -> newline, etc.
+            # Decode JSON string escapes: \ -> \, \" -> ",
+ -> newline, etc.
             try:
                 decoded = json.loads('"' + raw + '"')
                 return decoded
@@ -1239,7 +1240,7 @@ class LLMMaskGenerator:
                     if escape:
                         escape = False
                         continue
-                    if ch == "\\" and not escape:
+                    if ch == "\" and not escape:
                         escape = True
                         continue
                     if ch == '"' and not escape:
