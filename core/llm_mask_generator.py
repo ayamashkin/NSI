@@ -1,11 +1,11 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-01 21:30:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens_regex — обработка префиксов (flex-sep, \\s+) перед \(
-# 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: _fix_param_separators — data-driven разделители для всех параметров
-# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens — data-driven скобок на основе статистики ENS
-# 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: _fix_pattern — 7 вариантов разделителя после опционального исполнения
-# 2026-06-01 13:55:25 — ОТКАТ: возврат к baseline 2026-05-28, удалён сломанный re.sub покрытия
+# 2026-06-01 22:15:00 — ИСПРАВЛЕНИЕ: _fix_pattern — \\s+[-\\s]+ → [-\\s]+ (str.replace, re.sub был сломан)
+# 2026-06-01 21:30:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens_regex — префиксы перед parens
+# 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: _fix_param_separators — data-driven разделители
+# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens — data-driven скобок
+# 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: _fix_pattern — 7 вариантов разделителя после исполнения
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -1532,8 +1532,9 @@ class LLMMaskGenerator:
         # FIX: normalize double-escaped regex sequences
 
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
-        pattern = re.sub(r'\s+\[-\s\]\+', lambda m: r'[-\s]+', pattern)
-        pattern = re.sub(r'\[-\s\]\+\s+', lambda m: r'[-\s]+', pattern)
+        # FIX 2026-06-01 22:15: str.replace (re.sub regex was incorrect)
+        pattern = pattern.replace(r'\s+[-\s]+', r'[-\s]+')
+        pattern = pattern.replace(r'[-\s]+\s+', r'[-\s]+')
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
         pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
