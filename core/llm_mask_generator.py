@@ -1578,17 +1578,12 @@ class LLMMaskGenerator:
                 logger.debug("[LLMMaskGenerator] Upgraded %s to decimal: %s", group_name, new_group)
 
         # FIX 2026-05-28 18:45 UTC+3: GOST 7795-70 uses cyrillic 'х' between класс_допуска and длина
+        # FIX 2026-06-02: regex \(?P<длина> is invalid syntax — use str.replace instead
         if "7795-70" in standard:
-            pattern = re.sub(
-                r'(класс_допуска>\d+[a-z])\s*\[-\s\]\+\s*\(?P<длина>)',
-                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
-                pattern
-            )
-            pattern = re.sub(
-                r'(класс_допуска>\d+[a-z]\)?)\s*\[-\s\]\+\s*\(?P<длина>)',
-                lambda m: fr'{m.group(1)}[xXхХ×][-\s]*{m.group(2)}',
-                pattern
-            )
+            _gost_old = r'(?P<класс_допуска>\d+[a-z])[-\s]+(?P<длина>'
+            _gost_new = r'(?P<класс_допуска>\d+[a-z])[xXхХ×][-\s]*(?P<длина>'
+            if _gost_old in pattern:
+                pattern = pattern.replace(_gost_old, _gost_new)
         pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
