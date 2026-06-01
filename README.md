@@ -519,11 +519,11 @@ python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl -
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --responses-dir prompts/answers --validate --domain hardware
 
 # Batch-обработка
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i cache/ens_hardware_test.pkl --workers 1 -o output/nomenclature.xlsx --domain hardware --no-cache
-python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i cache/ens_hardware_test.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.xlsx --domain hardware --no-cache
+python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
 
 # Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i cache/ens_hardware_test.pkl --workers 4 -o output/quality.xlsx -j output/quality.json --domain hardware
+python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 4 -o output/quality.xlsx -j output/quality.json --domain hardware
 
 # Диагностика отдельной строки
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index cache/ens_hardware.pkl --domain hardware

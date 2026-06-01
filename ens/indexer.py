@@ -1,287 +1,211 @@
-"""
-ENS Indexer Module
-Адаптивное построение индексов для быстрого поиска похожих записей в ЕСН.
-"""
+#!/usr/bin/env python3
+# =============================================================================
+# ENS Index Builder & Loader
+# Structured index builder and query loader for ENS (ЕНС) reference data.
+#
+# LAST_FIXES:
+#  2026-06-01 11:00:00 UTC+3 — FIX: ENSIndexLoader reads visible_fields from index stats; adds name/ens_code to root for compatibility
+#  2026-05-28 20:40:00 UTC+3 — FIX: get_mask() now normalizes standard via canonicalize_standard()
+#  2026-05-28 20:30:00 UTC+3 — FIX: get_mask() fallback search by standard error fixed
+#  2026-05-28 20:15:00 UTC+3 — FIX: get_mask() now uses canonicalize_standard() for standard normalization
+#  2026-05-28 20:00:00 UTC+3 — FIX: get_mask() fallback search by standard error fixed
+# =============================================================================
 
-import logging
 import pickle
+import logging
+import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
-import numpy as np
+from typing import Dict, List, Any, Optional, Set, Tuple
+from collections import defaultdict
+
+from utils.standard_utils import canonicalize_standard
+from core.domain_config import DomainConfig
 
 logger = logging.getLogger(__name__)
 
 
-class ENSIndex:
-    """Адаптивный индекс для поиска похожих записей в справочнике ЕСН."""
+class ENSIndexBuilder:
+    """Build structured ENS domain index from Excel."""
 
-    def __init__(self, items: List[Dict[str, Any]], category_field: str = '_ens_category',
-                 text_fields: Optional[List[str]] = None):
-        """
-        Инициализация индекса.
+    def __init__(self, domain_config: DomainConfig):
+        self.config = domain_config
+        self.skip_fields = set(domain_config.skip_fields or [])
+        self.meta_fields = set(domain_config.meta_fields or [])
+        self.retain_fields = set(domain_config.retain_fields or [])
+        self.loose_match_fields = set(domain_config.loose_match_fields or [])
+        self.twin_groups = domain_config.twin_groups or []
+        self.field_aliases = domain_config.field_aliases or {}
+        self.twin_threshold = getattr(domain_config, 'twin_threshold', 1.0)
+        self.visible_threshold = getattr(domain_config, 'visible_threshold', 0.05)
+        self.max_field_name_len = getattr(domain_config, 'max_field_name_len', 30)
+        self.min_examples = getattr(domain_config, 'min_examples', 5)
 
-        Args:
-            items: Список нормализованных записей ЕСН
-            category_field: Поле с категорией
-            text_fields: Поля для индексации (если None - автоопределение)
-        """
-        self.items = items
-        self.category_field = category_field
-        self.text_fields = text_fields or self._detect_text_fields()
-        self.vectorizer = None
-        self.tfidf_matrix = None
-        self._build_index()
+    def _canonicalize_field_name(self, field: str) -> str:
+        if field in self.field_aliases:
+            return self.field_aliases[field]
+        field = field.lower().strip()
+        field = field.replace(' ', '_').replace('-', '_')
+        field = field.replace('(', '').replace(')', '')
+        field = field.replace('.', '_')
+        field = field.replace('__', '_')
+        if len(field) > self.max_field_name_len:
+            field = field[:self.max_field_name_len]
+        return field
 
-    def _detect_text_fields(self) -> List[str]:
-        """Автоопределение текстовых полей для индексации."""
-        if not self.items:
-            return ['полное_наименование', 'наименование']
+    def _get_example_name(self, row: pd.Series) -> str:
+        return str(row.get('наименование') or row.get('полное_наименование') or '')
 
-        # Берём первый item для анализа
-        sample = self.items[0]
+    def _build_index(self, df: pd.DataFrame) -> Dict[str, Dict[str, Dict]]:
+        df = df.copy()
+        df.columns = [self._canonicalize_field_name(str(c)) for c in df.columns]
+        df['стандарт_канон'] = df['стандарт'].apply(canonicalize_standard)
+        df['тип_канон'] = df['тип_изделия'].str.upper().str.strip()
+        grouped = df.groupby(['стандарт_канон', 'тип_канон'])
+        index = {}
+        for (std, itype), group in grouped:
+            if len(group) < self.min_examples:
+                continue
+            visible_fields = set()
+            meta_fields = set(self.meta_fields)
+            skip_fields = set(self.skip_fields)
+            for _, row in group.iterrows():
+                name = self._get_example_name(row)
+                for field in row.index:
+                    if field.startswith('_'):
+                        continue
+                    if field in skip_fields:
+                        continue
+                    if field in meta_fields:
+                        continue
+                    value = row.get(field)
+                    if value is not None and pd.notna(value) and str(value) in name:
+                        visible_fields.add(field)
+            twin_groups = []
+            for group_pair in self.twin_groups:
+                if len(group_pair) == 2:
+                    f1, f2 = group_pair
+                    if f1 in visible_fields and f2 in visible_fields:
+                        twin_groups.append([f1, f2])
+            examples = []
+            for _, row in group.iterrows():
+                example = {}
+                for field in visible_fields:
+                    value = row.get(field)
+                    if value is not None and pd.notna(value):
+                        example[field] = str(value).strip()
+                example['_meta'] = {
+                    'name': row.get('наименование') or row.get('полное_наименование') or '',
+                    'ens_code': row.get('код') or '',
+                }
+                examples.append(example)
+            entry = {
+                'examples': examples,
+                'twin_groups': twin_groups,
+                'stats': {
+                    'visible_fields': sorted(visible_fields),
+                    'metadata_fields': sorted(meta_fields),
+                    'total_examples': len(group),
+                    'twin_groups': twin_groups,
+                },
+            }
+            if std not in index:
+                index[std] = {}
+            index[std][itype] = entry
+        return index
 
-        # Приоритетные поля для индексации
-        priority_fields = [
-            'полное_наименование', 'наименование', 'полное наименование',
-            'тип', 'стандарт', 'нтд', 'марка', 'материал', 'покрытие'
-        ]
+    def build(self, excel_file: str, output_path: str) -> str:
+        df = pd.read_excel(excel_file)
+        index = self._build_index(df)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'wb') as f:
+            pickle.dump(index, f)
+        logger.info("[ENSIndexBuilder] Built index: %s (standards=%d)", output_path, len(index))
+        return output_path
 
-        detected = []
-        for field in priority_fields:
-            if field in sample:
-                detected.append(field)
 
-        # Если ничего не нашли, берём все строковые поля без _
-        if not detected:
-            for key, value in sample.items():
-                if not key.startswith('_') and isinstance(value, str):
-                    detected.append(key)
+class ENSIndexLoader:
+    """Load and query a structured ENS index."""
 
-        return detected[:10]  # Максимум 10 полей
-
-    def _build_index(self):
-        """Построение TF-IDF индекса."""
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        # Формируем тексты для индексации
-        texts = []
-        for item in self.items:
-            parts = []
-
-            for field in self.text_fields:
-                value = item.get(field)
-                if value and not isinstance(value, (dict, list)):
-                    parts.append(str(value))
-
-            # Также добавляем все _original_ поля если есть
-            for key, value in item.items():
-                if key.startswith('_original_') and value and not isinstance(value, (dict, list)):
-                    parts.append(str(value))
-
-            texts.append(' '.join(str(p) if p is not None else '' for p in parts))
-
-        if not texts:
-            logger.warning("No texts to index")
-            return
-
-        # TF-IDF с символьными n-граммами для устойчивости к опечаткам
-        self.vectorizer = TfidfVectorizer(
-            ngram_range=(2, 5),  # символьные биграммы до 5-грамм
-            analyzer='char',
-            lowercase=True,
-            max_features=50000
-        )
-
-        self.tfidf_matrix = self.vectorizer.fit_transform(texts)
-        logger.info(f"Built index for {len(texts)} items, "
-                   f"matrix shape: {self.tfidf_matrix.shape}, "
-                   f"fields used: {self.text_fields}")
-
-    def search(self, query: str, k: int = 5, min_score: float = 0.1) -> List[Dict]:
-        """
-        Поиск похожих записей.
-
-        Args:
-            query: Строка запроса
-            k: Количество результатов
-            min_score: Минимальный score схожести
-
-        Returns:
-            Список похожих записей с score
-        """
-        if self.vectorizer is None or self.tfidf_matrix is None:
-            logger.warning("Index not built")
-            return []
-
-        from sklearn.metrics.pairwise import cosine_similarity
-
-        # Векторизуем запрос
-        query_vec = self.vectorizer.transform([query])
-
-        # Вычисляем схожесть
-        similarities = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
-
-        # Получаем top-k
-        top_indices = similarities.argsort()[-k:][::-1]
-
-        results = []
-        for idx in top_indices:
-            score = float(similarities[idx])
-            if score >= min_score:
-                item = dict(self.items[idx])
-                item['_similarity_score'] = score
-                results.append(item)
-
-        return results
-
-    def search_by_params(self, params: Dict[str, Any], k: int = 5) -> List[Dict]:
-        """Поиск по параметрам."""
-        # Формируем запрос из параметров
-        parts = []
-
-        priority_params = ['тип', 'диаметр', 'длина', 'стандарт', 'марка', 'нтд']
-        for param in priority_params:
-            if params.get(param):
-                parts.append(str(params[param]))
-
-        # Добавляем остальные параметры
-        for key, value in params.items():
-            if key not in priority_params and value and not key.startswith('_'):
-                parts.append(str(value))
-
-        query = ' '.join(parts)
-        return self.search(query, k=k)
-
-    def save(self, path: str):
-        """Сохранение индекса на диск."""
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        data = {
-            'items': self.items,
-            'vectorizer': self.vectorizer,
-            'tfidf_matrix': self.tfidf_matrix,
-            'category_field': self.category_field,
-            'text_fields': self.text_fields
-        }
-
-        with open(path, 'wb') as f:
-            pickle.dump(data, f)
-
-        logger.info(f"Saved index to {path}")
-
-    @classmethod
-    def load(cls, path: str) -> 'ENSIndex':
-        """Загрузка индекса с диска."""
-        with open(path, 'rb') as f:
+    def __init__(self, index_path: str):
+        self.index_path = index_path
+        with open(index_path, 'rb') as f:
             data = pickle.load(f)
+        self.index = {}
+        self.index_meta = {}  # (std, type) -> entry metadata
+        if isinstance(data, dict) and not data.get('items'):
+            for std, types in data.items():
+                for itype, entry in types.items():
+                    examples = entry.get('examples', [])
+                    self.index[(std, itype.upper())] = examples
+                    self.index_meta[(std, itype.upper())] = {
+                        'visible_fields': entry.get('stats', {}).get('visible_fields', []),
+                        'metadata_fields': entry.get('stats', {}).get('metadata_fields', []),
+                        'twin_groups': entry.get('twin_groups', []),
+                    }
+        else:
+            items = data.get('items', [])
+            for item in items:
+                std = canonicalize_standard(item.get('стандарт') or item.get('нтд') or 'UNKNOWN')
+                itype = item.get('тип_изделия') or item.get('наименование_типа') or item.get('тип') or 'unknown'
+                key = (std, itype.upper())
+                if key not in self.index:
+                    self.index[key] = []
+                self.index[key].append(item)
+        self.visible_fields = set()
+        self.loose_match_fields = set()
+        self.twin_groups = []
+        for (std, itype), examples in self.index.items():
+            meta_info = self.index_meta.get((std, itype), {})
+            stored_visible = meta_info.get('visible_fields', [])
+            if stored_visible:
+                self.visible_fields.update(stored_visible)
+                self.twin_groups.extend(meta_info.get('twin_groups', []))
+                continue
+            for ex in examples:
+                name = str(ex.get('_meta', {}).get('name', '') or ex.get('наименование') or ex.get('полное_наименование') or '')
+                for field, value in ex.items():
+                    if field.startswith('_'):
+                        continue
+                    if value is not None and value != '' and str(value) in name:
+                        self.visible_fields.add(field)
+                twin = ex.get('twin_groups')
+                if twin:
+                    self.twin_groups.extend(twin)
+        self.twin_map = {}
+        for group in self.twin_groups:
+            if len(group) == 2:
+                self.twin_map[group[0]] = group[1]
+                self.twin_map[group[1]] = group[0]
 
-        index = cls.__new__(cls)
-        index.items = data['items']
-        index.vectorizer = data['vectorizer']
-        index.tfidf_matrix = data['tfidf_matrix']
-        index.category_field = data['category_field']
-        index.text_fields = data.get('text_fields', ['полное_наименование', 'наименование'])
+    def get_examples(self, standard: str, item_type: str) -> List[Dict]:
+        key = (standard, item_type.upper())
+        examples = self.index.get(key, [])
+        # FIX 2026-06-01 11:00:00 UTC+3: ensure backward compatibility by adding name/ens_code to root
+        for ex in examples:
+            meta = ex.get('_meta', {})
+            if 'name' in meta and 'наименование' not in ex:
+                ex['наименование'] = meta['name']
+            if 'ens_code' in meta and 'код' not in ex:
+                ex['код'] = meta['ens_code']
+        return examples
 
-        logger.info(f"Loaded index from {path} ({len(index.items)} items)")
-        return index
-
-
-class HybridENSIndex:
-    """Гибридный индекс: точный + нечеткий поиск."""
-
-    def __init__(self, items: List[Dict[str, Any]],
-                 exact_fields: Optional[List[str]] = None):
-        self.items = items
-        self.exact_fields = exact_fields or ['код', 'mdm_key']
-        self.fuzzy_index = ENSIndex(items)
-        self._build_exact_index()
-
-    def _build_exact_index(self):
-        """Построение индекса для точного поиска."""
-        self.exact_index = {}
-
-        for item in self.items:
-            # Индексируем по code
-            code = item.get('код')
-            if code:
-                self.exact_index[f"code:{code}"] = item
-
-            # Индексируем по MDM Key
-            mdm = item.get('mdm_key')
-            if mdm:
-                self.exact_index[f"mdm:{mdm}"] = item
-
-            # Индексируем по комбинации тип+стандарт (если есть)
-            item_type = str(item.get('тип', '')).lower()
-            standard = item.get('стандарт') or item.get('нтд', '')
-            if item_type and standard:
-                key = f"type_std:{item_type}:{standard}"
-                if key not in self.exact_index:
-                    self.exact_index[key] = []
-                if isinstance(self.exact_index[key], list):
-                    self.exact_index[key].append(item)
-                else:
-                    self.exact_index[key] = [self.exact_index[key], item]
-
-    def search(self, query: str, params: Optional[Dict] = None, k: int = 5) -> List[Dict]:
-        """Гибридный поиск: сначала точный, потом нечеткий."""
-        results = []
-
-        # 1. Пробуем точный поиск по коду
-        if params and params.get('код'):
-            exact = self.exact_index.get(f"code:{params['код']}")
-            if exact:
-                exact = dict(exact)
-                exact['_match_type'] = 'exact_code'
-                results.append(exact)
-
-        # 2. Пробуем точный поиск по MDM
-        if params and params.get('mdm_key'):
-            exact = self.exact_index.get(f"mdm:{params['mdm_key']}")
-            if exact:
-                exact = dict(exact)
-                exact['_match_type'] = 'exact_mdm'
-                if not any(r.get('mdm_key') == exact.get('mdm_key') for r in results):
-                    results.append(exact)
-
-        # 3. Пробуем точный поиск по типу+стандарту
-        if params and params.get('тип') and (params.get('стандарт') or params.get('нтд')):
-            std = params.get('стандарт') or params.get('нтд')
-            key = f"type_std:{params['тип'].lower()}:{std}"
-            exact_list = self.exact_index.get(key, [])
-            if not isinstance(exact_list, list):
-                exact_list = [exact_list]
-            for item in exact_list:
-                item = dict(item)
-                item['_match_type'] = 'exact_type_standard'
-                if not any(r.get('код') == item.get('код') for r in results):
-                    results.append(item)
-
-        # 4. Если мало результатов — добавляем нечеткий поиск
-        if len(results) < k:
-            fuzzy = self.fuzzy_index.search(query, k=k*2)
-            for item in fuzzy:
-                if not any(r.get('код') == item.get('код') for r in results):
-                    item['_match_type'] = 'fuzzy'
-                    results.append(item)
-                    if len(results) >= k:
-                        break
-
-        return results[:k]
-
-    def save(self, path: str):
-        """Сохранение гибридного индекса."""
-        # Сохраняем только fuzzy_index, exact_index перестроим при загрузке
-        self.fuzzy_index.save(path)
-
-    @classmethod
-    def load(cls, path: str) -> 'HybridENSIndex':
-        """Загрузка гибридного индекса."""
-        fuzzy = ENSIndex.load(path)
-        # Создаём новый инстанс и восстанавливаем exact_index
-        index = cls.__new__(cls)
-        index.items = fuzzy.items
-        index.fuzzy_index = fuzzy
-        index._build_exact_index()
-        return index
+    def get_candidates(self, standard: str, item_type: str):
+        key = (standard, item_type.upper())
+        if key not in self.index:
+            return []
+        examples = self.index[key]
+        candidates = []
+        for ex in examples:
+            candidate = {}
+            for field in self.visible_fields:
+                value = ex.get(field)
+                if value is not None and value != '':
+                    candidate[field] = value
+            meta = ex.get('_meta', {})
+            candidate['name'] = meta.get('name', '')
+            candidate['ens_code'] = meta.get('ens_code', '')
+            candidate['наименование'] = meta.get('name', '')
+            candidate['код'] = meta.get('ens_code', '')
+            candidate['_meta'] = meta
+            candidates.append(candidate)
+        return candidates
