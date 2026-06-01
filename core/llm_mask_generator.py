@@ -2,6 +2,8 @@
 # FILE: core/llm_mask_generator.py
 # REPO: https://github.com/ayamashkin/NSI
 # LAST 5 CHANGES (UTC+3):
+# 2026-06-01 20:45:00 — FIX: _fix_pattern now handles \s+ after optional execution block (was only \s*), fixes validation failure for Винт (N)-длина format
+# 2026-06-01 20:45:00 — FIX: _default_template rule 5 updated to clarify hyphen separator after execution block )?[-\s]+ not \s+
 # 2026-06-01 13:55:25 — FIX: _load_response_from_file string literals (split/join) use single quotes to avoid newline breaks
 # 2026-06-01 13:55:25 — RESTORE: reverted to 2026-05-28 baseline; removed broken re.sub for покрытие (bad escape \s)
 # 2026-06-01 16:50:00 — RESTORE: removed text-wiping re.sub(r"\s*.*", ...) from _parse_mask_response
@@ -596,7 +598,7 @@ class LLMMaskGenerator:
 2. **Разделители — гибкие, но обязательный перед нтд_1**. Между параметрами используй `[-\s]+` (дефис или пробел). Если параметры слитные (M6, 22х1,5), не вставляй разделитель между ними. Перед нтд_1 ОБЯЗАТЕЛЬНО ставь `[-\s]+`. НЕ используй `\s*` или `\s+` перед нтд_1.
 3. **Слитные параметры**: "M6" → `M(?P<номинальный_диаметр_резьбы>\d+)`. "22х1,5" → `(?P<номинальный_диаметр_резьбы>\d+)[xXхХ×](?P<шаг_резьбы>\d+(?:[.,]\d+)?)`.
 4. **Порядок групп**: тип → исполнение → числовые параметры → покрытие → нтд_1.
-5. **Исполнение опциональное**: `(?:[-\s]+(?:\()?(?P<исполнение>\d+)(?:\))?)?`. Используй `(?:\()?` для опциональной скобки. НЕ пиши `\(?P<` — это сломает regex.
+5. **Исполнение опциональное**: `(?:\s*\((?P<исполнение>\d+)\))?` — пробел+скобки. ВАЖНО: после `)` ОБЯЗАТЕЛЬНО идет дефис `-` перед следующим параметром: `Винт (6)-5-12...`. Поэтому после `)?` используй `[-\s]+` (не `\s+`): `(?:\s*\((?P<исполнение>\d+)\))?[-\s]+(?P<...`.
 6. **Покрытие**: `[\w.]+`. После покрытия ОБЯЗАТЕЛЬНО `[-\s]+` перед нтд_1. Покрытие НЕ должно включать "ОСТ" или "ГОСТ".
 7. **НТД_1**: `[-\s]+(?P<нтд_1>ОСТ\s*1\s*\d+-\d+)` или `[-\s]+(?P<нтд_1>ГОСТ\s*\d+-\d+)`.
 8. **Полная строка**: `^...$`. НЕТ nested named groups `(?P<name>(?P<name2>...))`.
@@ -1326,9 +1328,14 @@ class LLMMaskGenerator:
 
         # FIX 2026-06-01 17:05 UTC+3: after optional execution block, ensure [-\s]+ separator before first param
         # LLM generates (?:\s*(?P<name>...) which fails when execution is present with hyphen separator like "(2)-9"
+        # FIX 2026-06-01 20:45 UTC+3: handle BOTH \s* and \s+ after optional execution block
         pattern = pattern.replace(
             r'(?:\s*\((?P<исполнение>\d+)\))?(?:\s*(?P<',
             r'(?:\s*\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<',
+        )
+        pattern = pattern.replace(
+            r'(?:\s+\((?P<исполнение>\d+)\))?(?:\s+(?P<',
+            r'(?:\s+\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<',
         )
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)

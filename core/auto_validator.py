@@ -7,9 +7,6 @@
 # 2026-05-28 21:13:00 — FIX: tables output as single logger.debug call (no repeated timestamp prefixes)
 # 2026-05-28 21:06:00 — FIX: _print_summary_table shows ENS/Mask values (e.g. 6.0/6.0), 1.5x column width, includes optional params
 # 2026-05-28 20:45:00 — FIX: _print_summary_table transposed (examples as rows, params as columns)
-# 2026-05-28 20:10:52 — 913cbafd 28.05.2026
-# 2026-05-28 16:11:43 — 4edaece3 28.05.2026
-# 2026-05-28 16:11:38 — 391c9b21 28.05.2026
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
