@@ -1323,8 +1323,8 @@ class LLMMaskGenerator:
         # FIX: normalize double-escaped regex sequences
 
         # FIX 2026-05-28 18:45 UTC+3: normalize redundant separators like \s+[-\s]+ -> [-\s]+
-        pattern = re.sub(r'\s+\[-\\s\]\+', lambda m: r'[-\s]+', pattern)
-        pattern = re.sub(r'\[-\\s\]\+\s+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\s+\[-\\s\]+', lambda m: r'[-\s]+', pattern)
+        pattern = re.sub(r'\[-\\s\]+\s+', lambda m: r'[-\s]+', pattern)
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
         pattern = pattern.replace(')?(?P<<', ')?(?:[-\\s]+)?(?P<<')

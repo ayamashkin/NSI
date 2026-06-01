@@ -2,6 +2,11 @@
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
+# FIX 2026-06-01 16:02:00 UTC+3:
+# Fixed imports: generators.llm_mask_generator -> core.llm_mask_generator,
+# database.mask_database -> core.mask_database. Fixed list_masks -> get_all_masks.
+# Removed non-existent activate_mask call; mask.is_active set directly.
+# =============================================================================
 # FIX 2026-06-01 11:44:00 UTC+3:
 # _parametric_match now logs mask.pattern before extract_params() call.
 # Helps diagnose why regex returns empty params.
@@ -269,7 +274,7 @@ class AutomatedParametricProcessor:
         )
 
         if self.use_llm_generation and self.llm_clients:
-            from generators.llm_mask_generator import LLMMaskGenerator
+            from core.llm_mask_generator import LLMMaskGenerator
             self.llm_generator = LLMMaskGenerator(
                 clients=self.llm_clients,
                 settings=self.settings,
@@ -320,9 +325,11 @@ class AutomatedParametricProcessor:
                 else:
                     self._cache_stats['hits'] += 1
                     return cached
+            else:
+                logger.debug("[CACHE] DB miss for '%s...'", text[:50])
         except Exception as e:
             logger.debug("Cache check error: %s", e)
-            return None
+        return None
 
     def _result_from_cache(self, cached: Dict[str, Any]) -> ProcessingResult:
         """Восстановить ProcessingResult из кэшированной записи result.db."""
@@ -423,7 +430,7 @@ class AutomatedParametricProcessor:
 
         if mask is None:
             try:
-                standard_masks = self.mask_db.list_masks(standard=standard)
+                standard_masks = self.mask_db.get_all_masks(standard=standard)
                 logger.info("[PROCESS] Found %d masks for standard='%s' (any item_type)", len(standard_masks), standard)
                 if standard_masks:
                     mask = standard_masks[0]
@@ -434,12 +441,8 @@ class AutomatedParametricProcessor:
         logger.info("[PROCESS] mask found: %s, is_active: %s", mask is not None, getattr(mask, 'is_active', False))
 
         if mask is not None and not mask.is_active:
-            logger.info("[PROCESS] Mask found but inactive, activating")
-            try:
-                self.mask_db.activate_mask(mask.id)
-                mask.is_active = True
-            except Exception as e:
-                logger.warning("[PROCESS] Failed to activate mask: %s", e)
+            logger.info("[PROCESS] Mask found but inactive, forcing active")
+            mask.is_active = True
 
         if mask and mask.is_active:
             effective_standard = getattr(mask, 'standard', None) or standard
@@ -489,7 +492,7 @@ class AutomatedParametricProcessor:
                 logger.info("[AutoProcessor] Тип из ЕСН: '%s' (был: '%s')", ens_item_type, item_type)
 
         canon_std = canonicalize_standard(standard)
-        mask, attempts = self.llm_generator.generate_mask(
+        mask, meta = self.llm_generator.generate_mask(
             standard=canon_std,
             item_type=ens_item_type,
             examples=examples,
@@ -505,7 +508,7 @@ class AutomatedParametricProcessor:
 
     def _validate_mask(self, mask: Dict[str, Any], standard: str, item_type: str) -> Any:
         """Валидация сгенерированной маски."""
-        from database.mask_database import MaskRecord
+        from core.mask_database import MaskRecord
         temp_mask = MaskRecord(
             standard=standard,
             item_type=item_type,
@@ -524,7 +527,7 @@ class AutomatedParametricProcessor:
 
     def _save_mask(self, mask: Dict[str, Any], validation: Any) -> Optional[Any]:
         """Сохранение валидированной маски в БД."""
-        from database.mask_database import MaskRecord
+        from core.mask_database import MaskRecord
         mask_record = MaskRecord(
             standard=mask['standard'],
             item_type=mask['item_type'],
@@ -679,12 +682,12 @@ class AutomatedParametricProcessor:
         material = None
         if trial_match:
             material = trial_match.get('марка_материала') or trial_match.get('марка_стали')
-            if not material and trial_debug:
-                for cd in trial_debug[:5]:
-                    key_params = cd.get('key_ens_params', {})
-                    material = key_params.get('марка_материала') or key_params.get('марка_стали')
-                    if material:
-                        break
+        if not material and trial_debug:
+            for cd in trial_debug[:5]:
+                key_params = cd.get('key_ens_params', {})
+                material = key_params.get('марка_материала') or key_params.get('марка_стали')
+                if material:
+                    break
 
         if not material:
             logger.debug("[COATING_SUBST] Could not determine material from candidates")
