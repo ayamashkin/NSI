@@ -1,14 +1,11 @@
 # =============================================================================
-# FILE: core/llm_mask_generator.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
-# 2026-06-01 20:45:00 — FIX: _fix_pattern now handles \s+ after optional execution block (was only \s*), fixes validation failure for Винт (N)-длина format
-# 2026-06-01 20:45:00 — FIX: _default_template rule 5 updated to clarify hyphen separator after execution block )?[-\s]+ not \s+
-# 2026-06-01 13:55:25 — FIX: _load_response_from_file string literals (split/join) use single quotes to avoid newline breaks
-# 2026-06-01 13:55:25 — RESTORE: reverted to 2026-05-28 baseline; removed broken re.sub for покрытие (bad escape \s)
-# 2026-06-01 16:50:00 — RESTORE: removed text-wiping re.sub(r"\s*.*", ...) from _parse_mask_response
-# 2026-05-28 23:25:00 — FIX: _fix_pattern excludes text fields (покрытие) from decimal upgrade
-# 2026-05-28 23:10:00 — FIX: _fix_pattern allows decimal values (2,5; 3.5) for numeric params via \d+(?:[.,]\d+)?
+# ФАЙЛ: core/llm_mask_generator.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-01 21:00:00 — ИСПРАВЛЕНИЕ: скобки вокруг исполнения теперь опциональные — "Винт (1)-" и "Винт 1-" оба работают
+# 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: _fix_pattern — 7 вариантов разделителя после опционального исполнения
+# 2026-06-01 20:45:00 — ИСПРАВЛЕНИЕ: правило 5 шаблона — дефис-разделитель )?[-\s]+ вместо \s+
+# 2026-06-01 13:55:25 — ИСПРАВЛЕНИЕ: _load_response_from_file — одинарные кавычки для строк
+# 2026-06-01 13:55:25 — ОТКАТ: возврат к baseline 2026-05-28, удалён сломанный re.sub покрытия
 # =============================================================================
 """
 LLM Mask Generator Module (Domain-based)
@@ -1326,17 +1323,27 @@ class LLMMaskGenerator:
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
         pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
 
-        # FIX 2026-06-01 17:05 UTC+3: after optional execution block, ensure [-\s]+ separator before first param
-        # LLM generates (?:\s*(?P<name>...) which fails when execution is present with hyphen separator like "(2)-9"
-        # FIX 2026-06-01 20:45 UTC+3: handle BOTH \s* and \s+ after optional execution block
-        pattern = pattern.replace(
-            r'(?:\s*\((?P<исполнение>\d+)\))?(?:\s*(?P<',
-            r'(?:\s*\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<',
-        )
-        pattern = pattern.replace(
-            r'(?:\s+\((?P<исполнение>\d+)\))?(?:\s+(?P<',
-            r'(?:\s+\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<',
-        )
+        # FIX 2026-06-01 20:45 UTC+3: after optional execution block, ensure [-\s]+ separator
+        # Covers 7 realistic LLM variants: \s*/\s+ inside × \s*/\s+ outside, also "variant" group name
+        _exec_replacements = [
+            (r'(?:\s*\((?P<исполнение>\d+)\))?(?:\s*(?P<', r'(?:\s*\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<'),
+            (r'(?:\s+\((?P<исполнение>\d+)\))?(?:\s+(?P<', r'(?:\s+\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<'),
+            (r'(?:\s*\((?P<исполнение>\d+)\))?(?:\s+(?P<', r'(?:\s*\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<'),
+            (r'(?:\s+\((?P<исполнение>\d+)\))?(?:\s*(?P<', r'(?:\s+\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<'),
+            (r'(?:[-\s]+\((?P<исполнение>\d+)\))?(?:\s+(?P<', r'(?:[-\s]+\((?P<исполнение>\d+)\))?(?:[-\s]+(?P<'),
+            (r'(?:\s*\((?P<variant>\d+)\))?(?:\s*(?P<', r'(?:\s*\((?P<variant>\d+)\))?(?:[-\s]+(?P<'),
+            (r'(?:\s+\((?P<variant>\d+)\))?(?:\s+(?P<', r'(?:\s+\((?P<variant>\d+)\))?(?:[-\s]+(?P<'),
+        ]
+        for _old, _new in _exec_replacements:
+            pattern = pattern.replace(_old, _new)
+
+        # FIX 2026-06-01 21:00 UTC+3: make parentheses optional around исполнение/variant
+        # Some standards use bare numbers: "Винт 1-5-14" (no parentheses around execution)
+        for _name in ['исполнение', 'variant']:
+            pattern = pattern.replace(
+                rf'\((?P<{_name}>\d+)\)',
+                rf'(?:\()?(?P<{_name}>\d+)(?:\))?'
+            )
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
