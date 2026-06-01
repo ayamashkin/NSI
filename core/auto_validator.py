@@ -1,15 +1,11 @@
 # =============================================================================
-# FILE: core/auto_validator.py
-# REPO: https://github.com/ayamashkin/NSI
-# 2026-05-29 13:30:00 — FEAT: GOST7795Normalizer integration for .029→покрытие+толщина, .46→группа_прочности
-# 2026-05-29 13:30:00 — FIX: _find_expected_key twin mapping свойства↔группа_прочности
-# 2026-05-28 21:20:00 — FIX: SyntaxError resolved (chr(10) instead of \n in logger.debug)
-# 2026-05-28 21:13:00 — FIX: tables output as single logger.debug call (no repeated timestamp prefixes)
-# 2026-05-28 21:06:00 — FIX: _print_summary_table shows ENS/Mask values (e.g. 6.0/6.0), 1.5x column width, includes optional params
-# 2026-05-28 20:45:00 — FIX: _print_summary_table transposed (examples as rows, params as columns)
-# 2026-05-28 20:10:52 — 913cbafd 28.05.2026
-# 2026-05-28 16:11:43 — 4edaece3 28.05.2026
-# 2026-05-28 16:11:38 — 391c9b21 28.05.2026
+# ФАЙЛ: core/auto_validator.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: таблица валидации теперь выводится при 0% match (NO MATCH), + XLSX лист
+# 2026-06-01 21:15:00 — ДОБАВЛЕНИЕ: expected-параметры сохраняются при NO MATCH для таблицы и XLSX
+# 2026-05-29 13:30:00 — FEAT: GOST7795Normalizer для .029→покрытие+толщина, .46→группа_прочности
+# 2026-05-29 13:30:00 — ИСПРАВЛЕНИЕ: _find_expected_key twin mapping свойства↔группа_прочности
+# 2026-05-28 21:06:00 — ИСПРАВЛЕНИЕ: _print_summary_table с ENS/Mask значениями
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -347,7 +343,16 @@ class AutoValidator:
             else:
                 no_match_lines.append("No prefix matches at all")
             logger.debug("[AutoValidator]" + sep + "%s", sep.join(no_match_lines))
-            return {"success": False, "error": "No match", "text": text, "example": ex, "param_results": param_results}
+            # FIX 2026-06-01 21:15 UTC+3: save expected params for summary table / xlsx
+            expected_dict = {}
+            for param in required:
+                if param in skip_params:
+                    continue
+                best_exp_key, _ = self._find_expected_key(param, ex)
+                if best_exp_key:
+                    expected_dict[param] = ex.get(best_exp_key)
+            return {"success": False, "error": "No match", "text": text, "example": ex,
+                    "param_results": param_results, "expected": expected_dict}
 
         extracted = match.groupdict()
         # FEAT 2026-05-29 13:30 UTC+3: normalize GOST 7795-70 extracted values
@@ -428,6 +433,7 @@ class AutoValidator:
         Cell format: ENS_value/Mask_value for OK, ENS_val≠Mask_val for mismatch, ENS_val/∅ for missing.
         Column widths scaled 1.5x to prevent overflow. Includes both required and optional params."""
         # Collect all params from all details (required + optional)
+        # FIX 2026-06-01 21:15 UTC+3: also collect from ENS example when NO MATCH
         all_params = set()
         for d in details:
             pr = d.get("param_results", {})
@@ -441,6 +447,14 @@ class AutoValidator:
             for p in d.get("missing", []):
                 if p not in skip_params:
                     all_params.add(p)
+            # When NO MATCH — collect params from ENS example data
+            if d.get("error") == "No match":
+                ex = d.get("example", {})
+                for key in ex:
+                    if key.startswith("_") or key in skip_params:
+                        continue
+                    if ex.get(key) is not None and str(ex.get(key)).strip() != "":
+                        all_params.add(key)
         params = sorted(all_params)
         if not params:
             return
@@ -464,9 +478,8 @@ class AutoValidator:
             ex = d.get("example", {})
             for p in params:
                 if error == "No match":
-                    # Show what we expected from ENS but couldn't extract
-                    best_key, _ = self._find_expected_key(p, ex)
-                    ens_val = ex.get(best_key) if best_key else None
+                    # FIX 2026-06-01 21:15: use pre-computed expected dict
+                    ens_val = d.get("expected", {}).get(p)
                     if ens_val is None:
                         row["cells"][p] = "∅"
                     else:
