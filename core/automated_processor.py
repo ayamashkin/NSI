@@ -1,12 +1,10 @@
 # =============================================================================
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
-# LAST 5 COMMITS (UTC+3):
-# 2026-05-21 12:57:18 db1fd327 21.05.2026
-# 2026-05-21 08:53:16 6b906f29 21.05.2026
-# 2026-05-21 08:23:07 51f335da 21.05.2026
-# 2026-05-20 17:47:49 19e8ca02 20.05.2026
-# 2026-05-20 17:39:23 b00c4b25 20.05.2026
+# =============================================================================
+# FIX 2026-06-01 11:44:00 UTC+3:
+# _parametric_match now logs mask.pattern before extract_params() call.
+# Helps diagnose why regex returns empty params.
 # =============================================================================
 # FIX 2026-05-29 16:05 UTC+3:
 # mask.params normalized to dict before passing to ProcessingResult.ens_params_mask.
@@ -24,13 +22,6 @@
 Main Processor Module
 Integration of all levels: StandardExtractor -> MaskDatabase -> LLM Generator ->
 AutoValidator -> ParametricMatch -> TF-IDF Fallback
-
-VERSION: 2026-05-22
-
-LAST_FIXES:
-  2026-05-22 08:50 UTC+3 — _get_matching_config reads from config.yaml matching.
-  2026-05-21 15:15 UTC+3 — fuzzy threshold 0.6->0.5, coating_substitution forces success.
-  2026-05-21 08:50 UTC+3 — canonicalize_standard on extract & mask generation.
 """
 
 import json
@@ -331,7 +322,7 @@ class AutomatedParametricProcessor:
                     return cached
         except Exception as e:
             logger.debug("Cache check error: %s", e)
-        return None
+            return None
 
     def _result_from_cache(self, cached: Dict[str, Any]) -> ProcessingResult:
         """Восстановить ProcessingResult из кэшированной записи result.db."""
@@ -391,13 +382,13 @@ class AutomatedParametricProcessor:
 
         # CACHE CHECK
         logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
-                 clean_text[:50], extracted_standard, self.result_db_path)
+                     clean_text[:50], extracted_standard, self.result_db_path)
         if not force and self.result_db_path and not self.no_cache:
             cached = self._check_cache(clean_text, extracted_standard)
             if cached:
                 logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
-                         clean_text[:50], extracted_standard,
-                         cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
+                            clean_text[:50], extracted_standard,
+                            cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
                 return self._result_from_cache(cached)
             else:
                 logger.info("[CACHE] MISS for '%s' / %s", clean_text[:50], extracted_standard)
@@ -406,7 +397,7 @@ class AutomatedParametricProcessor:
                 logger.debug("[CACHE] skipped (force=True)")
             elif not self.result_db_path:
                 logger.debug("[CACHE] skipped (result_db_path not set)")
-        self._cache_stats['misses'] += 1
+            self._cache_stats['misses'] += 1
 
         logger.info("Processing: %s...", clean_text[:50])
 
@@ -478,7 +469,7 @@ class AutomatedParametricProcessor:
         return self._tfidf_fallback(text, extracted, start_time)
 
     def _generate_mask(self, standard: str, item_type: str, text: str = "",
-                     standard_info: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+                       standard_info: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """Генерация маски через LLM."""
         if not self.llm_generator:
             return None
@@ -598,7 +589,7 @@ class AutomatedParametricProcessor:
             else:
                 candidates = self._ens_candidates_cache[key]
                 logger.debug("[ENS_CACHE] Using %d cached candidates for %s (cache hit)", len(candidates), key)
-        return candidates
+            return candidates
 
     def _load_coating_rules(self) -> Optional[Dict]:
         """Получение coating_rules из settings или YAML (thread-safe)."""
@@ -688,12 +679,12 @@ class AutomatedParametricProcessor:
         material = None
         if trial_match:
             material = trial_match.get('марка_материала') or trial_match.get('марка_стали')
-        if not material and trial_debug:
-            for cd in trial_debug[:5]:
-                key_params = cd.get('key_ens_params', {})
-                material = key_params.get('марка_материала') or key_params.get('марка_стали')
-                if material:
-                    break
+            if not material and trial_debug:
+                for cd in trial_debug[:5]:
+                    key_params = cd.get('key_ens_params', {})
+                    material = key_params.get('марка_материала') or key_params.get('марка_стали')
+                    if material:
+                        break
 
         if not material:
             logger.debug("[COATING_SUBST] Could not determine material from candidates")
@@ -891,6 +882,8 @@ class AutomatedParametricProcessor:
         logger.info("[ANALYZE] standard=%s, item_type=%s", standard, item_type)
 
         # Extract params using mask
+        # FIX 2026-06-01 11:44:00 UTC+3: log pattern before extract_params for debug
+        logger.debug("[ANALYZE] Using mask.pattern: %r", getattr(mask, 'pattern', None))
         params = self.parametric_client.extract_params(text, mask.pattern)
         logger.info("[ANALYZE] Extracted params: %s", params)
 
@@ -1196,7 +1189,7 @@ class AutomatedParametricProcessor:
         )
 
     def batch_process(self, texts: List[str], articles: Optional[List[str]] = None,
-                     force: bool = False, workers: int = 1) -> List[ProcessingResult]:
+                      force: bool = False, workers: int = 1) -> List[ProcessingResult]:
         """
         Batch processing with optional parallel workers.
         """
