@@ -427,7 +427,12 @@ class AutoValidator:
 
                 param_results[param] = "ok"
 
-        optional_params = set(params) - set(required) - skip_params
+        # FIX 2026-06-02: don't shadow optional_params parameter — caller already
+        # computed it as set(params) - set(required). Only filter true meta fields.
+        if optional_params is None:
+            optional_params = set(params) - set(required)
+        meta_only = {"код", "mdm_key", "id", "автор_последнего_изменения", "дата_последнего_изменения"}
+        optional_params = optional_params - meta_only
         for param in optional_params:
             extracted_val = extracted.get(param)
             best_exp_key, _ = self._find_expected_key(param, ex)
@@ -525,9 +530,10 @@ class AutoValidator:
         all_params = set()
         for d in details:
             pr = d.get("param_results", {})
+            # FIX 2026-06-02: param_results only contains pattern params — always include.
+            # skip_params filter only applies to mismatches/missing/NO-MATCH sources.
             for p in pr:
-                if p not in skip_params:
-                    all_params.add(p)
+                all_params.add(p)
             for mm in d.get("mismatches", []):
                 p = mm.get("param")
                 if p and p not in skip_params:
