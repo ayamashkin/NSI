@@ -312,6 +312,9 @@ class AutoValidator:
         if not text:
             return {"success": False, "error": "Empty text", "example": ex}
 
+        # FIX 2026-06-01 21:45: preprocess bare execution (add parens)
+        text = self._preprocess_bare_execution(text, ex)
+
         skip_params = self._skip_params
         match = pattern.search(text)
         param_results: Dict[str, str] = {}
@@ -425,6 +428,23 @@ class AutoValidator:
             "param_results": param_results,
             "extracted": extracted,
         }
+
+    @staticmethod
+    def _preprocess_bare_execution(text: str, ex: dict) -> str:
+        """Add parentheses around bare execution number if detected.
+        Transforms 'Винт 1-6-14' to 'Винт (1)-6-14' for regex matching.
+        """
+        val = ex.get("исполнение")
+        if val is None or str(val).strip() == "":
+            return text
+        val_str = str(val).strip()
+        # Check if already parenthesized
+        if f"({val_str})" in text:
+            return text
+        # Check if bare number exists in text
+        if f" {val_str}-" in text:
+            text = text.replace(f" {val_str}-", f" ({val_str})-", 1)
+        return text
 
     @staticmethod
     def _extract_param_order(pattern: str) -> List[Tuple[str, bool]]:

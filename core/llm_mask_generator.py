@@ -1496,6 +1496,38 @@ class LLMMaskGenerator:
 
         return pattern
 
+    def _fix_false_m_prefix(self, pattern: str, standard: str, item_type: str) -> str:
+        """Remove false M prefix before diameter when M is actually coating."""
+        if r'M(?P<номинальный_диаметр_резьбы>' not in pattern:
+            return pattern
+        try:
+            examples = self._get_ens_examples(standard, item_type, max_examples=50)
+        except Exception:
+            return pattern
+        # Check if M appears before diameter values in examples
+        m_before_diam = 0
+        m_as_coating = 0
+        for ex in examples:
+            name = ex.get("_meta", {}).get("name", "")
+            diam = ex.get("номинальный_диаметр_резьбы")
+            coating = ex.get("покрытие", "")
+            if diam is not None:
+                diam_str = str(diam)
+                # Check if M directly precedes diameter in name (no separator)
+                if re.search(rf'\bM{re.escape(diam_str)}\b', name, re.IGNORECASE):
+                    m_before_diam += 1
+            if str(coating).upper() == 'M':
+                m_as_coating += 1
+        total = m_before_diam + m_as_coating
+        if total == 0:
+            return pattern
+        # If M appears as coating more often than as prefix — remove M from pattern
+        if m_as_coating > m_before_diam:
+            pattern = pattern.replace(r'M(?P<номинальный_диаметр_резьбы>', r'(?P<номинальный_диаметр_резьбы>')
+            logger.debug("[_fix_false_m_prefix] %s/%s: removed false M prefix (M is coating)",
+                         standard, item_type)
+        return pattern
+
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
         # FIX: normalize double-escaped regex sequences
 
@@ -1524,6 +1556,9 @@ class LLMMaskGenerator:
         # Analyzes real ENS examples to determine: mandatory parens, optional, or bare
         # Uses regex (not str.replace) to handle prefixes like flex-sep before \(
         pattern = self._fix_execution_parens_regex(pattern, standard, item_type)
+
+        # FIX 2026-06-01 21:45 UTC+3: remove false M prefix before diameter
+        pattern = self._fix_false_m_prefix(pattern, standard, item_type)
 
         # FIX 2026-06-01 21:15 UTC+3: data-driven separator correction for all params
         pattern = self._fix_param_separators(pattern, standard, item_type)
