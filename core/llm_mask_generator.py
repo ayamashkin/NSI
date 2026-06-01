@@ -1327,7 +1327,7 @@ class LLMMaskGenerator:
         pattern = re.sub(r'\[-\\s\]\+\s+', lambda m: r'[-\s]+', pattern)
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
-        pattern = re.sub(r'\)\?(?P\(\?P<[^>]+>)', lambda m: f')?(?:[-\s]+)?{m.group("next")}', pattern)
+        pattern = pattern.replace(')?(?P<<', ')?(?:[-\\s]+)?(?P<<')
 
         # FIX 2026-06-01 11:55 UTC+3: auto-fix dot separator before покрытие -> [-\s]+
         # LLM sometimes generates \.(?P<покрытие>...) because coating values contain dots (Кд3.фос.окс)
