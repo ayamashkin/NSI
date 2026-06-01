@@ -16,6 +16,7 @@ import logging
 import pickle
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1582,7 +1583,6 @@ class LLMMaskGenerator:
 
         # FIX 2026-05-28 18:45 UTC+3: remove duplicate named groups (Python re forbids them)
         group_names = re.findall(r'\(\?P<([^>]+)>', pattern)
-        from collections import Counter
         dupes = [name for name, count in Counter(group_names).items() if count > 1]
         if dupes:
             for name in dupes:
