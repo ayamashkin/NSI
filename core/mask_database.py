@@ -3,6 +3,13 @@ Mask Database Module
 SQLite-based storage for regex masks with auto-validation support.
 """
 # =============================================================================
+# FIX 2026-06-01 10:08 UTC+3:
+# 1. json.dumps now uses ensure_ascii=False to store Cyrillic params
+#    in human-readable form instead of \uXXXX escapes.
+# 2. Reading params/required now uses json.loads() instead of split(',')
+#    because fields are stored as JSON arrays. Fallback to split(',')
+#    retained for backward compatibility with old CSV-style rows.
+# =============================================================================
 # FIX 2026-05-22 11:09 UTC+3:
 # 1. _compute_pattern_hash now includes standard+item_type to avoid collisions.
 # 2. save_mask: replace_existing uses UPDATE instead of DELETE+INSERT.
@@ -11,6 +18,7 @@ SQLite-based storage for regex masks with auto-validation support.
 #    delete any mask with conflicting pattern_hash before insert.
 # =============================================================================
 
+import json
 import sqlite3
 import hashlib
 import logging
@@ -22,6 +30,22 @@ from typing import Dict, List, Optional, Any
 from utils.standard_utils import canonicalize_standard
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_field(value: str) -> List[str]:
+    """Parse a JSON-array field from DB. Fallback to CSV split for legacy rows."""
+    if not value:
+        return []
+    value = value.strip()
+    if value.startswith('[') and value.endswith(']'):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Fallback: legacy CSV or plain string
+    return [x.strip() for x in value.split(',') if x.strip()]
 
 
 @dataclass
@@ -100,7 +124,7 @@ class MaskDatabase:
                 ON masks(pattern_hash)
             """)
             conn.commit()
-            logger.info(f"[MaskDB] Initialized: {self.db_path}")
+            logger.info("[MaskDB] Initialized: %s", self.db_path)
             self._migrate_standards()
 
     def _migrate_standards(self):
@@ -152,8 +176,8 @@ class MaskDatabase:
                     standard=row[1],
                     item_type=row[2],
                     pattern=row[3],
-                    params=row[4].split(',') if row[4] else [],
-                    required=row[5].split(',') if row[5] else [],
+                    params=_parse_json_field(row[4]),
+                    required=_parse_json_field(row[5]),
                     auto_score=row[6],
                     is_active=bool(row[7]),
                     source=row[8],
@@ -163,7 +187,7 @@ class MaskDatabase:
                     last_used=row[12],
                     usage_count=row[13]
                 )
-        return None
+            return None
 
     def get_mask_by_id(self, mask_id: int) -> Optional[MaskRecord]:
         """Получение маски по ID."""
@@ -183,8 +207,8 @@ class MaskDatabase:
                     standard=row[1],
                     item_type=row[2],
                     pattern=row[3],
-                    params=row[4].split(',') if row[4] else [],
-                    required=row[5].split(',') if row[5] else [],
+                    params=_parse_json_field(row[4]),
+                    required=_parse_json_field(row[5]),
                     auto_score=row[6],
                     is_active=bool(row[7]),
                     source=row[8],
@@ -194,7 +218,7 @@ class MaskDatabase:
                     last_used=row[12],
                     usage_count=row[13]
                 )
-        return None
+            return None
 
     def save_mask(self, mask: MaskRecord, auto_activate: bool = True,
                   replace_existing: bool = False) -> Optional[int]:
@@ -205,14 +229,14 @@ class MaskDatabase:
         При replace_existing=True используется UPDATE вместо DELETE+INSERT
         для предотвращения UNIQUE constraint failed.
         """
-        import json
         canon_std = canonicalize_standard(mask.standard)
         mask.standard = canon_std
         pattern_hash = self._compute_pattern_hash(mask.pattern, canon_std, mask.item_type)
         mask.pattern_hash = pattern_hash
 
-        params_json = json.dumps(mask.params) if mask.params else ''
-        required_json = json.dumps(mask.required) if mask.required else ''
+        # FIX 2026-06-01: ensure_ascii=False so Cyrillic is stored readable
+        params_json = json.dumps(mask.params, ensure_ascii=False) if mask.params else ''
+        required_json = json.dumps(mask.required, ensure_ascii=False) if mask.required else ''
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -230,10 +254,10 @@ class MaskDatabase:
                     existing_id = existing[0]
                     cursor.execute(
                         """UPDATE masks SET
-                           pattern = ?, params = ?, required = ?,
-                           pattern_hash = ?, is_active = ?,
-                           auto_score = ?, source = ?,
-                           last_used = CURRENT_TIMESTAMP
+                              pattern = ?, params = ?, required = ?,
+                              pattern_hash = ?, is_active = ?,
+                              auto_score = ?, source = ?,
+                              last_used = CURRENT_TIMESTAMP
                            WHERE id = ?""",
                         (mask.pattern, params_json, required_json,
                          pattern_hash, 1 if auto_activate else 0,
@@ -250,9 +274,9 @@ class MaskDatabase:
             try:
                 cursor.execute(
                     """INSERT INTO masks
-                       (standard, item_type, pattern, params, required,
-                        pattern_hash, is_active, auto_score, source,
-                        test_examples, created_at)
+                          (standard, item_type, pattern, params, required,
+                           pattern_hash, is_active, auto_score, source,
+                           test_examples, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                        ON CONFLICT(pattern_hash) DO UPDATE SET
                            standard = excluded.standard,
@@ -291,9 +315,9 @@ class MaskDatabase:
                 )
                 cursor.execute(
                     """INSERT INTO masks
-                       (standard, item_type, pattern, params, required,
-                        pattern_hash, is_active, auto_score, source,
-                        test_examples, created_at)
+                          (standard, item_type, pattern, params, required,
+                           pattern_hash, is_active, auto_score, source,
+                           test_examples, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                        RETURNING id""",
                     (canon_std, mask.item_type, mask.pattern,
@@ -348,34 +372,34 @@ class MaskDatabase:
             if standard and item_type:
                 cursor.execute(
                     """SELECT id, standard, item_type, pattern, params, required,
-                           auto_score, is_active, source, test_examples, pattern_hash,
-                           created_at, last_used, usage_count
-                    FROM masks WHERE standard = ? AND item_type = ?
-                    ORDER BY auto_score DESC""",
+                              auto_score, is_active, source, test_examples, pattern_hash,
+                              created_at, last_used, usage_count
+                       FROM masks WHERE standard = ? AND item_type = ?
+                       ORDER BY auto_score DESC""",
                     (standard, item_type)
                 )
             elif standard:
                 cursor.execute(
                     """SELECT id, standard, item_type, pattern, params, required,
-                           auto_score, is_active, source, test_examples, pattern_hash,
-                           created_at, last_used, usage_count
-                    FROM masks WHERE standard = ?
-                    ORDER BY auto_score DESC""",
+                              auto_score, is_active, source, test_examples, pattern_hash,
+                              created_at, last_used, usage_count
+                       FROM masks WHERE standard = ?
+                       ORDER BY auto_score DESC""",
                     (standard,)
                 )
             else:
                 cursor.execute(
                     """SELECT id, standard, item_type, pattern, params, required,
-                           auto_score, is_active, source, test_examples, pattern_hash,
-                           created_at, last_used, usage_count
-                    FROM masks ORDER BY auto_score DESC"""
+                              auto_score, is_active, source, test_examples, pattern_hash,
+                              created_at, last_used, usage_count
+                       FROM masks ORDER BY auto_score DESC"""
                 )
             rows = cursor.fetchall()
             return [
                 MaskRecord(
                     id=r[0], standard=r[1], item_type=r[2], pattern=r[3],
-                    params=r[4].split(',') if r[4] else [],
-                    required=r[5].split(',') if r[5] else [],
+                    params=_parse_json_field(r[4]),
+                    required=_parse_json_field(r[5]),
                     auto_score=r[6], is_active=bool(r[7]),
                     source=r[8], test_examples=r[9],
                     pattern_hash=r[10], created_at=r[11],

@@ -976,6 +976,8 @@ class AutomatedParametricProcessor:
                 details={
                     'match_type': None,
                     'match_type_ru': 'Не найдено совпадение',
+                    'mask_id': getattr(mask, 'id', None),
+                    'mask_pattern': getattr(mask, 'pattern', None),
                     'debug_candidates': debug_candidates[:5],
                 },
                 item_type=item_type,
