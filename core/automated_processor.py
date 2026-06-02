@@ -1105,6 +1105,10 @@ class AutomatedParametricProcessor:
             return self._tfidf_fallback(text, extracted, start_time)
 
         # FEAT 2026-06-02: ЭТАП 1.5 — exact match по наименованию (самый быстрый)
+        best_match = None
+        best_score = 0.0
+        match_type = None
+        match_type_ru = None
         text_normalized = text.lower().replace(' ', '').replace('\xa0', '')
         for candidate in candidates:
             cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
@@ -1133,11 +1137,6 @@ class AutomatedParametricProcessor:
         # V2 exact match via generic pattern
         generic_pattern = self._get_generic_pattern(standard, item_type, remapped, mask)
         logger.debug("[ЭТАП 2] Generic pattern: %s", generic_pattern)
-
-        best_match = None
-        best_score = 0.0
-        match_type = None
-        match_type_ru = None
         fuzzy_mismatched_params = None
         debug_candidates = []
 
