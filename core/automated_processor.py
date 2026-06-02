@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 13:00:00 — FIX: numeric fallback — если поля не совпали, проверяем значение в наименовании кандидата
 # 2026-06-02 11:30:00 — FEAT: _get_meta_value — unified extractor, ищет _meta[canonical] → record[field_name]
 # 2026-06-02 11:15:00 — FEAT: DEFAULT_FIELD_MAPPING → Dict[str, str] (canonical: source_field_name)
-# 2026-06-02 10:45:00 — FEAT: _find_field_value — нормализованный поиск полей в ENS записи
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
 # 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
@@ -914,8 +914,9 @@ class AutomatedParametricProcessor:
         for candidate in ens_candidates:
             total_weight = 0.0
             matched_weight = 0.0
+            candidate_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
             candidate_debug = {
-                'name': _get_meta_value(candidate, 'name', self._field_mapping),
+                'name': candidate_name,
                 'ens_code': _get_meta_value(candidate, 'code', self._field_mapping),
                 'params_matched': {},
                 'params_mismatched': {},
@@ -960,7 +961,15 @@ class AutomatedParametricProcessor:
                         matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
                     except (ValueError, TypeError):
                         matched = str(extracted_val).strip() == str(candidate_val).strip()
-                    status = 'exact' if matched else 'mismatched'
+
+                    # FIX 2026-06-02: fallback — if field values don't match, check if value is in candidate name
+                    # ENS data may have inconsistent field values vs name (e.g. name has "12" but field has "9")
+                    if not matched and candidate_name and self._is_value_in_name(str(extracted_val), candidate_name, param_name, standard_info.normalized if standard_info else ""):
+                        matched = True
+                        status = 'exact (in name)'
+                    else:
+                        status = 'exact' if matched else 'mismatched'
+
                     candidate_debug['params_comparison'][param_name] = {
                         'status': status,
                         'extracted': str(extracted_val),
@@ -969,7 +978,10 @@ class AutomatedParametricProcessor:
                     }
                     if matched:
                         matched_weight += weight
-                        candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
+                        if status == 'exact (in name)':
+                            candidate_debug['params_matched'][param_name] = "{} == {} (in name)".format(extracted_val, candidate_val)
+                        else:
+                            candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
                     else:
                         candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
