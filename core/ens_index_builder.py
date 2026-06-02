@@ -1,12 +1,11 @@
 # =============================================================================
-# FILE: core/ens_index_builder.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
-# 2026-05-28 14:00:00 — FIX: removed no_sep decimal heuristic (false positive: "1,5" in "15")
-# 2026-05-28 14:00:00 — FIX: all наименование fields moved to _meta, not just first (prevents наименование_1 leak)
-# 2026-05-28 12:45:00 — Fixed _norm_field_name to strip underscores (skip_fields now work)
-# 2026-05-28 12:45:00 — Added drop_reasons logging: why each field was removed
-# 2026-05-27 17:46:00 — _meta-поля удаляются из field_meta ДО формирования stats
+# ФАЙЛ: core/ens_index_builder.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 12:00:00 — FIX: code_col canonicalize — ищем code_canonical в ex, не оригинальное имя
+# 2026-06-02 11:45:00 — FEAT: _meta["code"] вместо _meta["ens_code"] — канонический ключ
+# 2026-05-28 14:00:00 — FIX: удалён no_sep decimal heuristic (ложное срабатывание "1,5" в "15")
+# 2026-05-28 14:00:00 — FIX: все наименование-поля в _meta, не только первое
+# 2026-05-28 12:45:00 — FIX: _norm_field_name убирает underscores (skip_fields работают)
 # =============================================================================
 """
 ENS Index Builder Module
@@ -472,14 +471,18 @@ class ENSIndexBuilder:
         visible_fields = sorted([k for k in field_meta if not field_meta[k]["is_metadata"]])
         metadata_fields = sorted([k for k in field_meta if field_meta[k]["is_metadata"]])
 
+        # FEAT 2026-06-02: use canonical key for code field in _meta
+        code_canonical = self.domain.canonicalize_field_name(code_col) if code_col else None
+
         structured_examples: List[Dict] = []
         for ex in resolved_examples:
             meta: Dict[str, Any] = {
                 "standard": standard,
                 "item_type": item_type,
             }
-            if code_col and code_col in ex:
-                meta["ens_code"] = str(ex.pop(code_col, ""))
+            # FIX 2026-06-02: use canonical name, not original Excel column name
+            if code_canonical and code_canonical in ex:
+                meta["code"] = str(ex.pop(code_canonical, ""))
             # Remove ALL наименование fields to _meta, not just first
             name_keys = [k for k in list(ex.keys()) if "наименование" in k.lower() and "полное" not in k.lower()]
             for k in name_keys:

@@ -896,14 +896,20 @@ class AutomatedParametricProcessor:
         logger.debug("[FUZZY] Extracted params: %s", extracted_str)
         logger.debug("[FUZZY] Total candidates to check: %d", len(ens_candidates) if ens_candidates else 0)
 
-        # DEBUG: log all keys of first candidate to understand ENS record structure
+        # DEBUG: log all keys AND values of first candidate to understand ENS record structure
         if ens_candidates:
             first = ens_candidates[0]
             all_keys = list(first.keys())
-            meta_keys = list(first.get('_meta', {}).keys()) if '_meta' in first else []
             logger.info("[FUZZY_DEBUG] First candidate keys: %s", all_keys)
-            if meta_keys:
-                logger.info("[FUZZY_DEBUG] First candidate _meta keys: %s", meta_keys)
+            meta = first.get('_meta', {})
+            if meta:
+                meta_items = {k: str(v)[:80] for k, v in meta.items()}
+                logger.info("[FUZZY_DEBUG] First candidate _meta: %s", meta_items)
+            # Also log candidate['Код'] if present
+            for code_key in ['Код', 'код', 'mdm_key', 'id']:
+                if code_key in first:
+                    logger.info("[FUZZY_DEBUG] candidate['%s'] = %s", code_key, first[code_key])
+                    break
 
         for candidate in ens_candidates:
             total_weight = 0.0
