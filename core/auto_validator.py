@@ -851,7 +851,7 @@ class AutoValidator:
         logger.debug("[AutoValidator] === END DIAGNOSTICS ===")
 
     @staticmethod
-    def _find_expected_key(param: str, ex: Dict) -> Tuple[Optional[str], float]:
+    def _find_expected_key(self, param: str, ex: Dict) -> Tuple[Optional[str], float]:
         param_lower = param.lower().replace("_", "")
         best_key = None
         best_sim = 0.0

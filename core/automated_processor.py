@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 15:00:00 — FIX: V2 generic — порог >=3 параметров (предотвращает вырожденные exact match)
 # 2026-06-02 14:30:00 — FEAT: exact_name match — первый этап, до fuzzy + вынос _build_parametric_result
 # 2026-06-02 14:00:00 — FEAT: структурированное логирование — этапы + таблица кандидатов
-# 2026-06-02 13:30:00 — FIX: V2 exact match — cand_generic только из remapped ключей
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
 # 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
@@ -1139,27 +1139,31 @@ class AutomatedParametricProcessor:
 
         # V2 exact match via generic pattern
         generic_pattern = self._get_generic_pattern(standard, item_type, remapped, mask)
-        logger.debug("[ЭТАП 2] Generic pattern: %s", generic_pattern)
+        # Count non-empty params in generic pattern (item_type + standard excluded)
+        param_count = len([v for v in remapped.values() if v is not None and str(v).strip()])
+        logger.debug("[ЭТАП 2] Generic pattern: %s (params=%d)", generic_pattern, param_count)
         fuzzy_mismatched_params = None
         debug_candidates = []
 
-        # Try exact match first
-        for candidate in candidates:
-            cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
-            if cand_name and generic_pattern:
-                # FIX 2026-06-02: build candidate generic ONLY from remapped keys
-                # (not all ENS fields — prevents false match with _meta, марка_материала, etc.)
-                cand_params = {k: _find_field_value(candidate, k) for k in remapped.keys()}
-                cand_generic = self._get_generic_pattern(standard, item_type, cand_params, mask)
-                logger.debug("[ЭТАП 2] Generic candidate %s: %s",
-                             _get_meta_value(candidate, 'code', self._field_mapping) or '?', cand_generic)
-                if generic_pattern.strip() == cand_generic.strip():
-                    best_match = candidate
-                    best_score = 1.0
-                    match_type = 'exact'
-                    match_type_ru = 'Точное совпадение (V2 generic)'
-                    logger.info("[ЭТАП 2] ✓ Точное совпадение (V2): %s", cand_name[:60])
-                    break
+        # Try exact match first (only if enough params to avoid degenerate matches)
+        if param_count >= 3:
+            for candidate in candidates:
+                cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
+                if cand_name and generic_pattern:
+                    # FIX 2026-06-02: build candidate generic ONLY from remapped keys
+                    cand_params = {k: _find_field_value(candidate, k) for k in remapped.keys()}
+                    cand_generic = self._get_generic_pattern(standard, item_type, cand_params, mask)
+                    cand_param_count = len([v for v in cand_params.values() if v is not None and str(v).strip()])
+                    # Both patterns must have enough params to prevent degenerate matches
+                    if cand_param_count >= 3 and generic_pattern.strip() == cand_generic.strip():
+                        best_match = candidate
+                        best_score = 1.0
+                        match_type = 'exact'
+                        match_type_ru = 'Точное совпадение (V2 generic)'
+                        logger.info("[ЭТАП 2] ✓ Точное совпадение (V2): %s", cand_name[:60])
+                        break
+        else:
+            logger.debug("[ЭТАП 2] V2 generic skipped: %d params < 3", param_count)
 
         # If no exact match, try fuzzy match
         if not best_match:
