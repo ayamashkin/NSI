@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 15:30:00 — ИСПРАВЛЕНИЕ: sanitize имён групп — удаление всех невалидных символов
 # 2026-06-02 02:00:00 — ИСПРАВЛЕНИЕ: Unicode escape \u003C → <, corrupted group names filter
 # 2026-06-02 01:30:00 — ИСПРАВЛЕНИЕ: GOST 7795-70 — невалидный regex \(?P<длина> → str.replace
-# 2026-06-01 22:15:00 — ИСПРАВЛЕНИЕ: _fix_pattern — \s+[-\s]+ → [-\s]+ (str.replace)
 # 2026-06-01 21:30:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens_regex — префиксы перед parens
 # 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: _fix_param_separators — data-driven разделители
 # =============================================================================
@@ -1619,8 +1619,16 @@ class LLMMaskGenerator:
             if new_pattern == pattern:
                 break
             pattern = new_pattern
-        # Fix dots in named group names (e.g., наименование.1 -> наименование_1)
-        pattern = re.sub(r'\?P<([a-zA-Zа-яА-Я0-9_]+)\.(\d+)>', r'?P<\1_\2>', pattern)
+
+        # FIX 2026-06-02: sanitize group names — remove all invalid chars
+        def _sanitize_group_name(m):
+            name = m.group(1)
+            clean = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9_]', '', name)
+            return f'(?P<{clean}>'
+
+        pattern = re.sub(r'\(\?P<([^>]+)>', _sanitize_group_name, pattern)
+        # Fix duplicate numbering (e.g., наименование_1 -> наименование_1)
+        pattern = re.sub(r'\?P<([a-zA-Zа-яА-ЯёЁ0-9_]+)_(\d+)>', r'?P<\1_\2>', pattern)
         return pattern
 
     def _sanitize_mask_result(self, result: MaskGenerationResult) -> MaskGenerationResult:
