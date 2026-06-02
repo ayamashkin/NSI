@@ -376,7 +376,7 @@ def process_parametric(text, db, ens_index, llm, domain):
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm,
         settings=settings, result_db_path='cache/result.db',
-        no_cache=False
+        no_cache=False, domain=domain
     )
     result = processor.process(text)
     click.echo(f"📄 Текст: {result.text}")
@@ -463,7 +463,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm,
         settings=settings, result_db_path=result_db,
-        no_cache=no_cache
+        no_cache=no_cache, domain=domain
     )
     logger.debug("[CLI] result_db_path set to: %s", result_db)
     click.echo("🔍 Обработка...")
@@ -693,7 +693,7 @@ def analyze_quality_cmd(input_file, db, ens_index, output, json_output, llm, coa
     processor = AutomatedParametricProcessor(
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm, settings=settings,
-        no_cache=False
+        no_cache=False, domain=domain
     )
     if coating_map:
         from core.coating_mapper import init_mapper
@@ -756,7 +756,7 @@ def diagnose(text, db, ens_index, llm, coating_map, domain, auto_domain):
     processor = AutomatedParametricProcessor(
         mask_db=mask_db, llm_clients=llm_clients if llm else None,
         ens_index_path=ens_index, use_llm_generation=llm, settings=settings,
-        no_cache=False
+        no_cache=False, domain=domain
     )
     click.echo(f"{'='*60}")
     click.echo(f"🔍 ДИАГНОСТИКА: {text}")

@@ -1,4 +1,7 @@
 # =============================================================================
+# FILE: core/automated_processor.py
+# REPO: https://github.com/ayamashkin/NSI
+# =============================================================================
 # FIX 2026-06-01 16:02:00 UTC+3:
 # Fixed imports: generators.llm_mask_generator -> core.llm_mask_generator,
 # database.mask_database -> core.mask_database. Fixed list_masks -> get_all_masks.
@@ -39,25 +42,110 @@ from pathlib import Path
 from utils.standard_utils import canonicalize_standard
 
 
-def _get_candidate_code(candidate: dict) -> Optional[str]:
-    """Extract ENS code from candidate record (handles both flat and _meta structures)."""
-    return (
-        candidate.get('код')
-        or candidate.get('mdm_key')
-        or candidate.get('_meta', {}).get('mdm_key')
-        or candidate.get('_meta', {}).get('id')
-        or candidate.get('_meta', {}).get('code')
-    )
+# FEAT 2026-06-02: configurable field names per domain
+DEFAULT_FIELD_MAPPING = {
+    # Идентификатор записи ЕНС
+    'code': ['код', 'mdm_key', 'code', 'id', 'item_id', 'record_id', 'uuid', 'external_id'],
+    # Наименование записи ЕНС
+    'name': ['наименование', 'полное_наименование', 'name', 'full_name'],
+    # Стандарт в записи ЕНС (для поиска примеров)
+    'standard': ['стандарт', 'нтд', 'нтд_1', 'standard'],
+    # Тип изделия в записи ЕНС (для поиска примеров)
+    'item_type': ['тип_изделия', 'наименование_типа', 'item_type', 'тип'],
+}
 
 
-def _get_candidate_name(candidate: dict) -> Optional[str]:
+def _get_candidate_code(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
+    """Extract ENS code from candidate record (handles both flat and _meta structures).
+
+    FIX 2026-06-02: extended with many fallback field names. Uses field_mapping from domain config.
+    """
+    code_fields = (field_mapping or {}).get('code') or DEFAULT_FIELD_MAPPING['code']
+    # Flat fields
+    for key in code_fields:
+        val = candidate.get(key)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val)
+    # Nested _meta fields
+    meta = candidate.get('_meta', {}) or {}
+    for key in code_fields:
+        val = meta.get(key)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val)
+    return None
+
+
+def _get_candidate_name(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
     """Extract ENS name from candidate record (handles both flat and _meta structures)."""
-    return (
-        candidate.get('наименование')
-        or candidate.get('полное_наименование')
-        or candidate.get('_meta', {}).get('name')
-        or candidate.get('_meta', {}).get('full_name')
-    )
+    name_fields = (field_mapping or {}).get('name') or DEFAULT_FIELD_MAPPING['name']
+    # Flat fields
+    for key in name_fields:
+        val = candidate.get(key)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val)
+    # Nested _meta fields
+    meta = candidate.get('_meta', {}) or {}
+    meta_keys = ['name', 'full_name'] + [k for k in name_fields if k not in ('name', 'full_name')]
+    for key in meta_keys:
+        val = meta.get(key)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val)
+    return None
+
+
+def _get_candidate_standard(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
+    """Extract standard (ГОСТ/ОСТ) from ENS record. Uses field_mapping['standard']."""
+    std_fields = (field_mapping or {}).get('standard') or DEFAULT_FIELD_MAPPING['standard']
+    for key in std_fields:
+        val = candidate.get(key)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val).strip()
+    return None
+
+
+def _get_candidate_item_type(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
+    """Extract item type (Болт/Винт/Гайка/Шайба) from ENS record. Uses field_mapping['item_type']."""
+    type_fields = (field_mapping or {}).get('item_type') or DEFAULT_FIELD_MAPPING['item_type']
+    for key in type_fields:
+        val = candidate.get(key)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val).strip()
+    return None
+
+
+def _find_field_value(record: dict, field_name: str) -> Optional[Any]:
+    """Find field value in ENS record by exact, normalized, or partial match.
+
+    FIX 2026-06-02: replaces broken candidate.get(param.replace('_',' '), '')
+    which returned '' (empty string) when key not found, breaking numeric comparison.
+    """
+    # 1. Exact match
+    if field_name in record and record[field_name] is not None:
+        return record[field_name]
+
+    # 2. Normalize: remove underscores
+    fn_norm = field_name.replace('_', '')
+    for key, val in record.items():
+        if key.startswith('_'):
+            continue
+        if val is not None and key.replace('_', '') == fn_norm:
+            return val
+
+    # 3. Partial: field_name is substring of key (e.g. 'длина' in 'длина_резьбы')
+    for key, val in record.items():
+        if key.startswith('_'):
+            continue
+        if val is not None and field_name in key:
+            return val
+
+    # 4. Partial reverse: key is substring of field_name
+    for key, val in record.items():
+        if key.startswith('_'):
+            continue
+        if val is not None and key in field_name:
+            return val
+
+    return None
 
 
 # Lazy import to avoid circular dependency
@@ -249,7 +337,8 @@ class AutomatedParametricProcessor:
         settings: Optional[Any] = None,
         result_db_path: Optional[str] = None,
         cache_ttl_days: int = 7,
-        no_cache: bool = False
+        no_cache: bool = False,
+        domain: Optional[str] = None,
     ):
         self.mask_db = mask_db
         self.llm_clients = llm_clients or {}
@@ -261,7 +350,14 @@ class AutomatedParametricProcessor:
         self.result_db_path = result_db_path
         self.cache_ttl_days = cache_ttl_days
         self.no_cache = no_cache
+        self.domain = domain
         self._cache_stats = {'hits': 0, 'misses': 0}
+
+        # FEAT 2026-06-02: load field mapping + extraction rules from domain config
+        self._field_mapping = self._load_domain_config(domain, 'ens_field_mapping', DEFAULT_FIELD_MAPPING.copy())
+        self._item_types = self._load_domain_config(domain, 'item_types', ['Болт', 'Винт', 'Гайка', 'Шайба'])
+        self._standard_patterns = self._load_domain_config(domain, 'standard_patterns',
+            [r'ОСТ\s*\d+\s*\d+-\d+', r'ГОСТ\s*\d+-\d+', r'ТУ\s*\d+-\d+'])
         if result_db_path:
             db_file = Path(result_db_path)
             if not db_file.exists():
@@ -280,6 +376,54 @@ class AutomatedParametricProcessor:
 
         # Инициализация компонентов
         self._init_components()
+
+    @staticmethod
+    def _load_domain_config(domain: Optional[str], key: str, default: Any) -> Any:
+        """Load a config key from domain config YAML.
+
+        FEAT 2026-06-02: generic loader for ens_field_mapping, item_types, standard_patterns, etc.
+        Falls back to default if domain not found or key not present.
+        """
+        if not domain:
+            return default
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(domain)
+            val = getattr(cfg, key, None)
+            if val is not None:
+                logger.info("[DOMAIN_CFG] %s from '%s': %s", key, domain, val)
+                return val
+        except Exception as e:
+            logger.debug("[DOMAIN_CFG] Failed to load %s for domain '%s': %s", key, domain, e)
+        return default
+
+    def _validate_extraction(self, item_type: Optional[str], standard_info: Any) -> Tuple[Optional[str], Optional[str]]:
+        """Validate and normalize extracted item_type and standard against domain config.
+
+        FEAT 2026-06-02: uses self._item_types and self._standard_patterns from domain config.
+        """
+        validated_type = None
+        if item_type:
+            it_clean = str(item_type).strip()
+            for allowed in self._item_types:
+                if it_clean.lower() == allowed.lower():
+                    validated_type = allowed  # use canonical form from config
+                    break
+            if not validated_type:
+                logger.debug("[EXTRACT] item_type '%s' not in allowed list: %s", it_clean, self._item_types)
+
+        validated_standard = None
+        if standard_info and getattr(standard_info, 'normalized', None):
+            std = str(standard_info.normalized).strip()
+            import re
+            for pat in self._standard_patterns:
+                if re.search(pat, std, re.IGNORECASE):
+                    validated_standard = std
+                    break
+            if not validated_standard:
+                logger.debug("[EXTRACT] standard '%s' did not match any pattern: %s", std, self._standard_patterns)
+
+        return validated_type, validated_standard
 
     def _init_components(self):
         """Инициализация внутренних компонентов."""
@@ -404,7 +548,15 @@ class AutomatedParametricProcessor:
         extracted = self.standard_extractor.extract_all(clean_text)
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
-        extracted_standard = canonicalize_standard(standard_info.normalized) if standard_info else None
+
+        # FEAT 2026-06-02: validate against domain config (item_types, standard_patterns)
+        validated_type, validated_standard = self._validate_extraction(
+            item_type, standard_info
+        )
+        item_type = validated_type or item_type
+        extracted_standard = validated_standard or (
+            canonicalize_standard(standard_info.normalized) if standard_info else None
+        )
 
         # CACHE CHECK
         logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
@@ -776,8 +928,8 @@ class AutomatedParametricProcessor:
             total_weight = 0.0
             matched_weight = 0.0
             candidate_debug = {
-                'name': _get_candidate_name(candidate) or 'N/A',
-                'ens_code': _get_candidate_code(candidate) or 'N/A',
+                'name': _get_candidate_name(candidate, self._field_mapping),
+                'ens_code': _get_candidate_code(candidate, self._field_mapping),
                 'params_matched': {},
                 'params_mismatched': {},
                 'params_missing': [],
@@ -790,7 +942,7 @@ class AutomatedParametricProcessor:
                 weight = 2.0 if param_name in TEXT_FIELDS else 1.0
                 total_weight += weight
 
-                candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
+                candidate_val = _find_field_value(candidate, param_name)
 
                 if param_name in TEXT_FIELDS:
                     if param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
@@ -853,9 +1005,17 @@ class AutomatedParametricProcessor:
             logger.info(
                 "[FUZZY] Best match: score=%.3f, code=%s, name=%s",
                 best_score,
-                best_match.get('код', best_match.get('mdm_key', 'N/A')),
-                best_match.get('наименование', best_match.get('полное_наименование', 'N/A'))[:50]
+                _get_candidate_code(best_match, self._field_mapping) or 'N/A',
+                (_get_candidate_name(best_match, self._field_mapping) or 'N/A')[:50]
             )
+            # FIX 2026-06-02: log why score is low — show matched/mismatched per candidate
+            for cd in debug_candidates:
+                if cd.get('is_best'):
+                    logger.debug("[FUZZY] Best detail: matched=%s mismatched=%s score=%s",
+                                 cd.get('params_matched', {}),
+                                 cd.get('params_mismatched', {}),
+                                 cd.get('score'))
+                    break
         else:
             logger.info("[FUZZY] No match found among %d candidates", len(ens_candidates))
 
@@ -938,7 +1098,7 @@ class AutomatedParametricProcessor:
 
         # Try exact match first
         for candidate in candidates:
-            cand_name = _get_candidate_name(candidate) or ''
+            cand_name = _get_candidate_name(candidate, self._field_mapping) or ''
             if cand_name and generic_pattern:
                 cand_generic = self._get_generic_pattern(standard, item_type, candidate, mask)
                 if generic_pattern.strip() == cand_generic.strip():
@@ -1001,8 +1161,8 @@ class AutomatedParametricProcessor:
 
         # Build ENS match dict
         ens_match = {
-            'code': _get_candidate_code(best_match),
-            'name': _get_candidate_name(best_match),
+            'code': _get_candidate_code(best_match, self._field_mapping),
+            'name': _get_candidate_name(best_match, self._field_mapping),
             'mdm_key': best_match.get('mdm_key'),
             'score': best_score,
             'type': match_type,
@@ -1012,8 +1172,8 @@ class AutomatedParametricProcessor:
         # Get ENS params from best_match
         ens_params_from_match = {}
         for key in remapped.keys():
-            val = best_match.get(key) or best_match.get(key.replace('_', ' '))
-            if val:
+            val = _find_field_value(best_match, key)
+            if val is not None:
                 ens_params_from_match[key] = val
 
         # Calculate confidence

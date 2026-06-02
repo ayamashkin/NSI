@@ -69,6 +69,41 @@ class AutoValidator:
         """Normalize field name for comparison."""
         return re.sub(r"[^\wа-яА-Я]", "", str(name).lower().strip())
 
+    def _get_ens_field_mapping(self) -> Dict[str, List[str]]:
+        """Load ENS field mapping from domain config or use defaults.
+
+        FEAT 2026-06-02: configurable field names per domain.
+        """
+        defaults = {
+            'standard': ['стандарт', 'нтд', 'нтд_1', 'standard'],
+            'item_type': ['тип_изделия', 'наименование_типа', 'item_type', 'тип'],
+        }
+        if not self.domain:
+            return defaults
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            fm = getattr(cfg, 'ens_field_mapping', None)
+            if fm and isinstance(fm, dict):
+                for key in ('standard', 'item_type'):
+                    val = fm.get(key)
+                    if val and isinstance(val, (list, tuple)):
+                        defaults[key] = list(val)
+                logger.info("[AutoValidator] ENS field mapping loaded: %s", defaults)
+                return defaults
+        except Exception as e:
+            logger.debug("[AutoValidator] Failed to load field mapping: %s", e)
+        return defaults
+
+    def _get_ens_field(self, record: dict, field_key: str) -> Optional[str]:
+        """Get field value from ENS record using configured field names."""
+        mapping = self._get_ens_field_mapping()
+        for key in mapping.get(field_key, []):
+            val = record.get(key)
+            if val is not None and str(val).strip() not in ('', 'None', 'null'):
+                return str(val).strip()
+        return None
+
     def _build_skip_params(self) -> set:
         """Build skip parameters set from domain config."""
         base = {
@@ -162,8 +197,9 @@ class AutoValidator:
                 if isinstance(v, list):
                     items.extend(v)
         for item in items:
-            std = canonicalize_standard(str(item.get("стандарт", item.get("нтд", ""))))
-            itype = str(item.get("наименование_типа", item.get("тип_изделия", item.get("тип", "")))).strip()
+            std_raw = self._get_ens_field(item, 'standard')
+            std = canonicalize_standard(std_raw) if std_raw else ""
+            itype = self._get_ens_field(item, 'item_type') or ""
             if not std or not itype:
                 continue
             if std not in index:
