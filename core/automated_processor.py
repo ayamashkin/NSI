@@ -2,6 +2,7 @@
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
 # 2026-06-02 15:00:00 — FIX: V2 generic — порог >=3 параметров (предотвращает вырожденные exact match)
+# 2026-06-02 16:30:00 — FEAT: coating variants — Н.Кд, Ан.Окс → Хим.Пас
 # 2026-06-02 14:30:00 — FEAT: exact_name match — первый этап, до fuzzy + вынос _build_parametric_result
 # 2026-06-02 14:00:00 — FEAT: структурированное логирование — этапы + таблица кандидатов
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
@@ -700,14 +701,22 @@ class AutomatedParametricProcessor:
         return len(intersection) / len(union)
 
     def _get_coating_variants(self, coating: str) -> List[str]:
-        """Generate coating search variants."""
+        """Generate coating search variants.
+
+        FEAT 2026-06-02: added Н.Кд for ОСТ 1 31509-80, Ан.Окс variants.
+        """
         if not coating:
             return [coating]
         coating_str = str(coating).strip().lower()
         variants = [coating]
         if coating_str in ('кд', 'кд.'):
             for v in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
-                      'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
+                      'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс',
+                      'Н.Кд', 'Н.Кд6', 'Н.Кд9']:
+                variants.append(v)
+            return variants
+        if coating_str in ('ан.окс', 'ан.окс.', 'окс'):
+            for v in ['Ан.Окс', 'Хим.Пас', 'Хим.Окс', 'Н.Кд']:
                 variants.append(v)
             return variants
         return variants

@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+ (не \d+(?:[.,]\d+)?)
+# 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+
 # 2026-06-02 15:30:00 — FIX: sanitize имён групп — удаление невалидных символов
 # 2026-06-02 02:00:00 — FIX: Unicode escape \u003C → <, corrupted group names filter
 # 2026-06-02 01:30:00 — ИСПРАВЛЕНИЕ: GOST 7795-70 — невалидный regex \(?P<длина> → str.replace
@@ -1604,7 +1604,7 @@ class LLMMaskGenerator:
                 r'(?P<длина>\d+(?:[.,]\d+)?)(?:\.(?P<свойства>',
                 r'(?P<длина>\d+)(?:\.(?P<свойства>'
             )
-            logger.debug("[LLMMaskGenerator] Fixed GOST dot format: длина now \d+ only")
+            logger.debug("[LLMMaskGenerator] Fixed GOST dot format: длина now \\d+ only")
         pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
