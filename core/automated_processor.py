@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 14:30:00 — FEAT: exact_name match — первый этап, до fuzzy + вынос _build_parametric_result
 # 2026-06-02 14:00:00 — FEAT: структурированное логирование — этапы + таблица кандидатов
 # 2026-06-02 13:30:00 — FIX: V2 exact match — cand_generic только из remapped ключей
-# 2026-06-02 13:15:00 — УДАЛЕНО: DEFAULT_FIELD_MAPPING — теперь только _meta + field_mapping
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
 # 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
@@ -1104,6 +1104,26 @@ class AutomatedParametricProcessor:
             logger.info("[ЭТАП 2] ✗ Кандидаты ЕНС не найдены для %s/%s", standard, item_type)
             return self._tfidf_fallback(text, extracted, start_time)
 
+        # FEAT 2026-06-02: ЭТАП 1.5 — exact match по наименованию (самый быстрый)
+        text_normalized = text.lower().replace(' ', '').replace('\xa0', '')
+        for candidate in candidates:
+            cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
+            if cand_name:
+                cand_normalized = cand_name.lower().replace(' ', '').replace('\xa0', '')
+                if text_normalized == cand_normalized:
+                    best_match = candidate
+                    best_score = 1.0
+                    match_type = 'exact_name'
+                    match_type_ru = 'Точное совпадение по наименованию'
+                    logger.info("[ЭТАП 1.5] ✓ Точное совпадение по имени: %s", cand_name[:60])
+                    break
+        if best_match:
+            return self._build_parametric_result(
+                text, mask, extracted, remapped, best_match,
+                best_score, match_type, match_type_ru, [],
+                substitution_info, start_time
+            )
+
         # Apply coating substitution
         substituted_params, substitution_info = self._apply_coating_substitution(remapped, candidates)
         if substitution_info:
@@ -1199,6 +1219,34 @@ class AutomatedParametricProcessor:
             **best_match
         }
 
+        return self._build_parametric_result(
+            text, mask, extracted, remapped, best_match,
+            best_score, match_type, match_type_ru, debug_candidates,
+            substitution_info, start_time
+        )
+
+    def _build_parametric_result(self, text, mask, extracted, remapped,
+                                 best_match, best_score, match_type, match_type_ru,
+                                 debug_candidates, substitution_info, start_time):
+        """Build ProcessingResult from best match.
+
+        FEAT 2026-06-02: extracted from _parametric_match to reuse for exact_name match.
+        """
+        standard_info = extracted.get('standard_info')
+        standard = canonicalize_standard(standard_info.normalized) if standard_info else ""
+        item_type = extracted.get('item_type', '')
+        processing_time = (time.time() - start_time) * 1000
+
+        params = self.parametric_client.extract_params(text, mask.pattern)
+
+        # Build ENS match
+        ens_match = None
+        if best_match:
+            ens_match = {
+                'code': _get_meta_value(best_match, 'code', self._field_mapping),
+                'name': _get_meta_value(best_match, 'name', self._field_mapping),
+            }
+
         # Get ENS params from best_match
         ens_params_from_match = {}
         for key in remapped.keys():
@@ -1208,7 +1256,9 @@ class AutomatedParametricProcessor:
 
         # Calculate confidence
         confidence = best_score
-        if match_type == 'exact':
+        if match_type == 'exact_name':
+            confidence = 1.0
+        elif match_type == 'exact':
             confidence = 1.0
         elif match_type == 'fuzzy':
             confidence = best_score
@@ -1220,26 +1270,24 @@ class AutomatedParametricProcessor:
         success = confidence >= matching_cfg.success_threshold
 
         # Build details
+        # FEAT 2026-06-02: only best_match in debug_candidates (not all top-5)
+        best_debug = [cd for cd in debug_candidates if cd.get('is_best')]
         details = {
             'match_type': match_type,
             'match_type_ru': match_type_ru,
             'mask_id': getattr(mask, 'id', None),
             'mask_pattern': getattr(mask, 'pattern', None),
-            'debug_candidates': debug_candidates[:5] if debug_candidates else [],
+            'debug_candidates': best_debug[:1] if best_debug else [],
         }
 
         if substitution_info:
             details['coating_substitution'] = substitution_info
-            # If substitution was applied and we have a match, force success
             if best_match:
                 success = True
                 confidence = max(confidence, matching_cfg.success_threshold)
                 logger.info("[РЕЗУЛЬТАТ] Принудительный успех (подстановка покрытия)")
 
-        if fuzzy_mismatched_params:
-            details['fuzzy_mismatched_params'] = fuzzy_mismatched_params
-
-        # Normalize mask.params to human-readable dict
+        # Normalize mask.params
         mask_params_norm = mask.params
         if isinstance(mask_params_norm, str):
             try:
@@ -1262,7 +1310,6 @@ class AutomatedParametricProcessor:
                     flat.append(item)
             mask_params_norm = {p: None for p in flat} if flat else {}
 
-        # Result summary
         bm_code = _get_meta_value(best_match, 'code', self._field_mapping) if best_match else 'N/A'
         bm_name = _get_meta_value(best_match, 'name', self._field_mapping) if best_match else 'N/A'
         if success:
@@ -1272,7 +1319,7 @@ class AutomatedParametricProcessor:
             logger.info("[РЕЗУЛЬТАТ] ✗ Неудача: лучший code=%s, score=%.3f, порог=%.2f",
                         bm_code, best_score, matching_cfg.success_threshold)
 
-        result = ProcessingResult(
+        return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
             success=success,
@@ -1286,9 +1333,6 @@ class AutomatedParametricProcessor:
             item_type=item_type,
             standard=standard
         )
-
-        logger.debug("[РЕЗУЛЬТАТ] success=%s confidence=%.3f match_type=%s", success, confidence, match_type)
-        return result
 
     def _normalize_value_types(self, value):
         """Нормализация типов значений."""

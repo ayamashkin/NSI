@@ -1,12 +1,11 @@
 # =============================================================================
-# Nomenclature Processor CLI
-# Параметрический процессор сопоставления номенклатуры с ЕНС (LLM + Parametric modes)
-#
-# 2026-06-01 08:44:00 — FIX: UnboundLocalError in batch() — removed nested `import json` shadowing module
-# 2026-05-29 16:05:00 — FIX: ens_params_mask now human-readable in Excel (dict/list normalization)
-# 2026-05-29 15:55:00 — FIX: batch() added no_cache parameter, --no-cache flag now works
-# 2026-05-29 12:15:00 — FEAT: generate-masks added --responses-dir option for loading LLM answers from txt files
-# 2026-05-29 12:15:00 — FEAT: batch mode with --responses-dir processes only standards with response files (no --force needed)
+# ФАЙЛ: cli.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре)
+# 2026-06-02 14:00:00 — FEAT: структурированное логирование этапов в automated_processor
+# 2026-06-01 08:44:00 — FIX: UnboundLocalError в batch() — убран nested import json
+# 2026-05-29 16:05:00 — FIX: ens_params_mask — human-readable в Excel
+# 2026-05-29 15:55:00 — FIX: batch() no_cache параметр, --no-cache флаг
 # =============================================================================
 
 import click
@@ -599,7 +598,10 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             has_mask = False
             if result.standard and result.item_type:
                 try:
-                    m = mask_db.get_mask(result.standard, result.item_type)
+                    # FIX 2026-06-02: search with UPPER item_type (matches processor logic)
+                    m = mask_db.get_mask(result.standard, result.item_type.upper())
+                    if m is None:
+                        m = mask_db.get_mask(result.standard, result.item_type)
                     has_mask = m is not None
                 except Exception:
                     pass
