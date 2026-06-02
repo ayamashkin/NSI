@@ -1,27 +1,11 @@
 # =============================================================================
-# FILE: core/automated_processor.py
-# REPO: https://github.com/ayamashkin/NSI
-# =============================================================================
-# FIX 2026-06-01 16:02:00 UTC+3:
-# Fixed imports: generators.llm_mask_generator -> core.llm_mask_generator,
-# database.mask_database -> core.mask_database. Fixed list_masks -> get_all_masks.
-# Removed non-existent activate_mask call; mask.is_active set directly.
-# =============================================================================
-# FIX 2026-06-01 11:44:00 UTC+3:
-# _parametric_match now logs mask.pattern before extract_params() call.
-# Helps diagnose why regex returns empty params.
-# =============================================================================
-# FIX 2026-05-29 16:05 UTC+3:
-# mask.params normalized to dict before passing to ProcessingResult.ens_params_mask.
-# Prevents Unicode-escaped JSON strings in output.
-# =============================================================================
-# FIX 2026-05-29 15:55 UTC+3:
-# Added no_cache parameter to bypass result.db cache.
-# Cache skip: process() now checks 'not self.no_cache' before reading cache.
-# =============================================================================
-# FIX 2026-05-22 08:50 UTC+3:
-# _get_matching_config now reads from config.yaml matching section directly.
-# All thresholds/weights loaded from config; no hardcoded fallbacks.
+# ФАЙЛ: core/automated_processor.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 03:00:00 — FEAT: DEFAULT_FIELD_MAPPING — configurable ENS field names (code/name/standard/item_type)
+# 2026-06-02 02:45:00 — FEAT: _find_field_value — нормализованный поиск полей в ENS записи
+# 2026-06-02 02:30:00 — FEAT: _get_candidate_code/name/standard/item_type — configurable из domain config
+# 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
+# 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
 """
 Main Processor Module
@@ -55,21 +39,37 @@ DEFAULT_FIELD_MAPPING = {
 }
 
 
+def _get_ci(record: dict, key: str) -> Optional[Any]:
+    """Case-insensitive dict.get. Returns value if key found (any case), else None.
+
+    FIX 2026-06-02: ENS exports may have 'Код' instead of 'код', 'Наименование' vs 'наименование'.
+    """
+    # Fast path: exact match
+    if key in record:
+        return record[key]
+    # Case-insensitive search
+    key_lower = key.lower()
+    for k, v in record.items():
+        if isinstance(k, str) and k.lower() == key_lower:
+            return v
+    return None
+
+
 def _get_candidate_code(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
     """Extract ENS code from candidate record (handles both flat and _meta structures).
 
     FIX 2026-06-02: extended with many fallback field names. Uses field_mapping from domain config.
     """
     code_fields = (field_mapping or {}).get('code') or DEFAULT_FIELD_MAPPING['code']
-    # Flat fields
+    # Flat fields (case-insensitive)
     for key in code_fields:
-        val = candidate.get(key)
+        val = _get_ci(candidate, key)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
             return str(val)
-    # Nested _meta fields
+    # Nested _meta fields (case-insensitive)
     meta = candidate.get('_meta', {}) or {}
     for key in code_fields:
-        val = meta.get(key)
+        val = _get_ci(meta, key)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
             return str(val)
     return None
@@ -78,16 +78,16 @@ def _get_candidate_code(candidate: dict, field_mapping: Optional[Dict] = None) -
 def _get_candidate_name(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
     """Extract ENS name from candidate record (handles both flat and _meta structures)."""
     name_fields = (field_mapping or {}).get('name') or DEFAULT_FIELD_MAPPING['name']
-    # Flat fields
+    # Flat fields (case-insensitive)
     for key in name_fields:
-        val = candidate.get(key)
+        val = _get_ci(candidate, key)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
             return str(val)
-    # Nested _meta fields
+    # Nested _meta fields (case-insensitive)
     meta = candidate.get('_meta', {}) or {}
     meta_keys = ['name', 'full_name'] + [k for k in name_fields if k not in ('name', 'full_name')]
     for key in meta_keys:
-        val = meta.get(key)
+        val = _get_ci(meta, key)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
             return str(val)
     return None
@@ -97,7 +97,7 @@ def _get_candidate_standard(candidate: dict, field_mapping: Optional[Dict] = Non
     """Extract standard (ГОСТ/ОСТ) from ENS record. Uses field_mapping['standard']."""
     std_fields = (field_mapping or {}).get('standard') or DEFAULT_FIELD_MAPPING['standard']
     for key in std_fields:
-        val = candidate.get(key)
+        val = _get_ci(candidate, key)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
             return str(val).strip()
     return None
@@ -107,7 +107,7 @@ def _get_candidate_item_type(candidate: dict, field_mapping: Optional[Dict] = No
     """Extract item type (Болт/Винт/Гайка/Шайба) from ENS record. Uses field_mapping['item_type']."""
     type_fields = (field_mapping or {}).get('item_type') or DEFAULT_FIELD_MAPPING['item_type']
     for key in type_fields:
-        val = candidate.get(key)
+        val = _get_ci(candidate, key)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
             return str(val).strip()
     return None
@@ -123,7 +123,12 @@ def _find_field_value(record: dict, field_name: str) -> Optional[Any]:
     if field_name in record and record[field_name] is not None:
         return record[field_name]
 
-    # 2. Normalize: remove underscores
+    # 2. Case-insensitive exact match (e.g. 'Код' vs 'код')
+    val = _get_ci(record, field_name)
+    if val is not None:
+        return val
+
+    # 3. Normalize: remove underscores
     fn_norm = field_name.replace('_', '')
     for key, val in record.items():
         if key.startswith('_'):
@@ -131,7 +136,7 @@ def _find_field_value(record: dict, field_name: str) -> Optional[Any]:
         if val is not None and key.replace('_', '') == fn_norm:
             return val
 
-    # 3. Partial: field_name is substring of key (e.g. 'длина' in 'длина_резьбы')
+    # 4. Partial: field_name is substring of key (e.g. 'длина' in 'длина_резьбы')
     for key, val in record.items():
         if key.startswith('_'):
             continue

@@ -16,15 +16,15 @@ prompt_template: "prompts/templates/mask_generation_hardware.txt"
 # ENS field names
 ens_field_mapping:
    # Код ЕНС
-  code: [код]
+  code: [Код]
   # Наименование ЕНС
-  name: [наименование]
+  name: [Наименование]
   # Поле со стандартом в записи ЕНС
   standard:
-    - нтд
+    - НТД
   # Поле с типом изделия в записи ЕНС
   item_type:
-    - наименование_типа
+    - Наименование_типа
 
 index:
  # skip_fields — поля ЕНС, которые НЕ участвуют ни в сопоставлении, ни в regex.

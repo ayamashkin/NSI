@@ -1,12 +1,11 @@
 # =============================================================================
 # ФАЙЛ: core/auto_validator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 03:00:00 — FEAT: _get_ens_field_mapping — configurable ENS field names из domain config
+# 2026-06-02 02:30:00 — ИСПРАВЛЕНИЕ: optional_params shadowing → шаг_резьбы теперь в таблице
+# 2026-06-02 02:15:00 — ИСПРАВЛЕНИЕ: all_params skip_params фильтр → param_results не фильтруется
 # 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: TokenParser fallback — гибридный парсер когда regexp не матчит
 # 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: _preprocess_bare_execution — скобки к bare-исполнению
-# 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: таблица валидации теперь выводится при 0% match (NO MATCH), + XLSX лист
-# 2026-05-29 13:30:00 — FEAT: GOST7795Normalizer для .029→покрытие+толщина, .46→группа_прочности
-# 2026-05-29 13:30:00 — ИСПРАВЛЕНИЕ: _find_expected_key twin mapping свойства↔группа_прочности
-# 2026-05-28 21:06:00 — ИСПРАВЛЕНИЕ: _print_summary_table с ENS/Mask значениями
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
@@ -95,11 +94,22 @@ class AutoValidator:
             logger.debug("[AutoValidator] Failed to load field mapping: %s", e)
         return defaults
 
+    @staticmethod
+    def _get_ci(record: dict, key: str) -> Optional[Any]:
+        """Case-insensitive dict.get. Returns value if key found (any case), else None."""
+        if key in record:
+            return record[key]
+        key_lower = key.lower()
+        for k, v in record.items():
+            if isinstance(k, str) and k.lower() == key_lower:
+                return v
+        return None
+
     def _get_ens_field(self, record: dict, field_key: str) -> Optional[str]:
-        """Get field value from ENS record using configured field names."""
+        """Get field value from ENS record using configured field names (case-insensitive)."""
         mapping = self._get_ens_field_mapping()
         for key in mapping.get(field_key, []):
-            val = record.get(key)
+            val = self._get_ci(record, key)
             if val is not None and str(val).strip() not in ('', 'None', 'null'):
                 return str(val).strip()
         return None
