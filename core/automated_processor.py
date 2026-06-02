@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 13:30:00 — FIX: V2 exact match — cand_generic только из remapped ключей, не всех полей ENS
+# 2026-06-02 14:00:00 — FEAT: структурированное логирование — этапы + таблица кандидатов
+# 2026-06-02 13:30:00 — FIX: V2 exact match — cand_generic только из remapped ключей
 # 2026-06-02 13:15:00 — УДАЛЕНО: DEFAULT_FIELD_MAPPING — теперь только _meta + field_mapping
-# 2026-06-02 11:30:00 — FEAT: _get_meta_value — unified extractor, ищет _meta[canonical] → record[field_name]
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
 # 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
@@ -544,51 +544,43 @@ class AutomatedParametricProcessor:
                 logger.debug("[CACHE] skipped (result_db_path not set)")
             self._cache_stats['misses'] += 1
 
-        logger.info("Processing: %s...", clean_text[:50])
+        logger.info("=" * 70)
+        logger.info("Обработка номенклатуры: %s", clean_text[:60])
+        logger.info("=" * 70)
 
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
 
         if not standard_info or not item_type:
+            logger.info("[ЭТАП 1] Поиск по наименованию: стандарт/тип не определены")
             return self._llm_direct_process(clean_text, start_time)
 
         standard = canonicalize_standard(standard_info.normalized)
-        logger.info("[PROCESS] standard='%s', item_type='%s', clean_text='%s'", standard, item_type, clean_text[:60])
+        logger.info("[ЭТАП 1] Поиск по наименованию: стандарт=%s, тип=%s", standard, item_type)
 
         # Level 1: Проверка MaskDatabase
         search_item_type = item_type.upper()
-        logger.info("[PROCESS] Searching mask: standard='%s', item_type='%s'", standard, search_item_type)
         mask = self.mask_db.get_mask(standard, search_item_type)
-        logger.info("[PROCESS] Search by (standard+UPPER): found=%s", mask is not None)
-
         if mask is None:
             mask = self.mask_db.get_mask(standard, item_type)
-            if mask:
-                logger.info("[PROCESS] Found mask with original item_type: %s", item_type)
-
         if mask is None:
             try:
                 standard_masks = self.mask_db.get_all_masks(standard=standard)
-                logger.info("[PROCESS] Found %d masks for standard='%s' (any item_type)", len(standard_masks), standard)
                 if standard_masks:
                     mask = standard_masks[0]
-                    logger.info("[PROCESS] Using mask with item_type='%s'", mask.item_type)
-            except Exception as e:
-                logger.warning("[PROCESS] Fallback search by standard error: %s", e)
-
-        logger.info("[PROCESS] mask found: %s, is_active: %s", mask is not None, getattr(mask, 'is_active', False))
-
-        if mask is not None and not mask.is_active:
-            logger.info("[PROCESS] Mask found but inactive, forcing active")
-            mask.is_active = True
+            except Exception:
+                pass
 
         if mask and mask.is_active:
-            effective_standard = getattr(mask, 'standard', None) or standard
-            if not getattr(mask, 'standard', None):
-                mask.standard = effective_standard
-                logger.info("[PROCESS] Fixed empty mask.standard -> '%s'", effective_standard)
-            logger.info("[PROCESS] -> Level 6: ParametricMatch with mask %s", mask.id)
+            logger.info("[ЭТАП 1] ✓ Маска найдена: id=%s, стандарт=%s, тип=%s",
+                        mask.id, getattr(mask, 'standard', standard), mask.item_type)
             return self._parametric_match(clean_text, mask, extracted, start_time)
+        elif mask:
+            logger.info("[ЭТАП 1] ⚠ Маска найдена, но неактивна")
+            mask.is_active = True
+            return self._parametric_match(clean_text, mask, extracted, start_time)
+        else:
+            logger.info("[ЭТАП 1] ✗ Маска не найдена")
 
         # Level 2: LLM Generation
         if self.use_llm_generation and self.llm_generator:
@@ -997,33 +989,8 @@ class AutomatedParametricProcessor:
 
             debug_candidates.append(candidate_debug)
 
-        # FEAT 2026-06-02: log TOP-5 candidates with full comparison table
-        sorted_candidates = sorted(debug_candidates, key=lambda x: (-x['score'], -x.get('exact_count', 0)))
-        for rank, cd in enumerate(sorted_candidates[:5], 1):
-            marker = " ★BEST★" if cd.get('is_best') else ""
-            logger.info(
-                "[FUZZY] #%d%s code=%s score=%.3f exact=%d/%d",
-                rank, marker,
-                cd.get('ens_code') or 'N/A',
-                cd.get('score', 0),
-                cd.get('exact_count', 0),
-                cd.get('params_count', 0)
-            )
-            logger.info("[FUZZY] #%d name=%s", rank, (cd.get('name') or 'N/A')[:60])
-            # Log each param comparison
-            for pname, pcmp in cd.get('params_comparison', {}).items():
-                status = pcmp.get('status', '?')
-                extracted = pcmp.get('extracted', '?')
-                ens_val = pcmp.get('ens_value', '?')
-                sim = pcmp.get('similarity', 0)
-                if status == 'exact':
-                    logger.info("[FUZZY] #%d   %s: %s == %s", rank, pname, extracted, ens_val)
-                elif status == 'exact (in name)':
-                    logger.info("[FUZZY] #%d   %s: %s ≈≈ %s (in name)", rank, pname, extracted, ens_val)
-                elif 'token' in status:
-                    logger.info("[FUZZY] #%d   %s: %s ~~ %s (sim=%.2f)", rank, pname, extracted, ens_val, sim)
-                else:
-                    logger.info("[FUZZY] #%d   %s: %s != %s ✗", rank, pname, extracted, ens_val)
+        # FEAT 2026-06-02: structured table logging
+        self._log_candidates_table(extracted_params, debug_candidates, best_match, best_score)
 
         if not best_match:
             logger.info("[FUZZY] No match found among %d candidates", len(ens_candidates))
@@ -1050,6 +1017,63 @@ class AutomatedParametricProcessor:
                 result[key] = value
         return result
 
+    def _log_candidates_table(self, extracted_params: Dict[str, str],
+                               debug_candidates: List[Dict],
+                               best_match: Optional[Dict],
+                               best_score: float) -> None:
+        """Log TOP-5 candidates in structured table format.
+
+        FEAT 2026-06-02: readable table with param comparisons per candidate.
+        """
+        if not debug_candidates:
+            logger.info("[ЭТАП 2] Кандидаты не найдены")
+            return
+
+        param_names = list(extracted_params.keys())
+        sorted_cds = sorted(debug_candidates, key=lambda x: (-x['score'], -x.get('exact_count', 0)))
+
+        # Header
+        logger.info("[ЭТАП 2] Топ-%d кандидатов по параметрам:", min(5, len(sorted_cds)))
+        header = "│ {:<12} │ {:<36} │ {:>5} ".format(
+            "Код ЕНС", "Наименование ЕНС", "Score")
+        for pn in param_names:
+            header += "│ {:>14} ".format(pn[:14])
+        logger.info(header)
+        logger.info("├" + "─" * 14 + "┼" + "─" * 38 + "┼" + "─" * 7 +
+                    "".join("┼" + "─" * 16 for _ in param_names) + "┤")
+
+        # Rows
+        for cd in sorted_cds[:5]:
+            is_best = cd.get('is_best', False)
+            code = (cd.get('ens_code') or 'N/A')[:12]
+            name = (cd.get('name') or 'N/A')[:34] + (' ★' if is_best else '')
+            score = cd.get('score', 0)
+            row = "│ {:<12} │ {:<36} │ {:>5.3f} ".format(code, name, score)
+            for pn in param_names:
+                pcmp = cd.get('params_comparison', {}).get(pn, {})
+                status = pcmp.get('status', '?')
+                extracted = pcmp.get('extracted', '?')
+                ens_val = pcmp.get('ens_value', '?')
+                if status == 'exact':
+                    cell = "{}={}".format(extracted, ens_val)
+                elif status == 'exact (in name)':
+                    cell = "{}≈{}☆".format(extracted, ens_val)
+                elif 'token' in status:
+                    cell = "{}~{}".format(extracted, ens_val)
+                else:
+                    cell = "{}≠{}✗".format(extracted, ens_val)
+                row += "│ {:>14} ".format(cell[:14])
+            logger.info(row)
+
+        # Footer
+        if best_match and best_score >= 0.7:
+            bm_code = _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A'
+            logger.info("★ Успешный кандидат: %s (score=%.3f)", bm_code, best_score)
+        elif best_match:
+            logger.info("⚠ Лучший кандидат ниже порога: score=%.3f < 0.7", best_score)
+        else:
+            logger.info("✗ Совпадение не найдено")
+
     def _get_generic_pattern(self, standard: str, item_type: str, params: Dict[str, str], mask: Any) -> str:
         """Построить generic-паттерн для V2 exact match."""
         parts = [item_type]
@@ -1069,34 +1093,26 @@ class AutomatedParametricProcessor:
         item_type = extracted.get('item_type')
         standard = canonicalize_standard(standard_info.normalized) if standard_info else ''
 
-        logger.info("[ANALYZE] text=%s", text[:80])
-        logger.info("[ANALYZE] standard=%s, item_type=%s", standard, item_type)
-
-        # Extract params using mask
-        # FIX 2026-06-01 11:44:00 UTC+3: log pattern before extract_params for debug
-        logger.debug("[ANALYZE] Using mask.pattern: %r", getattr(mask, 'pattern', None))
+        logger.info("[ЭТАП 2] Извлечение параметров из наименования...")
         params = self.parametric_client.extract_params(text, mask.pattern)
-        logger.info("[ANALYZE] Extracted params: %s", params)
-
-        # Remap to ENS field names
         remapped = self._remap_params(params, mask.params)
-        logger.info("[ANALYZE] Remapped params: %s", remapped)
+        logger.info("[ЭТАП 2] Извлечённые параметры: %s", remapped)
 
         # Get ENS candidates
         candidates = self._get_cached_ens_candidates(standard, item_type)
         if not candidates:
-            logger.warning("[ANALYZE] No ENS candidates for %s/%s", standard, item_type)
+            logger.info("[ЭТАП 2] ✗ Кандидаты ЕНС не найдены для %s/%s", standard, item_type)
             return self._tfidf_fallback(text, extracted, start_time)
 
         # Apply coating substitution
         substituted_params, substitution_info = self._apply_coating_substitution(remapped, candidates)
         if substitution_info:
-            logger.info("[ANALYZE] Coating substitution applied: %s", substitution_info)
+            logger.info("[ЭТАП 2] Подстановка покрытия: %s", substitution_info)
             remapped = substituted_params
 
         # V2 exact match via generic pattern
         generic_pattern = self._get_generic_pattern(standard, item_type, remapped, mask)
-        logger.debug("[ANALYZE] Generic pattern (text): %s", generic_pattern)
+        logger.debug("[ЭТАП 2] Generic pattern: %s", generic_pattern)
 
         best_match = None
         best_score = 0.0
@@ -1113,14 +1129,14 @@ class AutomatedParametricProcessor:
                 # (not all ENS fields — prevents false match with _meta, марка_материала, etc.)
                 cand_params = {k: _find_field_value(candidate, k) for k in remapped.keys()}
                 cand_generic = self._get_generic_pattern(standard, item_type, cand_params, mask)
-                logger.debug("[ANALYZE] Generic pattern candidate %s: %s",
+                logger.debug("[ЭТАП 2] Generic candidate %s: %s",
                              _get_meta_value(candidate, 'code', self._field_mapping) or '?', cand_generic)
                 if generic_pattern.strip() == cand_generic.strip():
                     best_match = candidate
                     best_score = 1.0
                     match_type = 'exact'
                     match_type_ru = 'Точное совпадение (V2 generic)'
-                    logger.info("[ANALYZE] V2 EXACT MATCH: %s", cand_name[:60])
+                    logger.info("[ЭТАП 2] ✓ Точное совпадение (V2): %s", cand_name[:60])
                     break
 
         # If no exact match, try fuzzy match
@@ -1146,13 +1162,13 @@ class AutomatedParametricProcessor:
                     match_type = 'fuzzy_coating_variant'
                     match_type_ru = 'Нечеткое совпадение (вариант покрытия)'
                     best_score = 0.8
-                    logger.info("[ANALYZE] Found match with coating variant: %s", variant)
+                    logger.info("[ЭТАП 2] ✓ Совпадение с вариантом покрытия: %s", variant)
                     break
 
         processing_time = (time.time() - start_time) * 1000
 
         if not best_match:
-            logger.warning("[ANALYZE] No match found for %s", text[:60])
+            logger.info("[ЭТАП 2] ✗ Совпадение не найдено для %s", text[:60])
             return ProcessingResult(
                 text=text,
                 level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
@@ -1218,7 +1234,7 @@ class AutomatedParametricProcessor:
             if best_match:
                 success = True
                 confidence = max(confidence, matching_cfg.success_threshold)
-                logger.info("[ANALYZE] Forced success=True due to coating substitution")
+                logger.info("[РЕЗУЛЬТАТ] Принудительный успех (подстановка покрытия)")
 
         if fuzzy_mismatched_params:
             details['fuzzy_mismatched_params'] = fuzzy_mismatched_params
@@ -1246,10 +1262,15 @@ class AutomatedParametricProcessor:
                     flat.append(item)
             mask_params_norm = {p: None for p in flat} if flat else {}
 
-        # DEBUG: log what _parametric_match actually returns
-        logger.info("[PARAMETRIC_RESULT] success=%s confidence=%.3f match_type=%s code=%s",
-                    success, confidence, match_type,
-                    _get_meta_value(best_match, 'code', self._field_mapping) if best_match else 'N/A')
+        # Result summary
+        bm_code = _get_meta_value(best_match, 'code', self._field_mapping) if best_match else 'N/A'
+        bm_name = _get_meta_value(best_match, 'name', self._field_mapping) if best_match else 'N/A'
+        if success:
+            logger.info("[РЕЗУЛЬТАТ] ✓ Успех: code=%s, name=%s, confidence=%.3f",
+                        bm_code, bm_name[:50], confidence)
+        else:
+            logger.info("[РЕЗУЛЬТАТ] ✗ Неудача: лучший code=%s, score=%.3f, порог=%.2f",
+                        bm_code, best_score, matching_cfg.success_threshold)
 
         result = ProcessingResult(
             text=text,
@@ -1266,7 +1287,7 @@ class AutomatedParametricProcessor:
             standard=standard
         )
 
-        logger.info("[ANALYZE] Result: success=%s, confidence=%.3f, match_type=%s", success, confidence, match_type)
+        logger.debug("[РЕЗУЛЬТАТ] success=%s confidence=%.3f match_type=%s", success, confidence, match_type)
         return result
 
     def _normalize_value_types(self, value):
