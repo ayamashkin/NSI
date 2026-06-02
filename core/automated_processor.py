@@ -1105,6 +1105,8 @@ class AutomatedParametricProcessor:
             logger.info("[ЭТАП 2] ✗ Кандидаты ЕНС не найдены для %s/%s", standard, item_type)
             return self._tfidf_fallback(text, extracted, start_time)
 
+        substitution_info = None  # always defined
+
         # FEAT 2026-06-02: ЭТАП 1.5 — exact match по наименованию (самый быстрый)
         best_match = None
         best_score = 0.0
