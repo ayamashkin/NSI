@@ -1,8 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/ens_index_builder.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 12:00:00 — FIX: code_col canonicalize — ищем code_canonical в ex, не оригинальное имя
-# 2026-06-02 11:45:00 — FEAT: _meta["code"] вместо _meta["ens_code"] — канонический ключ
+# 2026-06-02 12:30:00 — FIX: code_canonical исключён из invisible_fields (Код невидим в наименованиях)
+# 2026-06-02 12:15:00 — FIX: code_canonical определяется рано — до удаления невидимых полей
+# 2026-06-02 12:00:00 — FIX: ищем code_canonical в ex, не оригинальное имя колонки
 # 2026-05-28 14:00:00 — FIX: удалён no_sep decimal heuristic (ложное срабатывание "1,5" в "15")
 # 2026-05-28 14:00:00 — FIX: все наименование-поля в _meta, не только первое
 # 2026-05-28 12:45:00 — FIX: _norm_field_name убирает underscores (skip_fields работают)
@@ -251,6 +252,9 @@ class ENSIndexBuilder:
                     i += 1
             canonical_map[field] = canonical
 
+        # FEAT 2026-06-02: canonical name for code field — needed early to protect from invisible_fields
+        code_canonical = self.domain.canonicalize_field_name(code_col) if code_col else None
+
         normalized_examples: List[Dict] = []
         for ex in examples:
             new_ex: Dict[str, Any] = {}
@@ -396,7 +400,8 @@ class ENSIndexBuilder:
             if k in safe_constant:
                 continue
             vc = visible_counts.get(k, 0)
-            if vc == 0 and k not in self.domain.retain_fields and k not in self.domain.meta_fields:
+            # FIX 2026-06-02: don't drop code field — it's numeric ID, never visible in names
+            if vc == 0 and k not in self.domain.retain_fields and k not in self.domain.meta_fields and k != code_canonical:
                 invisible_fields.add(k)
 
         for k in invisible_fields:
@@ -470,9 +475,6 @@ class ENSIndexBuilder:
 
         visible_fields = sorted([k for k in field_meta if not field_meta[k]["is_metadata"]])
         metadata_fields = sorted([k for k in field_meta if field_meta[k]["is_metadata"]])
-
-        # FEAT 2026-06-02: use canonical key for code field in _meta
-        code_canonical = self.domain.canonicalize_field_name(code_col) if code_col else None
 
         structured_examples: List[Dict] = []
         for ex in resolved_examples:
