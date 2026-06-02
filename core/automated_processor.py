@@ -1151,10 +1151,17 @@ class AutomatedParametricProcessor:
                 match_type = 'fuzzy'
                 match_type_ru = 'Нечеткое совпадение'
                 best_score = 0.85
+                logger.info("[FUZZY_ASSIGN] debug_candidates=%d best_match_code=%s",
+                            len(debug_candidates),
+                            _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A')
                 for cd in debug_candidates:
                     if cd.get('is_best'):
                         best_score = cd.get('score', 0.85)
+                        logger.info("[FUZZY_ASSIGN] Found is_best: score=%.3f exact=%d",
+                                    best_score, cd.get('exact_count', 0))
                         break
+                else:
+                    logger.warning("[FUZZY_ASSIGN] No is_best found in %d candidates!", len(debug_candidates))
 
         # If still no match, try with coating variants
         if not best_match and remapped.get('покрытие'):
