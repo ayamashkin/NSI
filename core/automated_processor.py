@@ -882,6 +882,7 @@ class AutomatedParametricProcessor:
         best_match = None
         best_score = 0.0
         best_exact_count = 0
+        prev_best_idx = None  # index of previous best in debug_candidates
         debug_candidates = []
 
         coating_variants = None
@@ -891,21 +892,6 @@ class AutomatedParametricProcessor:
         extracted_str = ", ".join("{}={}".format(k, v) for k, v in extracted_params.items() if v is not None)
         logger.debug("[FUZZY] Extracted params: %s", extracted_str)
         logger.debug("[FUZZY] Total candidates to check: %d", len(ens_candidates) if ens_candidates else 0)
-
-        # DEBUG: log all keys AND values of first candidate to understand ENS record structure
-        if ens_candidates:
-            first = ens_candidates[0]
-            all_keys = list(first.keys())
-            logger.info("[FUZZY_DEBUG] First candidate keys: %s", all_keys)
-            meta = first.get('_meta', {})
-            if meta:
-                meta_items = {k: str(v)[:80] for k, v in meta.items()}
-                logger.info("[FUZZY_DEBUG] First candidate _meta: %s", meta_items)
-            # Also log candidate['Код'] if present
-            for code_key in ['Код', 'код', 'mdm_key', 'id']:
-                if code_key in first:
-                    logger.info("[FUZZY_DEBUG] candidate['%s'] = %s", code_key, first[code_key])
-                    break
 
         for candidate in ens_candidates:
             total_weight = 0.0
@@ -998,6 +984,10 @@ class AutomatedParametricProcessor:
                 is_better = True
 
             if is_better:
+                # FIX 2026-06-02: clear is_best from previous best candidate
+                if prev_best_idx is not None and prev_best_idx < len(debug_candidates):
+                    debug_candidates[prev_best_idx]['is_best'] = False
+                prev_best_idx = len(debug_candidates)
                 best_score = score
                 best_exact_count = exact_count
                 best_match = candidate
@@ -1034,17 +1024,6 @@ class AutomatedParametricProcessor:
                     logger.info("[FUZZY] #%d   %s: %s ~~ %s (sim=%.2f)", rank, pname, extracted, ens_val, sim)
                 else:
                     logger.info("[FUZZY] #%d   %s: %s != %s ✗", rank, pname, extracted, ens_val)
-
-        # DEBUG: dump full best_match record to verify field values
-        if best_match:
-            bm_code = _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A'
-            bm_name = _get_meta_value(best_match, 'name', self._field_mapping) or 'N/A'
-            logger.info("[FUZZY_DEBUG] Best match DUMP code=%s name=%s", bm_code, bm_name)
-            for k, v in sorted(best_match.items()):
-                if k == '_meta':
-                    logger.info("[FUZZY_DEBUG]   _meta: %s", v)
-                elif v is not None and str(v).strip():
-                    logger.info("[FUZZY_DEBUG]   %s = %s", k, str(v)[:60])
 
         if not best_match:
             logger.info("[FUZZY] No match found among %d candidates", len(ens_candidates))
@@ -1151,17 +1130,10 @@ class AutomatedParametricProcessor:
                 match_type = 'fuzzy'
                 match_type_ru = 'Нечеткое совпадение'
                 best_score = 0.85
-                logger.info("[FUZZY_ASSIGN] debug_candidates=%d best_match_code=%s",
-                            len(debug_candidates),
-                            _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A')
                 for cd in debug_candidates:
                     if cd.get('is_best'):
                         best_score = cd.get('score', 0.85)
-                        logger.info("[FUZZY_ASSIGN] Found is_best: score=%.3f exact=%d",
-                                    best_score, cd.get('exact_count', 0))
                         break
-                else:
-                    logger.warning("[FUZZY_ASSIGN] No is_best found in %d candidates!", len(debug_candidates))
 
         # If still no match, try with coating variants
         if not best_match and remapped.get('покрытие'):
