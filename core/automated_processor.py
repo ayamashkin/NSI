@@ -15,6 +15,7 @@ AutoValidator -> ParametricMatch -> TF-IDF Fallback
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -1006,22 +1007,46 @@ class AutomatedParametricProcessor:
 
             debug_candidates.append(candidate_debug)
 
-        if best_match:
+        # FEAT 2026-06-02: log TOP-5 candidates with full comparison table
+        sorted_candidates = sorted(debug_candidates, key=lambda x: (-x['score'], -x.get('exact_count', 0)))
+        for rank, cd in enumerate(sorted_candidates[:5], 1):
+            marker = " ★BEST★" if cd.get('is_best') else ""
             logger.info(
-                "[FUZZY] Best match: score=%.3f, code=%s, name=%s",
-                best_score,
-                _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A',
-                (_get_meta_value(best_match, 'name', self._field_mapping) or 'N/A')[:50]
+                "[FUZZY] #%d%s code=%s score=%.3f exact=%d/%d",
+                rank, marker,
+                cd.get('ens_code') or 'N/A',
+                cd.get('score', 0),
+                cd.get('exact_count', 0),
+                cd.get('params_count', 0)
             )
-            # FIX 2026-06-02: log why score is low — show matched/mismatched per candidate
-            for cd in debug_candidates:
-                if cd.get('is_best'):
-                    logger.debug("[FUZZY] Best detail: matched=%s mismatched=%s score=%s",
-                                 cd.get('params_matched', {}),
-                                 cd.get('params_mismatched', {}),
-                                 cd.get('score'))
-                    break
-        else:
+            logger.info("[FUZZY] #%d name=%s", rank, (cd.get('name') or 'N/A')[:60])
+            # Log each param comparison
+            for pname, pcmp in cd.get('params_comparison', {}).items():
+                status = pcmp.get('status', '?')
+                extracted = pcmp.get('extracted', '?')
+                ens_val = pcmp.get('ens_value', '?')
+                sim = pcmp.get('similarity', 0)
+                if status == 'exact':
+                    logger.info("[FUZZY] #%d   %s: %s == %s", rank, pname, extracted, ens_val)
+                elif status == 'exact (in name)':
+                    logger.info("[FUZZY] #%d   %s: %s ≈≈ %s (in name)", rank, pname, extracted, ens_val)
+                elif 'token' in status:
+                    logger.info("[FUZZY] #%d   %s: %s ~~ %s (sim=%.2f)", rank, pname, extracted, ens_val, sim)
+                else:
+                    logger.info("[FUZZY] #%d   %s: %s != %s ✗", rank, pname, extracted, ens_val)
+
+        # DEBUG: dump full best_match record to verify field values
+        if best_match:
+            bm_code = _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A'
+            bm_name = _get_meta_value(best_match, 'name', self._field_mapping) or 'N/A'
+            logger.info("[FUZZY_DEBUG] Best match DUMP code=%s name=%s", bm_code, bm_name)
+            for k, v in sorted(best_match.items()):
+                if k == '_meta':
+                    logger.info("[FUZZY_DEBUG]   _meta: %s", v)
+                elif v is not None and str(v).strip():
+                    logger.info("[FUZZY_DEBUG]   %s = %s", k, str(v)[:60])
+
+        if not best_match:
             logger.info("[FUZZY] No match found among %d candidates", len(ens_candidates))
 
         return best_match, debug_candidates
