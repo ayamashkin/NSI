@@ -1117,7 +1117,7 @@ class AutomatedParametricProcessor:
 
         # V2 exact match via generic pattern
         generic_pattern = self._get_generic_pattern(standard, item_type, remapped, mask)
-        logger.info("[ANALYZE] Generic pattern (text): %s", generic_pattern)
+        logger.debug("[ANALYZE] Generic pattern (text): %s", generic_pattern)
 
         best_match = None
         best_score = 0.0
@@ -1266,6 +1266,11 @@ class AutomatedParametricProcessor:
                 else:
                     flat.append(item)
             mask_params_norm = {p: None for p in flat} if flat else {}
+
+        # DEBUG: log what _parametric_match actually returns
+        logger.info("[PARAMETRIC_RESULT] success=%s confidence=%.3f match_type=%s code=%s",
+                    success, confidence, match_type,
+                    _get_meta_value(best_match, 'code', self._field_mapping) if best_match else 'N/A')
 
         result = ProcessingResult(
             text=text,
