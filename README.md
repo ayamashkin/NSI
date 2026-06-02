@@ -522,7 +522,6 @@ python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl -
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.xlsx --domain hardware --no-cache
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
 
-
 python cli.py batch data/nomenclature2.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
 
 # Анализ качества
