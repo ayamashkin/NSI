@@ -10,7 +10,7 @@
 # =============================================================================
 domain: hardware
 description: "Крепёжные изделия (болты, гайки, шайбы, винты)"
-index_path: "cache/ens_hardware.pkl"
+index_path: "models/ens_hardware.pkl"
 prompt_template: "prompts/templates/mask_generation_hardware.txt"
 
 
