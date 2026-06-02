@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 13:00:00 — FIX: numeric fallback — если поля не совпали, проверяем значение в наименовании кандидата
+# 2026-06-02 13:30:00 — FIX: V2 exact match — cand_generic только из remapped ключей, не всех полей ENS
+# 2026-06-02 13:15:00 — УДАЛЕНО: DEFAULT_FIELD_MAPPING — теперь только _meta + field_mapping
 # 2026-06-02 11:30:00 — FEAT: _get_meta_value — unified extractor, ищет _meta[canonical] → record[field_name]
-# 2026-06-02 11:15:00 — FEAT: DEFAULT_FIELD_MAPPING → Dict[str, str] (canonical: source_field_name)
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
 # 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
@@ -26,14 +26,9 @@ from pathlib import Path
 from utils.standard_utils import canonicalize_standard
 
 
-# FEAT 2026-06-02: configurable field names per domain
-# Ключ = каноническое имя в _meta, Значение = имя поля в исходной ENS записи
-DEFAULT_FIELD_MAPPING = {
-    'code': 'код',
-    'name': 'наименование',
-    'standard': 'стандарт',
-    'item_type': 'тип_изделия',
-}
+# FEAT 2026-06-02: канонические ключи в _meta индекса
+# _meta.code / _meta.name / _meta.standard / _meta.item_type
+# Загружаются из ens_field_mapping в domain config; fallback — _get_ci() по record
 
 
 def _get_ci(record: dict, key: str) -> Optional[Any]:
@@ -57,13 +52,12 @@ def _get_meta_value(candidate: dict, canonical_key: str,
     """Extract value from ENS candidate by canonical key.
 
     Priority:
-      1. candidate['_meta'][canonical_key] — new index format (e.g. _meta.code)
-      2. candidate[field_name] — direct access via field_mapping (e.g. candidate['Код'])
-      3. candidate[field_name] — fallback via DEFAULT_FIELD_MAPPING
+      1. candidate['_meta'][canonical_key] — новый формат индекса (e.g. _meta.code)
+      2. candidate[field_name] — прямой доступ через field_mapping (e.g. candidate['Код'])
 
-    FEAT 2026-06-02: unified extractor for code/name/standard/item_type.
+    FEAT 2026-06-02: unified extractor. DEFAULT_FIELD_MAPPING удалён — используем _meta.
     """
-    # 1. _meta with canonical key (post-rebuild index)
+    # 1. _meta with canonical key (новый формат индекса после перестройки)
     meta = candidate.get('_meta', {}) or {}
     val = meta.get(canonical_key)
     if val is not None and str(val).strip() not in ('', 'None', 'null'):
@@ -71,7 +65,7 @@ def _get_meta_value(candidate: dict, canonical_key: str,
 
     # 2. Direct access via field_mapping (e.g. field_mapping['code'] = 'Код')
     fm = field_mapping or {}
-    field_name = fm.get(canonical_key) or DEFAULT_FIELD_MAPPING.get(canonical_key)
+    field_name = fm.get(canonical_key)
     if field_name:
         val = _get_ci(candidate, field_name)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
@@ -326,7 +320,7 @@ class AutomatedParametricProcessor:
         self._cache_stats = {'hits': 0, 'misses': 0}
 
         # FEAT 2026-06-02: load field mapping + extraction rules from domain config
-        self._field_mapping = self._load_domain_config(domain, 'ens_field_mapping', DEFAULT_FIELD_MAPPING.copy())
+        self._field_mapping = self._load_domain_config(domain, 'ens_field_mapping', {})
         self._item_types = self._load_domain_config(domain, 'item_types', ['Болт', 'Винт', 'Гайка', 'Шайба'])
         self._standard_patterns = self._load_domain_config(domain, 'standard_patterns',
             [r'ОСТ\s*\d+\s*\d+-\d+', r'ГОСТ\s*\d+-\d+', r'ТУ\s*\d+-\d+'])
@@ -1084,7 +1078,7 @@ class AutomatedParametricProcessor:
 
         # V2 exact match via generic pattern
         generic_pattern = self._get_generic_pattern(standard, item_type, remapped, mask)
-        logger.info("[ANALYZE] Generic pattern: %s", generic_pattern)
+        logger.info("[ANALYZE] Generic pattern (text): %s", generic_pattern)
 
         best_match = None
         best_score = 0.0
@@ -1097,7 +1091,12 @@ class AutomatedParametricProcessor:
         for candidate in candidates:
             cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
             if cand_name and generic_pattern:
-                cand_generic = self._get_generic_pattern(standard, item_type, candidate, mask)
+                # FIX 2026-06-02: build candidate generic ONLY from remapped keys
+                # (not all ENS fields — prevents false match with _meta, марка_материала, etc.)
+                cand_params = {k: _find_field_value(candidate, k) for k in remapped.keys()}
+                cand_generic = self._get_generic_pattern(standard, item_type, cand_params, mask)
+                logger.debug("[ANALYZE] Generic pattern candidate %s: %s",
+                             _get_meta_value(candidate, 'code', self._field_mapping) or '?', cand_generic)
                 if generic_pattern.strip() == cand_generic.strip():
                     best_match = candidate
                     best_score = 1.0
