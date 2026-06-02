@@ -1,9 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 03:00:00 — FEAT: DEFAULT_FIELD_MAPPING — configurable ENS field names (code/name/standard/item_type)
-# 2026-06-02 02:45:00 — FEAT: _find_field_value — нормализованный поиск полей в ENS записи
-# 2026-06-02 02:30:00 — FEAT: _get_candidate_code/name/standard/item_type — configurable из domain config
+# 2026-06-02 11:30:00 — FEAT: _get_meta_value — unified extractor, ищет _meta[canonical] → record[field_name]
+# 2026-06-02 11:15:00 — FEAT: DEFAULT_FIELD_MAPPING → Dict[str, str] (canonical: source_field_name)
+# 2026-06-02 10:45:00 — FEAT: _find_field_value — нормализованный поиск полей в ENS записи
 # 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
 # 2026-06-01 11:44:00 — FEAT: _parametric_match логирует mask.pattern перед extract_params
 # =============================================================================
@@ -27,15 +27,12 @@ from utils.standard_utils import canonicalize_standard
 
 
 # FEAT 2026-06-02: configurable field names per domain
+# Ключ = каноническое имя в _meta, Значение = имя поля в исходной ENS записи
 DEFAULT_FIELD_MAPPING = {
-    # Идентификатор записи ЕНС
-    'code': ['код', 'mdm_key', 'code', 'id', 'item_id', 'record_id', 'uuid', 'external_id'],
-    # Наименование записи ЕНС
-    'name': ['наименование', 'полное_наименование', 'name', 'full_name'],
-    # Стандарт в записи ЕНС (для поиска примеров)
-    'standard': ['стандарт', 'нтд', 'нтд_1', 'standard'],
-    # Тип изделия в записи ЕНС (для поиска примеров)
-    'item_type': ['тип_изделия', 'наименование_типа', 'item_type', 'тип'],
+    'code': 'код',
+    'name': 'наименование',
+    'standard': 'стандарт',
+    'item_type': 'тип_изделия',
 }
 
 
@@ -55,61 +52,31 @@ def _get_ci(record: dict, key: str) -> Optional[Any]:
     return None
 
 
-def _get_candidate_code(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
-    """Extract ENS code from candidate record (handles both flat and _meta structures).
+def _get_meta_value(candidate: dict, canonical_key: str,
+                    field_mapping: Optional[Dict] = None) -> Optional[Any]:
+    """Extract value from ENS candidate by canonical key.
 
-    FIX 2026-06-02: extended with many fallback field names. Uses field_mapping from domain config.
+    Priority:
+      1. candidate['_meta'][canonical_key] — new index format (e.g. _meta.code)
+      2. candidate[field_name] — direct access via field_mapping (e.g. candidate['Код'])
+      3. candidate[field_name] — fallback via DEFAULT_FIELD_MAPPING
+
+    FEAT 2026-06-02: unified extractor for code/name/standard/item_type.
     """
-    code_fields = (field_mapping or {}).get('code') or DEFAULT_FIELD_MAPPING['code']
-    # Flat fields (case-insensitive)
-    for key in code_fields:
-        val = _get_ci(candidate, key)
-        if val is not None and str(val).strip() not in ('', 'None', 'null'):
-            return str(val)
-    # Nested _meta fields (case-insensitive)
+    # 1. _meta with canonical key (post-rebuild index)
     meta = candidate.get('_meta', {}) or {}
-    for key in code_fields:
-        val = _get_ci(meta, key)
+    val = meta.get(canonical_key)
+    if val is not None and str(val).strip() not in ('', 'None', 'null'):
+        return val
+
+    # 2. Direct access via field_mapping (e.g. field_mapping['code'] = 'Код')
+    fm = field_mapping or {}
+    field_name = fm.get(canonical_key) or DEFAULT_FIELD_MAPPING.get(canonical_key)
+    if field_name:
+        val = _get_ci(candidate, field_name)
         if val is not None and str(val).strip() not in ('', 'None', 'null'):
-            return str(val)
-    return None
+            return val
 
-
-def _get_candidate_name(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
-    """Extract ENS name from candidate record (handles both flat and _meta structures)."""
-    name_fields = (field_mapping or {}).get('name') or DEFAULT_FIELD_MAPPING['name']
-    # Flat fields (case-insensitive)
-    for key in name_fields:
-        val = _get_ci(candidate, key)
-        if val is not None and str(val).strip() not in ('', 'None', 'null'):
-            return str(val)
-    # Nested _meta fields (case-insensitive)
-    meta = candidate.get('_meta', {}) or {}
-    meta_keys = ['name', 'full_name'] + [k for k in name_fields if k not in ('name', 'full_name')]
-    for key in meta_keys:
-        val = _get_ci(meta, key)
-        if val is not None and str(val).strip() not in ('', 'None', 'null'):
-            return str(val)
-    return None
-
-
-def _get_candidate_standard(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
-    """Extract standard (ГОСТ/ОСТ) from ENS record. Uses field_mapping['standard']."""
-    std_fields = (field_mapping or {}).get('standard') or DEFAULT_FIELD_MAPPING['standard']
-    for key in std_fields:
-        val = _get_ci(candidate, key)
-        if val is not None and str(val).strip() not in ('', 'None', 'null'):
-            return str(val).strip()
-    return None
-
-
-def _get_candidate_item_type(candidate: dict, field_mapping: Optional[Dict] = None) -> Optional[str]:
-    """Extract item type (Болт/Винт/Гайка/Шайба) from ENS record. Uses field_mapping['item_type']."""
-    type_fields = (field_mapping or {}).get('item_type') or DEFAULT_FIELD_MAPPING['item_type']
-    for key in type_fields:
-        val = _get_ci(candidate, key)
-        if val is not None and str(val).strip() not in ('', 'None', 'null'):
-            return str(val).strip()
     return None
 
 
@@ -929,12 +896,21 @@ class AutomatedParametricProcessor:
         logger.debug("[FUZZY] Extracted params: %s", extracted_str)
         logger.debug("[FUZZY] Total candidates to check: %d", len(ens_candidates) if ens_candidates else 0)
 
+        # DEBUG: log all keys of first candidate to understand ENS record structure
+        if ens_candidates:
+            first = ens_candidates[0]
+            all_keys = list(first.keys())
+            meta_keys = list(first.get('_meta', {}).keys()) if '_meta' in first else []
+            logger.info("[FUZZY_DEBUG] First candidate keys: %s", all_keys)
+            if meta_keys:
+                logger.info("[FUZZY_DEBUG] First candidate _meta keys: %s", meta_keys)
+
         for candidate in ens_candidates:
             total_weight = 0.0
             matched_weight = 0.0
             candidate_debug = {
-                'name': _get_candidate_name(candidate, self._field_mapping),
-                'ens_code': _get_candidate_code(candidate, self._field_mapping),
+                'name': _get_meta_value(candidate, 'name', self._field_mapping),
+                'ens_code': _get_meta_value(candidate, 'code', self._field_mapping),
                 'params_matched': {},
                 'params_mismatched': {},
                 'params_missing': [],
@@ -1010,8 +986,8 @@ class AutomatedParametricProcessor:
             logger.info(
                 "[FUZZY] Best match: score=%.3f, code=%s, name=%s",
                 best_score,
-                _get_candidate_code(best_match, self._field_mapping) or 'N/A',
-                (_get_candidate_name(best_match, self._field_mapping) or 'N/A')[:50]
+                _get_meta_value(best_match, 'code', self._field_mapping) or 'N/A',
+                (_get_meta_value(best_match, 'name', self._field_mapping) or 'N/A')[:50]
             )
             # FIX 2026-06-02: log why score is low — show matched/mismatched per candidate
             for cd in debug_candidates:
@@ -1103,7 +1079,7 @@ class AutomatedParametricProcessor:
 
         # Try exact match first
         for candidate in candidates:
-            cand_name = _get_candidate_name(candidate, self._field_mapping) or ''
+            cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
             if cand_name and generic_pattern:
                 cand_generic = self._get_generic_pattern(standard, item_type, candidate, mask)
                 if generic_pattern.strip() == cand_generic.strip():
@@ -1166,8 +1142,8 @@ class AutomatedParametricProcessor:
 
         # Build ENS match dict
         ens_match = {
-            'code': _get_candidate_code(best_match, self._field_mapping),
-            'name': _get_candidate_name(best_match, self._field_mapping),
+            'code': _get_meta_value(best_match, 'code', self._field_mapping),
+            'name': _get_meta_value(best_match, 'name', self._field_mapping),
             'mdm_key': best_match.get('mdm_key'),
             'score': best_score,
             'type': match_type,

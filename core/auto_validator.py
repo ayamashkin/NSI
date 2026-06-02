@@ -1,9 +1,10 @@
 # =============================================================================
 # ФАЙЛ: core/auto_validator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 03:00:00 — FEAT: _get_ens_field_mapping — configurable ENS field names из domain config
-# 2026-06-02 02:30:00 — ИСПРАВЛЕНИЕ: optional_params shadowing → шаг_резьбы теперь в таблице
-# 2026-06-02 02:15:00 — ИСПРАВЛЕНИЕ: all_params skip_params фильтр → param_results не фильтруется
+# 2026-06-02 11:15:00 — FEAT: _get_ens_field — ищет _meta[canonical] → record[field_name]
+# 2026-06-02 11:00:00 — FEAT: _get_ci — case-insensitive dict.get для ENS полей
+# 2026-06-02 08:15:00 — ИСПРАВЛЕНИЕ: optional_params shadowing → шаг_резьбы теперь в таблице
+# 2026-06-02 08:00:00 — ИСПРАВЛЕНИЕ: all_params skip_params фильтр → param_results не фильтруется
 # 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: TokenParser fallback — гибридный парсер когда regexp не матчит
 # 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: _preprocess_bare_execution — скобки к bare-исполнению
 # =============================================================================
@@ -68,32 +69,6 @@ class AutoValidator:
         """Normalize field name for comparison."""
         return re.sub(r"[^\wа-яА-Я]", "", str(name).lower().strip())
 
-    def _get_ens_field_mapping(self) -> Dict[str, List[str]]:
-        """Load ENS field mapping from domain config or use defaults.
-
-        FEAT 2026-06-02: configurable field names per domain.
-        """
-        defaults = {
-            'standard': ['стандарт', 'нтд', 'нтд_1', 'standard'],
-            'item_type': ['тип_изделия', 'наименование_типа', 'item_type', 'тип'],
-        }
-        if not self.domain:
-            return defaults
-        try:
-            from core.domain_config import DomainConfig
-            cfg = DomainConfig.load(self.domain)
-            fm = getattr(cfg, 'ens_field_mapping', None)
-            if fm and isinstance(fm, dict):
-                for key in ('standard', 'item_type'):
-                    val = fm.get(key)
-                    if val and isinstance(val, (list, tuple)):
-                        defaults[key] = list(val)
-                logger.info("[AutoValidator] ENS field mapping loaded: %s", defaults)
-                return defaults
-        except Exception as e:
-            logger.debug("[AutoValidator] Failed to load field mapping: %s", e)
-        return defaults
-
     @staticmethod
     def _get_ci(record: dict, key: str) -> Optional[Any]:
         """Case-insensitive dict.get. Returns value if key found (any case), else None."""
@@ -105,13 +80,53 @@ class AutoValidator:
                 return v
         return None
 
+    def _get_ens_field_mapping(self) -> Dict[str, str]:
+        """Load ENS field mapping from domain config or use defaults.
+
+        FEAT 2026-06-02: формат Dict[str, str] — канонический_ключ: имя_поля_в_ENS
+        """
+        defaults = {
+            'standard': 'стандарт',
+            'item_type': 'тип_изделия',
+        }
+        if not self.domain:
+            return defaults
+        try:
+            from core.domain_config import DomainConfig
+            cfg = DomainConfig.load(self.domain)
+            fm = getattr(cfg, 'ens_field_mapping', None)
+            if fm and isinstance(fm, dict):
+                for key in ('standard', 'item_type'):
+                    val = fm.get(key)
+                    if val and isinstance(val, str):
+                        defaults[key] = val
+                logger.info("[AutoValidator] ENS field mapping loaded: %s", defaults)
+                return defaults
+        except Exception as e:
+            logger.debug("[AutoValidator] Failed to load field mapping: %s", e)
+        return defaults
+
     def _get_ens_field(self, record: dict, field_key: str) -> Optional[str]:
-        """Get field value from ENS record using configured field names (case-insensitive)."""
+        """Get field value from ENS record using configured field name (case-insensitive).
+
+        FEAT 2026-06-02: ищет в _meta[canonical_key] → record[field_name]
+        """
         mapping = self._get_ens_field_mapping()
-        for key in mapping.get(field_key, []):
-            val = self._get_ci(record, key)
+        canonical = field_key  # 'standard', 'item_type'
+
+        # 1. _meta with canonical key
+        meta = record.get('_meta', {}) or {}
+        val = meta.get(canonical)
+        if val is not None and str(val).strip() not in ('', 'None', 'null'):
+            return str(val).strip()
+
+        # 2. Direct access via field name from mapping
+        field_name = mapping.get(canonical)
+        if field_name:
+            val = self._get_ci(record, field_name)
             if val is not None and str(val).strip() not in ('', 'None', 'null'):
                 return str(val).strip()
+
         return None
 
     def _build_skip_params(self) -> set:

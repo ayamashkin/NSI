@@ -39,8 +39,9 @@ class DomainConfig:
     min_examples: int = 5  # minimum examples per (standard, type) to include in index
     loose_match_fields: Set[str] = field(default_factory=set)  # fields where substring match is OK
     twin_groups: List[List[str]] = field(default_factory=list)  # [regex_field, db_field] mappings
-    # FEAT 2026-06-02: configurable ENS field names (code, name, standard, item_type)
-    ens_field_mapping: Optional[Dict[str, List[str]]] = None
+    # FEAT 2026-06-02: configurable ENS field names (canonical_key: source_field_name)
+    # Example: {'code': 'Код', 'name': 'Наименование', 'standard': 'НТД', 'item_type': 'Наименование_типа'}
+    ens_field_mapping: Optional[Dict[str, str]] = None
 
     @classmethod
     def load(cls, domain: str, base_path: str = "config/domains") -> "DomainConfig":
