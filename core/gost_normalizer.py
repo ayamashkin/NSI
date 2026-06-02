@@ -1,8 +1,8 @@
 # =============================================================================
-# FILE: core/gost_normalizer.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
-# 2026-05-29 13:30:00 — FEAT: GOST7795Normalizer splits .029→покрытие=02+толщина=9, .46→группа_прочности=4.6
+# ФАЙЛ: core/gost_normalizer.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 16:00:00 — FIX: NoneType guard — raw=result.get() вместо result["key"]
+# 2026-05-29 13:30:00 — FEAT: .029→покрытие=02+толщина_покрытия=9, .46→группа_прочности=4.6
 # =============================================================================
 """
 Standard-specific value normalizers for parametric extraction.
@@ -51,8 +51,8 @@ class GOST7795Normalizer:
                 logger.warning("[GOST7795] Failed to normalize свойства=%s", raw)
 
         # 2. покрытие=029 → покрытие=02 + толщина_покрытия=9
-        if "покрытие" in result:
-            raw = result["покрытие"]
+        raw = result.get("покрытие")
+        if raw:  # FIX 2026-06-02: skip None/empty
             if len(raw) == 3 and raw.isdigit():
                 result["покрытие"] = raw[:2]
                 result["толщина_покрытия"] = raw[2]

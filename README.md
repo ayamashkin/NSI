@@ -529,7 +529,7 @@ python cli.py batch data/nomenclature2.xlsx -d cache/masks.db -i models/ens_hard
 python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 4 -o output/quality.xlsx -j output/quality.json --domain hardware
 
 # Диагностика отдельной строки
-python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index cache/ens_hardware.pkl --domain hardware
+python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/ens_hardware.pkl --domain hardware
 ```
 
 
@@ -538,7 +538,7 @@ python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/mas
 
 ```bash
 # Построение индекса из production-файла
-python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o cache/ens_hardware.pkl -d hardware
+python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o models/ens_hardware.pkl -d hardware
 
 # Генерация масок (дозаполнение — путь берётся из доменного конфига)
 python cli.py generate-masks -d cache/masks.db --domain hardware --llm --validate -so output/mask_stats.xlsx

@@ -393,7 +393,7 @@ class AutoValidator:
                     text, standard, item_type, params, optional_params
                 )
                 if token_result:
-                    logger.debug("[AutoValidator] TokenParser fallback for: %s", text[:50])
+                    pass  # TokenParser fallback — silent
                     for param in params:
                         if param in skip_params:
                             continue
@@ -850,7 +850,6 @@ class AutoValidator:
             logger.debug("[AutoValidator] Pattern expects parentheses but text has none")
         logger.debug("[AutoValidator] === END DIAGNOSTICS ===")
 
-    @staticmethod
     def _find_expected_key(self, param: str, ex: Dict) -> Tuple[Optional[str], float]:
         param_lower = param.lower().replace("_", "")
         best_key = None

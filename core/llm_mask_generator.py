@@ -1,8 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 15:30:00 — ИСПРАВЛЕНИЕ: sanitize имён групп — удаление всех невалидных символов
-# 2026-06-02 02:00:00 — ИСПРАВЛЕНИЕ: Unicode escape \u003C → <, corrupted group names filter
+# 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+ (не \d+(?:[.,]\d+)?)
+# 2026-06-02 15:30:00 — FIX: sanitize имён групп — удаление невалидных символов
+# 2026-06-02 02:00:00 — FIX: Unicode escape \u003C → <, corrupted group names filter
 # 2026-06-02 01:30:00 — ИСПРАВЛЕНИЕ: GOST 7795-70 — невалидный regex \(?P<длина> → str.replace
 # 2026-06-01 21:30:00 — ИСПРАВЛЕНИЕ: _fix_execution_parens_regex — префиксы перед parens
 # 2026-06-01 21:15:00 — ИСПРАВЛЕНИЕ: _fix_param_separators — data-driven разделители
@@ -1539,6 +1540,9 @@ class LLMMaskGenerator:
         # FIX 2026-06-01 22:15: str.replace (re.sub regex was incorrect)
         pattern = pattern.replace(r'\s+[-\s]+', r'[-\s]+')
         pattern = pattern.replace(r'[-\s]+\s+', r'[-\s]+')
+        # FIX 2026-06-02: \s+- (space+hyphen) → [-\s]+ (any separator)
+        # LLM generates \s+- for Шайба pattern, but real data uses "4-24" (no space)
+        pattern = pattern.replace(r'\s+-', r'[-\s]+')
         # FIX 2026-05-28 21:20 UTC+3: add optional separator between )? and next named group
         # e.g. (?:[-\s]+\((?P<исполнение>\d+)\))?(?P<номинальный_диаметр_резьбы>\d+)
         pattern = re.sub(r'\)\?(?P<next>\(\?P<[^>]+>)', lambda m: f')?(?:[-\\s]+)?{m.group("next")}', pattern)
@@ -1592,6 +1596,15 @@ class LLMMaskGenerator:
             _gost_new = r'(?P<класс_допуска>\d+[a-z])[xXхХ×][-\s]*(?P<длина>'
             if _gost_old in pattern:
                 pattern = pattern.replace(_gost_old, _gost_new)
+
+        # FIX 2026-06-02: GOST dot format длина.свойства.покрытие — длина должна быть \d+ (не \d+(?:[.,]\d+)?)
+        # иначе длина=45.46 жадно захватывает .46, оставляя .019 как покрытие
+        if r'(?:\.(?P<свойства>' in pattern:
+            pattern = pattern.replace(
+                r'(?P<длина>\d+(?:[.,]\d+)?)(?:\.(?P<свойства>',
+                r'(?P<длина>\d+)(?:\.(?P<свойства>'
+            )
+            logger.debug("[LLMMaskGenerator] Fixed GOST dot format: длина now \d+ only")
         pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
