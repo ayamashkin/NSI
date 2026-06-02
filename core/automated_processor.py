@@ -886,6 +886,7 @@ class AutomatedParametricProcessor:
         TEXT_FIELDS = {'покрытие', 'материал', 'марка_материала', 'марка_стали'}
         best_match = None
         best_score = 0.0
+        best_exact_count = 0
         debug_candidates = []
 
         coating_variants = None
@@ -961,15 +962,7 @@ class AutomatedParametricProcessor:
                         matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
                     except (ValueError, TypeError):
                         matched = str(extracted_val).strip() == str(candidate_val).strip()
-
-                    # FIX 2026-06-02: fallback — if field values don't match, check if value is in candidate name
-                    # ENS data may have inconsistent field values vs name (e.g. name has "12" but field has "9")
-                    if not matched and candidate_name and self._is_value_in_name(str(extracted_val), candidate_name, param_name, standard_info.normalized if standard_info else ""):
-                        matched = True
-                        status = 'exact (in name)'
-                    else:
-                        status = 'exact' if matched else 'mismatched'
-
+                    status = 'exact' if matched else 'mismatched'
                     candidate_debug['params_comparison'][param_name] = {
                         'status': status,
                         'extracted': str(extracted_val),
@@ -978,21 +971,26 @@ class AutomatedParametricProcessor:
                     }
                     if matched:
                         matched_weight += weight
-                        if status == 'exact (in name)':
-                            candidate_debug['params_matched'][param_name] = "{} == {} (in name)".format(extracted_val, candidate_val)
-                        else:
-                            candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
+                        candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
                     else:
                         candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
             score = matched_weight / total_weight if total_weight > 0 else 0.0
+            exact_count = sum(1 for p in candidate_debug['params_comparison'].values() if p['status'] == 'exact')
             candidate_debug['score'] = round(score, 3)
+            candidate_debug['exact_count'] = exact_count
             candidate_debug['total_weight'] = total_weight
             candidate_debug['matched_weight'] = round(matched_weight, 3)
             candidate_debug['params_count'] = len(extracted_params)
 
-            if score > best_score:
+            # FEAT 2026-06-02: tie-breaker — prefer candidate with more exact matches
+            is_better = score > best_score
+            if score == best_score and exact_count > best_exact_count:
+                is_better = True
+
+            if is_better:
                 best_score = score
+                best_exact_count = exact_count
                 best_match = candidate
                 candidate_debug['is_best'] = True
             else:
