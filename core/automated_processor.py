@@ -956,16 +956,30 @@ class AutomatedParametricProcessor:
                         matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
                     except (ValueError, TypeError):
                         matched = str(extracted_val).strip() == str(candidate_val).strip()
-                    status = 'exact' if matched else 'mismatched'
+
+                    # FIX 2026-06-02: if field doesn't match, check if value is in candidate NAME
+                    # ENS data may have stale field values but correct name
+                    in_name = False
+                    if not matched and candidate_name:
+                        # Strict: value must appear as token in name (e.g. "12" in "Болт (2)-12-44-...")
+                        name_lower = candidate_name.lower().replace(',', '.')
+                        val_str = str(extracted_val).lower().strip().replace(',', '.')
+                        # Token boundary check: preceded by non-digit, followed by non-digit
+                        in_name = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d.])', name_lower))
+
+                    status = 'exact' if matched else ('exact (in name)' if in_name else 'mismatched')
                     candidate_debug['params_comparison'][param_name] = {
                         'status': status,
                         'extracted': str(extracted_val),
                         'ens_value': str(candidate_val) if candidate_val else None,
-                        'similarity': 1.0 if matched else 0.0,
+                        'similarity': 1.0 if (matched or in_name) else 0.0,
                     }
-                    if matched:
+                    if matched or in_name:
                         matched_weight += weight
-                        candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
+                        if in_name:
+                            candidate_debug['params_matched'][param_name] = "{} == {} (in name)".format(extracted_val, candidate_val)
+                        else:
+                            candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
                     else:
                         candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
