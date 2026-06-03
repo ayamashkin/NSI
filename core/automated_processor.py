@@ -2,6 +2,8 @@
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
+# 2026-06-03 14:30:00 (МСК, UTC+3) — ВОЗВРАТ: _normalize_coating_word_order
+# (Окс.Фос.ЭФП↔Фос.Окс.ЭФП) + ё→е нормализация (Заклёпка→Заклепка).
 # 2026-06-03 14:20:00 (МСК, UTC+3) — ОТКАТ: удалён костыль ОСТ1→ОСТ 1 из
 # canonicalize_standard(). Фикс выполняется в utils/standard_utils.py.
 # Добавлен domain kwarg в __init__ для совместимости с cli.py.
@@ -388,6 +390,8 @@ class AutomatedParametricProcessor:
         if clean_text != text.strip():
             logger.debug("Cleaned trailing punctuation: '%s' -> '%s'", text, clean_text)
 
+        # 2026-06-03 14:30 МСК (UTC+3): normalize ё→е for type detection
+        clean_text = clean_text.replace("ё", "е").replace("Ё", "Е")
         extracted = self.standard_extractor.extract_all(clean_text)
         standard_info = extracted.get('standard_info')
         item_type = extracted.get('item_type')
@@ -587,6 +591,20 @@ class AutomatedParametricProcessor:
             return variants
         return variants
 
+    @staticmethod
+    def _normalize_coating_word_order(coating: str) -> str:
+        """Normalize coating by sorting dot-separated words alphabetically.
+        'Окс.Фос.ЭФП' -> 'Окс.ЭФП.Фос' — matches 'Фос.Окс.ЭФП' after same normalization.
+        2026-06-03 14:30 МСК (UTC+3): ВОЗВРАТ. Решает ens_code=null когда coating
+        в ENS имеет другой порядок слов (Окс.Фос.ЭФП vs Фос.Окс.ЭФП).
+        """
+        if not coating or "." not in coating:
+            return coating
+        parts = [p.strip() for p in coating.split(".") if p.strip()]
+        if len(parts) <= 1:
+            return coating
+        return ".".join(sorted(parts))
+
     def _get_cached_ens_candidates(self, standard: str, item_type: str) -> List[Dict]:
         """Кэшированная загрузка ENS candidates (thread-safe)."""
         key = (standard.upper(), item_type.upper())
@@ -780,7 +798,13 @@ class AutomatedParametricProcessor:
                 candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
                 if param_name in TEXT_FIELDS:
-                    if param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
+                    # 2026-06-03 14:30 МСК (UTC+3): word-order normalization for coating
+                    # "Окс.Фос.ЭФП" vs "Фос.Окс.ЭФП" — same words, different order
+                    norm_extracted = self._normalize_coating_word_order(extracted_val)
+                    norm_candidate = self._normalize_coating_word_order(candidate_val)
+                    if norm_extracted and norm_extracted == norm_candidate and len(norm_extracted) > 3:
+                        sim = 1.0  # Word-order match — treat as exact
+                    elif param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
                         best_sim = max(self._token_similarity(v, candidate_val) for v in coating_variants)
                         sim = best_sim
                     else:
