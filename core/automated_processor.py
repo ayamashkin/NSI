@@ -2,12 +2,6 @@
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
-# FEAT 2026-06-03 12:00:00 UTC+3:
-# Universal normalization (GOST7795Normalizer for ALL standards),
-# CompositeParamMatcher for fuzzy matching composite params (8.8 vs 8),
-# DIN/ISO/ANSI coating variants (A2, A2-70, Zn), _check_cache None-protection,
-# domain kwarg in __init__, _result_from_cache defensive guards.
-# =============================================================================
 # FIX 2026-06-01 16:02:00 UTC+3:
 # Fixed imports: generators.llm_mask_generator -> core.llm_mask_generator,
 # database.mask_database -> core.mask_database. Fixed list_masks -> get_all_masks.
@@ -236,8 +230,7 @@ class AutomatedParametricProcessor:
         settings: Optional[Any] = None,
         result_db_path: Optional[str] = None,
         cache_ttl_days: int = 7,
-        no_cache: bool = False,
-        domain: str = "",
+        no_cache: bool = False
     ):
         self.mask_db = mask_db
         self.llm_clients = llm_clients or {}
@@ -249,7 +242,6 @@ class AutomatedParametricProcessor:
         self.result_db_path = result_db_path
         self.cache_ttl_days = cache_ttl_days
         self.no_cache = no_cache
-        self.domain = domain
         self._cache_stats = {'hits': 0, 'misses': 0}
         if result_db_path:
             db_file = Path(result_db_path)
@@ -313,14 +305,10 @@ class AutomatedParametricProcessor:
         """Проверить кэш в result.db. Вернуть dict если найдена свежая запись."""
         if not self.result_db_path:
             return None
-        # FIX 2026-06-03: защита от None (стандарт не определился)
-        article = article or ""
-        text = text or ""
         try:
             from core.result_database import ResultDatabaseManager
             manager = ResultDatabaseManager(db_path=self.result_db_path)
-            name_short = text[:50] if text else "(no standard)"
-            logger.debug("[CACHE] DB lookup: article=%r name=%s", article, name_short)
+            logger.debug("[CACHE] DB lookup: article=%r name=%s", article, text[:50])
             cached = manager.get_result(article, text)
             if cached:
                 logger.debug("[CACHE] DB found: ens_code=%s updated_at=%s", cached.get('ens_code'), cached.get('updated_at'))
@@ -338,32 +326,16 @@ class AutomatedParametricProcessor:
                     self._cache_stats['hits'] += 1
                     return cached
             else:
-                logger.debug("[CACHE] DB miss for '%s...'", name_short)
+                logger.debug("[CACHE] DB miss for '%s...'", text[:50])
         except Exception as e:
             logger.debug("Cache check error: %s", e)
         return None
 
     def _result_from_cache(self, cached: Dict[str, Any]) -> ProcessingResult:
         """Восстановить ProcessingResult из кэшированной записи result.db."""
-        # FIX 2026-06-03: defensive guards against None/invalid cached records
-        if not cached or not isinstance(cached, dict):
-            logger.warning("[CACHE] Invalid cached record: %s", type(cached).__name__)
-            return ProcessingResult(success=False)
-
-        def _ensure_dict(val):
-            if isinstance(val, dict):
-                return val
-            if isinstance(val, str):
-                try:
-                    import json
-                    return json.loads(val)
-                except (json.JSONDecodeError, ValueError):
-                    return {}
-            return {}
-
-        params = _ensure_dict(cached.get('params'))
-        ens_params = _ensure_dict(cached.get('ens_params'))
-        ens_params_mask = _ensure_dict(cached.get('ens_params_mask'))
+        params = cached.get('params') or {}
+        ens_params = cached.get('ens_params') or {}
+        ens_params_mask = cached.get('ens_params_mask') or {}
         ens_match = None
         if cached.get('ens_code'):
             ens_match = {
@@ -374,18 +346,18 @@ class AutomatedParametricProcessor:
                 'type': cached.get('match_type'),
                 'params': ens_params
             }
-        details = _ensure_dict(cached.get('details'))
+        details = cached.get('details') or {}
         details['from_cache'] = True
         details['cached_at'] = cached.get('updated_at')
 
-        level_str = cached.get('level', 'parametric_match') or 'parametric_match'
+        level_str = cached.get('level', 'parametric_match')
         try:
             level = ProcessingLevel(level_str)
         except ValueError:
             level = ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH
 
         return ProcessingResult(
-            text=cached.get('name') or '',
+            text=cached.get('name', ''),
             level=level,
             success=bool(cached.get('success', False)),
             params=params,
@@ -395,8 +367,8 @@ class AutomatedParametricProcessor:
             confidence=float(cached.get('confidence', 0.0)),
             processing_time_ms=0.0,
             details=details,
-            item_type=cached.get('item_type') or '',
-            standard=cached.get('standard') or ''
+            item_type=cached.get('item_type', ''),
+            standard=cached.get('standard', '')
         )
 
     def process(self, text: str, article: str = "", force: bool = False) -> ProcessingResult:
@@ -418,7 +390,7 @@ class AutomatedParametricProcessor:
         # CACHE CHECK
         logger.debug("[CACHE] process() called: text=%s standard=%s result_db_path=%s",
                      clean_text[:50], extracted_standard, self.result_db_path)
-        if not force and self.result_db_path and not self.no_cache and extracted_standard:
+        if not force and self.result_db_path and not self.no_cache:
             cached = self._check_cache(clean_text, extracted_standard)
             if cached:
                 logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
@@ -597,41 +569,30 @@ class AutomatedParametricProcessor:
         return len(intersection) / len(union)
 
     def _get_coating_variants(self, coating: str) -> List[str]:
-        """Generate coating search variants.
-
-        FEAT 2026-06-03: Added DIN/ISO coating variants (A2J, Zn, etc.)
-        """
+        """Generate coating search variants."""
         if not coating:
             return [coating]
         coating_str = str(coating).strip().lower()
         variants = [coating]
-
-        # Russian GOST coatings
         if coating_str in ('кд', 'кд.'):
             for v in ['Кд6', 'Кд9', 'Кд6.фос', 'Кд9.фос',
                       'Кд6.фос.окс', 'Кд9.фос.окс', 'Кд.фос.окс']:
                 variants.append(v)
             return variants
-
-        # DIN/ISO coatings: A2J → A2, A2-70, A2-80
-        if coating_str in ('a2j', 'a2', 'a2-70', 'a2-80'):
-            for v in ['A2', 'A2-70', 'A2-80', 'A2J', 'A4', 'A4-70', 'A4-80']:
-                variants.append(v)
-            return variants
-
-        # Zinc coatings
-        if coating_str in ('zn', 'цинк', 'ц6', 'ц6х', 'ц.6'):
-            for v in ['Zn', 'ZN', 'Ц6', 'Ц6Х', 'Цинк']:
-                variants.append(v)
-            return variants
-
-        # Chromate coatings
-        if coating_str in ('cr', 'хр', 'хром'):
-            for v in ['Cr', 'Хр', 'Хром']:
-                variants.append(v)
-            return variants
-
         return variants
+
+    @staticmethod
+    def _normalize_coating_word_order(coating: str) -> str:
+        """Normalize coating by sorting dot-separated words alphabetically.
+        'Окс.Фос.ЭФП' -> 'Окс.ЭФП.Фос' (sorted) — matches 'Фос.Окс.ЭФП' after same normalization.
+        FIX 2026-06-03: prevents ens_code=null on word-order permutations.
+        """
+        if not coating or "." not in coating:
+            return coating
+        parts = [p.strip() for p in coating.split(".") if p.strip()]
+        if len(parts) <= 1:
+            return coating
+        return ".".join(sorted(parts))
 
     def _get_cached_ens_candidates(self, standard: str, item_type: str) -> List[Dict]:
         """Кэшированная загрузка ENS candidates (thread-safe)."""
@@ -826,7 +787,13 @@ class AutomatedParametricProcessor:
                 candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
                 if param_name in TEXT_FIELDS:
-                    if param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
+                    # FIX 2026-06-03: normalize word order for multi-word coatings
+                    # "Окс.Фос.ЭФП" vs "Фос.Окс.ЭФП" — same words, different order
+                    norm_extracted = self._normalize_coating_word_order(extracted_val)
+                    norm_candidate = self._normalize_coating_word_order(candidate_val)
+                    if norm_extracted == norm_candidate and len(norm_extracted) > len(extracted_val) // 2:
+                        sim = 1.0  # Word-order match — treat as exact
+                    elif param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
                         best_sim = max(self._token_similarity(v, candidate_val) for v in coating_variants)
                         sim = best_sim
                     else:
@@ -850,15 +817,10 @@ class AutomatedParametricProcessor:
                     else:
                         candidate_debug['params_mismatched'][param_name] = "'{}' vs '{}' (sim={:.2f})".format(extracted_val, candidate_val, sim)
                 else:
-                    # FEAT 2026-06-03: Try composite matching (e.g., 8.8 vs 8)
-                    from core.gost_normalizer import CompositeParamMatcher
                     try:
                         matched = float(str(extracted_val).replace(',', '.')) == float(str(candidate_val).replace(',', '.'))
                     except (ValueError, TypeError):
                         matched = str(extracted_val).strip() == str(candidate_val).strip()
-                    # Composite: группа_прочности=8.8 vs ENS группа_прочности=8
-                    if not matched and param_name in ("группа_прочности", "покрытие"):
-                        matched = CompositeParamMatcher.try_match_composite(extracted_val, candidate_val)
                     status = 'exact' if matched else 'mismatched'
                     candidate_debug['params_comparison'][param_name] = {
                         'status': status,
@@ -950,11 +912,6 @@ class AutomatedParametricProcessor:
         # Remap to ENS field names
         remapped = self._remap_params(params, mask.params)
         logger.info("[ANALYZE] Remapped params: %s", remapped)
-
-        # FEAT 2026-06-03: Universal normalization (commas→dots, composite split)
-        from core.gost_normalizer import GOST7795Normalizer
-        remapped = GOST7795Normalizer.normalize(remapped, standard)
-        logger.info("[ANALYZE] Normalized params: %s", remapped)
 
         # Get ENS candidates
         candidates = self._get_cached_ens_candidates(standard, item_type)

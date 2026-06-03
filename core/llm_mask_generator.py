@@ -2,6 +2,7 @@
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
 # 2026-06-03 12:30:00 — FIX: duplicate group names in alternation branches (Бонка ОСТ 3-1496-72)
+# 2026-06-03 13:50:00 — FIX: _fix_loaded_mask in processor for existing DB masks (tolerance class + dot separator)
 # 2026-06-03 12:45:00 — FEAT: _merge_duplicate_groups + HST suffix fix + prompt rule 13 + tolerance class fix + dot separator fix
 # 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+
 # 2026-06-02 15:30:00 — FIX: sanitize имён групп — удаление невалидных символов
