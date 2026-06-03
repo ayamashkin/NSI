@@ -1,8 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-03 16:05:00 (МСК, UTC+3) — FIX: coating substitution → match_type='exact_substitution'.
+#   Было 'fuzzy', стало 'Точное совпадение (после замены покрытия)' + score=1.0.
 # 2026-06-03 16:00:00 (МСК, UTC+3) — FIX: "exact (in name)" с несовпадающим ENS → success=False.
-#   Болт 5-12 при 4-12 в ЕНС: 5 найдено в (5) исполнения, но диаметр ENS=4 ≠ 5.
 # 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError.
 # 2026-06-03 15:15:00 (МСК, UTC+3) — FIX: mismatched required params (≠покрытие) → success=False.
 # 2026-06-03 15:05:00 (МСК, UTC+3) — FIX: _result_from_cache — защита от None/invalid.
@@ -1236,6 +1237,15 @@ class AutomatedParametricProcessor:
                     best_score = 0.8
                     logger.info("[ЭТАП 2] ✓ Совпадение с вариантом покрытия: %s", variant)
                     break
+
+        # 2026-06-03 16:05 (МСК, UTC+3): coating substitution → exact_after_substitution
+        # Раньше match_type='fuzzy' даже после замены покрытия, теперь — точное
+        if substitution_info and best_match and match_type in ('fuzzy', 'fuzzy_coating_variant'):
+            match_type = 'exact_substitution'
+            match_type_ru = 'Точное совпадение (после замены покрытия)'
+            best_score = 1.0
+            logger.info("[ЭТАП 2] ✓ Точное совпадение (после замены покрытия): %s",
+                       substitution_info.get('corrected', '?'))
 
         processing_time = (time.time() - start_time) * 1000
 
