@@ -1,12 +1,12 @@
 # =============================================================================
-# FILE: core/ens_index_builder.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
-# 2026-05-28 14:00:00 — FIX: removed no_sep decimal heuristic (false positive: "1,5" in "15")
-# 2026-05-28 14:00:00 — FIX: all наименование fields moved to _meta, not just first (prevents наименование_1 leak)
-# 2026-05-28 12:45:00 — Fixed _norm_field_name to strip underscores (skip_fields now work)
-# 2026-05-28 12:45:00 — Added drop_reasons logging: why each field was removed
-# 2026-05-27 17:46:00 — _meta-поля удаляются из field_meta ДО формирования stats
+# ФАЙЛ: core/ens_index_builder.py
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-02 12:30:00 — FIX: code_canonical исключён из invisible_fields (Код невидим в наименованиях)
+# 2026-06-02 12:15:00 — FIX: code_canonical определяется рано — до удаления невидимых полей
+# 2026-06-02 12:00:00 — FIX: ищем code_canonical в ex, не оригинальное имя колонки
+# 2026-05-28 14:00:00 — FIX: удалён no_sep decimal heuristic (ложное срабатывание "1,5" в "15")
+# 2026-05-28 14:00:00 — FIX: все наименование-поля в _meta, не только первое
+# 2026-05-28 12:45:00 — FIX: _norm_field_name убирает underscores (skip_fields работают)
 # =============================================================================
 """
 ENS Index Builder Module
@@ -80,29 +80,6 @@ class ENSIndexBuilder:
                 return True
         return False
 
-    # FEAT 2026-06-03: DIN/NAS/ISO/AN standard patterns
-    _STANDARD_PATTERNS = [
-        re.compile(r"ГОСТ\s*(?:Р\s*)?(?:ИСО\s*)?\d+(?:\.\d+)?(?:-\d+)+", re.IGNORECASE),
-        re.compile(r"ОСТ\s*(?:1\s+|3-|4\.\d+\s+|92-|26\.\d+\s*)?\d+[\s-]*\d+", re.IGNORECASE),
-        re.compile(r"DIN\s*\d+(?:\s*-\s*\d+)?", re.IGNORECASE),
-        re.compile(r"NAS\d+[A-Z]?", re.IGNORECASE),
-        re.compile(r"MS\d+[A-Z]?", re.IGNORECASE),
-        re.compile(r"AN\d+[A-Z]?", re.IGNORECASE),
-        re.compile(r"ISO\s*\d+", re.IGNORECASE),
-        re.compile(r"\d+[А-ЯA-Z]+", re.IGNORECASE),  # 3401A, 3166A
-    ]
-
-    @classmethod
-    def _extract_standard_fallback(cls, text: str) -> str:
-        """Fallback standard extraction for DIN/NAS/ISO not handled by canonicalize_standard."""
-        if not text:
-            return ""
-        for pat in cls._STANDARD_PATTERNS:
-            m = pat.search(text)
-            if m:
-                return m.group(0)
-        return ""
-
     def build(self, excel_path: str, output_path: str) -> str:
         """Построить индекс из Excel и сохранить в .pkl."""
         logger.info("[ENSIndexBuilder] Loading %s for domain=%s", excel_path, self.domain.domain)
@@ -124,11 +101,7 @@ class ENSIndexBuilder:
 
         groups: Dict[Tuple[str, str], List[Dict]] = {}
         for _, row in df.iterrows():
-            std_raw = str(row.get(std_col, ""))
-            std = canonicalize_standard(std_raw)
-            # FEAT 2026-06-03: Fallback for DIN/NAS/ISO not recognized by canonicalize_standard
-            if not std:
-                std = self._extract_standard_fallback(std_raw)
+            std = canonicalize_standard(str(row.get(std_col, "")))
             itype = str(row.get(type_col, "")).strip()
             if not std or not itype:
                 continue
@@ -279,6 +252,9 @@ class ENSIndexBuilder:
                     i += 1
             canonical_map[field] = canonical
 
+        # FEAT 2026-06-02: canonical name for code field — needed early to protect from invisible_fields
+        code_canonical = self.domain.canonicalize_field_name(code_col) if code_col else None
+
         normalized_examples: List[Dict] = []
         for ex in examples:
             new_ex: Dict[str, Any] = {}
@@ -424,7 +400,8 @@ class ENSIndexBuilder:
             if k in safe_constant:
                 continue
             vc = visible_counts.get(k, 0)
-            if vc == 0 and k not in self.domain.retain_fields and k not in self.domain.meta_fields:
+            # FIX 2026-06-02: don't drop code field — it's numeric ID, never visible in names
+            if vc == 0 and k not in self.domain.retain_fields and k not in self.domain.meta_fields and k != code_canonical:
                 invisible_fields.add(k)
 
         for k in invisible_fields:
@@ -505,8 +482,9 @@ class ENSIndexBuilder:
                 "standard": standard,
                 "item_type": item_type,
             }
-            if code_col and code_col in ex:
-                meta["ens_code"] = str(ex.pop(code_col, ""))
+            # FIX 2026-06-02: use canonical name, not original Excel column name
+            if code_canonical and code_canonical in ex:
+                meta["code"] = str(ex.pop(code_canonical, ""))
             # Remove ALL наименование fields to _meta, not just first
             name_keys = [k for k in list(ex.keys()) if "наименование" in k.lower() and "полное" not in k.lower()]
             for k in name_keys:

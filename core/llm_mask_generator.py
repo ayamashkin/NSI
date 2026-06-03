@@ -1,11 +1,7 @@
 # =============================================================================
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-03 12:30:00 — FIX: duplicate group names в ветках | (Бонка ОСТ 3-1496-72).
-#   _deduplicate_group_names + _merge_duplicate_groups, prompt rule 13.
-# 2026-06-03 12:45:00 — FEAT: HST suffix fix (HST756VF7→[A-Z]*), coating word-order,
-#   _merge_duplicate_groups в _parse_mask_response, prompt rule 13.
-# 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+
+# 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+ (не \d+(?:[.,]\d+)?)
 # 2026-06-02 15:30:00 — FIX: sanitize имён групп — удаление невалидных символов
 # 2026-06-02 02:00:00 — FIX: Unicode escape \u003C → <, corrupted group names filter
 # 2026-06-02 01:30:00 — ИСПРАВЛЕНИЕ: GOST 7795-70 — невалидный regex \(?P<длина> → str.replace
@@ -610,7 +606,6 @@ class LLMMaskGenerator:
 9. **Блок "длина.свойства.покрытие" (ГОСТ 7795-70)**: Это ТРИ ОТДЕЛЬНЫХ целых числа через точку. Правильно: `(?P<длина>\d+)\.(?P<свойства>\d+)\.(?P<покрытие>\d+)`. Неправильно: `\d+(?:[.,]\d+)?` для длины — жадно сожрет все три числа.
 10. **Точка в номенклатуре**: Точка может быть десятичной (12.5 мм) или разделителем (45.46.019). Анализируй примеры: если после точки ровно 2 цифры-кода — это разделитель. При сомнении разделяй: `(?P<длина>\d+)\.(?P<покрытие>\d+)`, а не `(?P<длина>\d+(?:[.,]\d+)?)`.
 11. **НЕ используй неявные параметры**: НЕ создавай группу `тип_резьбы` со значением "M", если "M" нет в строке. НЕ создавай `марка_материала`, `номинальный_диаметр_резьбы` если их нет в наименовании (смотри Метаданные БД).
-12. **Предпочитай опциональные группы `(?:...)?` вместо `|`**. Если есть полная форма (Бонка M6x12x12) и краткая (Бонка 22x12) — используй `(?:M(?P<номинальный_диаметр_резьбы>\d+)(?:[xXхХ×](?P<шаг_резьбы>\d+))?)?` вместо `|^...$`. Один паттерн с опциональными группами надёжнее двух через `|`.
 
 === ЗАПРЕЩЁННЫЕ ПАРАМЕТРЫ ===
 
@@ -1310,11 +1305,6 @@ class LLMMaskGenerator:
             params = re.findall(r"\?P<([^>]+)>", pattern)
             logger.debug("[LLMMaskGenerator] Extracted params from pattern: %s", params)
 
-        # FIX 2026-06-03: merge _N suffixes from deduplicated groups
-        params = self._merge_duplicate_groups({p: None for p in params})
-        params = list(params.keys())
-        required = [r for r in required if not re.search(r'_\d+$', r)]
-
         if not required:
             optional = {"исполнение", "шаг_резьбы", "толщина_покрытия", "variant"}
             required = [p for p in params if p not in optional]
@@ -1539,73 +1529,7 @@ class LLMMaskGenerator:
                          standard, item_type)
         return pattern
 
-    @staticmethod
-    def _deduplicate_group_names(pattern: str) -> str:
-        """Rename duplicate named groups to avoid re.error.
-
-        Python's re module does not allow duplicate group names,
-        even in different alternation branches.
-
-        Example: (?P<a>\d+)|(?P<a>\d+) -> (?P<a>\d+)|(?P<a_2>\d+)
-        FIX 2026-06-03: Бонка ОСТ 3-1496-72 had duplicate наружный_диаметр_сторона_квадр.
-        """
-        seen = set()
-        counter = {}
-
-        def replace_duplicate(match):
-            prefix = match.group(1)   # (?P<
-            name = match.group(2)     # group_name
-            suffix = match.group(3)   # >...)
-
-            if name not in seen:
-                seen.add(name)
-                return match.group(0)  # Keep original
-
-            # Duplicate found — rename
-            if name not in counter:
-                counter[name] = 2
-            new_name = f"{name}_{counter[name]}"
-            counter[name] += 1
-
-            logger.debug("[LLMMaskGenerator] Renamed duplicate group: %s -> %s", name, new_name)
-            return f"{prefix}{new_name}{suffix}"
-
-        return re.sub(r'(\(\?P<)([^>]+)(>)', replace_duplicate, pattern)
-
-    @staticmethod
-    def _merge_duplicate_groups(params: dict) -> dict:
-        """Merge values from renamed duplicate groups back to original names.
-
-        After _deduplicate_group_names: (?P<a>) matched in first branch = 'a',
-        in second branch = 'a_2'. This function merges 'a_2' into 'a' if 'a' is None.
-        FIX 2026-06-03: Бонка ОСТ 3-1496-72 — наружный_диаметр_сторона_квадр_2 → original.
-        """
-        result = dict(params)
-        rename_pattern = re.compile(r'^(.*)_\d+$')
-        for key in list(result.keys()):
-            m = rename_pattern.match(key)
-            if m:
-                original = m.group(1)
-                if original in result:
-                    if result[original] is None and result[key] is not None:
-                        result[original] = result[key]
-                else:
-                    result[original] = result[key]
-                del result[key]
-        return result
-
     def _fix_pattern(self, pattern: str, standard: str, item_type: str) -> str:
-        # FIX 2026-06-03: deduplicate group names before other fixes
-        pattern = self._deduplicate_group_names(pattern)
-
-        # FIX 2026-06-03: HST standard codes have variant suffix + diameter without M prefix
-        # Болт HST756VF7-5: VF7=variant (no M before diameter)
-        if 'HST' in pattern:
-            pattern = re.sub(r'HST(\d+)(?=[-\s]|$|\(|\[)', r'HST\1[A-Z]*', pattern)
-            # After HST+variant, make M optional before diameter
-            pattern = pattern.replace('[-\s]+M(?P<номинальный_диаметр_резьбы>', '[-\s]*M?(?P<номинальный_диаметр_резьбы>')
-            logger.debug("[LLMMaskGenerator] HST variant+diameter fix applied")
-
         # FIX 2026-06-02: decode Unicode escapes LLM may emit in JSON (\u003C → <)
         pattern = pattern.replace('\\u003C', '<').replace('\\u003c', '<')
         pattern = pattern.replace('\\u003E', '>').replace('\\u003e', '>')
@@ -1648,20 +1572,6 @@ class LLMMaskGenerator:
         # FIX 2026-06-01 21:15 UTC+3: data-driven separator correction for all params
         pattern = self._fix_param_separators(pattern, standard, item_type)
 
-        # FIX 2026-06-03: optional tolerance class between diameter and length
-        # Болт M12-6gх20.88... — "-6g" is tolerance class between diameter and x-separator
-        # Generic: when шаг_резьбы optional + [xXхХ×]длина, allow класс_допуска between
-        pattern = pattern.replace(
-            '(?:[xXхХ×](?P<шаг_резьбы>\\d+(?:[.,]\\d+)?))?[xXхХ×](?P<длина>',
-            '(?:[xXхХ×](?P<шаг_резьбы>\\d+(?:[.,]\\d+)?))?(?:[-\\s]*(?P<класс_допуска>[a-zA-Z]\\d+|\\d+[a-zA-Z]))?[xXхХ×](?P<длина>'
-        )
-        # FIX 2026-06-03: dot as separator between properties and coating
-        # .88.38ХС — .88=свойства, .38ХС=покрытие; .36.029 — .36=свойства, .029=покрытие
-        pattern = pattern.replace(
-            '(?:\\.(?P<свойства>\\d+(?:[.,]\\d+)?))?(?:[-\\s]+(?P<покрытие>[\\w.]+))?',
-            '(?:\\.(?P<свойства>\\d+(?:[.,]\\d+)?))?(?:[-\\s.]+(?P<покрытие>[\\w.]+))?'
-        )
-
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
         text_fields = {"покрытие", "покрытие_1", "тип_изделия", "наименование", "стандарт", "нтд", "нтд_1", "нтд_2"}
@@ -1694,7 +1604,7 @@ class LLMMaskGenerator:
                 r'(?P<длина>\d+(?:[.,]\d+)?)(?:\.(?P<свойства>',
                 r'(?P<длина>\d+)(?:\.(?P<свойства>'
             )
-            logger.debug("[LLMMaskGenerator] Fixed GOST dot format: длина now \\d+ only")
+            logger.debug("[LLMMaskGenerator] Fixed GOST dot format: длина now \d+ only")
         pattern = pattern.replace(r"\\d", r"\d").replace(r"\\s", r"\s").replace(r"\\w", r"\w")
 
         if "ОСТ" in standard and r"(?P<нтд_1>\d+" in pattern:
