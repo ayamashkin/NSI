@@ -1,7 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError — инициализация через debug_candidates.
+# 2026-06-03 16:00:00 (МСК, UTC+3) — FIX: "exact (in name)" с несовпадающим ENS → success=False.
+#   Болт 5-12 при 4-12 в ЕНС: 5 найдено в (5) исполнения, но диаметр ENS=4 ≠ 5.
+# 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError.
 # 2026-06-03 15:15:00 (МСК, UTC+3) — FIX: mismatched required params (≠покрытие) → success=False.
 # 2026-06-03 15:05:00 (МСК, UTC+3) — FIX: _result_from_cache — защита от None/invalid.
 # 2026-06-03 15:00:00 (МСК, UTC+3) — FIX: _validate_extraction не отбрасывает неизвестные типы.
@@ -1319,19 +1321,31 @@ class AutomatedParametricProcessor:
         matching_cfg = _get_matching_config()
         success = confidence >= matching_cfg.success_threshold
 
-        # 2026-06-03 15:15 (МСК, UTC+3): mismatched required params (кроме покрытия) → success=False
-        # Болт 10-75-Кд при 10-52-Кд в ЕНС: длина mismatched → неуспех, даже если score >= threshold
-        best_debug = None  # инициализация — может не быть при exact match
+        # 2026-06-03 16:00 (МСК, UTC+3): mismatched required params (кроме покрытия) → success=False
+        # Включает "exact (in name)" с несовпадающими значениями (Болт 5-12 при 4-12 в ЕНС)
+        best_debug = None
         if success and debug_candidates:
             best_cd_list = [cd for cd in debug_candidates if cd.get('is_best')]
             if best_cd_list:
                 best_cd = best_cd_list[0]
+                # 1. Прямые mismatches
                 mismatched = best_cd.get('params_mismatched', {})
                 for param_name in mismatched:
                     if param_name != 'покрытие':
                         success = False
-                        logger.info("[РЕЗУЛЬТАТ] Сброс success: mismatched обязательный параметр '%s'", param_name)
+                        logger.info("[РЕЗУЛЬТАТ] Сброс success: mismatched '%s'", param_name)
                         break
+                # 2. "exact (in name)" с несовпадающим ENS-значением
+                if success:
+                    comparisons = best_cd.get('params_comparison', {})
+                    for param_name, comp in comparisons.items():
+                        if (comp.get('status') == 'exact (in name)' and
+                            comp.get('extracted') != comp.get('ens_value') and
+                            param_name != 'покрытие'):
+                            success = False
+                            logger.info("[РЕЗУЛЬТАТ] Сброс success: '%s' exact (in name) but %s ≠ %s",
+                                        param_name, comp.get('extracted'), comp.get('ens_value'))
+                            break
 
         # Build details
         # FEAT 2026-06-02: only best_match in debug_candidates (not all top-5)
