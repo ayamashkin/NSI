@@ -1,8 +1,9 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-03 15:00:00 (МСК, UTC+3) — FIX: _validate_extraction не отбрасывает неизвестные типы.
+#   Заклепка не в allowed list → теперь используется с capitalize, кандидаты ENS ищутся.
 # 2026-06-03 14:50:00 (МСК, UTC+3) — FIX: ё→е нормализация в process() перед extract_all.
-#   Заклёпка (с ё) не распознавалась standard_extractor. Минимальный фикс — замена ё→е.
 # 2026-06-02 15:00:00 — FIX: V2 generic — порог >=3 параметров (предотвращает вырожденные exact match)
 # 2026-06-02 14:30:00 — FEAT: exact_name match — первый этап, до fuzzy + вынос _build_parametric_result
 # 2026-06-02 14:00:00 — FEAT: структурированное логирование — этапы + таблица кандидатов
@@ -379,7 +380,11 @@ class AutomatedParametricProcessor:
                     validated_type = allowed  # use canonical form from config
                     break
             if not validated_type:
-                logger.debug("[EXTRACT] item_type '%s' not in allowed list: %s", it_clean, self._item_types)
+                # 2026-06-03 15:00:00 (МСК, UTC+3): не отбрасываем тип — используем как есть
+                # Иначе кандидаты ENS не ищутся (Заклепка не в allowed list, но в индексе есть)
+                validated_type = it_clean.capitalize()
+                logger.debug("[EXTRACT] item_type '%s' not in allowed list, using as '%s'",
+                             it_clean, validated_type)
 
         validated_standard = None
         if standard_info and getattr(standard_info, 'normalized', None):
