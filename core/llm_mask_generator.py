@@ -2,7 +2,7 @@
 # ФАЙЛ: core/llm_mask_generator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
 # 2026-06-03 12:30:00 — FIX: duplicate group names in alternation branches (Бонка ОСТ 3-1496-72)
-# 2026-06-03 12:45:00 — FEAT: _merge_duplicate_groups for deduped groups + HST suffix fix + prompt rule 12
+# 2026-06-03 12:45:00 — FEAT: _merge_duplicate_groups + HST suffix fix + prompt rule 13 + tolerance class fix + dot separator fix
 # 2026-06-02 15:45:00 — FIX: GOST dot format — длина.свойства.покрытие → длина=\d+
 # 2026-06-02 15:30:00 — FIX: sanitize имён групп — удаление невалидных символов
 # 2026-06-02 02:00:00 — FIX: Unicode escape \u003C → <, corrupted group names filter
@@ -1645,6 +1645,20 @@ class LLMMaskGenerator:
 
         # FIX 2026-06-01 21:15 UTC+3: data-driven separator correction for all params
         pattern = self._fix_param_separators(pattern, standard, item_type)
+
+        # FIX 2026-06-03: optional tolerance class between diameter and length
+        # Болт M12-6gх20.88... — "-6g" is tolerance class between diameter and x-separator
+        # Generic: when шаг_резьбы optional + [xXхХ×]длина, allow класс_допуска between
+        pattern = pattern.replace(
+            '(?:[xXхХ×](?P<шаг_резьбы>\\d+(?:[.,]\\d+)?))?[xXхХ×](?P<длина>',
+            '(?:[xXхХ×](?P<шаг_резьбы>\\d+(?:[.,]\\d+)?))?(?:[-\\s]*(?P<класс_допуска>[a-zA-Z]\\d+|\\d+[a-zA-Z]))?[xXхХ×](?P<длина>'
+        )
+        # FIX 2026-06-03: dot as separator between properties and coating
+        # .88.38ХС — .88=свойства, .38ХС=покрытие; .36.029 — .36=свойства, .029=покрытие
+        pattern = pattern.replace(
+            '(?:\\.(?P<свойства>\\d+(?:[.,]\\d+)?))?(?:[-\\s]+(?P<покрытие>[\\w.]+))?',
+            '(?:\\.(?P<свойства>\\d+(?:[.,]\\d+)?))?(?:[-\\s.]+(?P<покрытие>[\\w.]+))?'
+        )
 
         # FIX 2026-05-28 23:25 UTC+3: allow decimal values for numeric params (длина, диаметр, etc.)
         # EXCLUDE text fields (покрытие, тип_изделия, etc.) — they use \w+, not \d+
