@@ -487,7 +487,8 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 if success_only and not result.success:
                     stats['filtered'] += 1
                     return idx, None
-            if result_db:
+            # 2026-06-03 15:50 (МСК, UTC+3): не сохраняем неуспешные результаты
+            if result_db and getattr(result, 'success', False):
                 logger.debug("[CLI_CACHE] Saving result to %s for '%s' (code=%s)",
                              result_db, result.text[:50], result.ens_code)
                 try:

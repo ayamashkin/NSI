@@ -515,7 +515,7 @@ python cli.py ens build-index "data/_ЕНС_Крепеж_test.xlsx" -o models/en
 
 # Генерация масок для тестового индекса
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --force --llm --domain hardware --validate -so output/mask_stats.xlsx
-python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --force --llm --domain hardware --validate --standard "ГОСТ 7798-70" -so output/mask_stats.xlsx
+python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --force --llm --domain hardware --validate --standard "ОСТ 1 31104-80" -so output/mask_stats.xlsx
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --responses-dir prompts/answers --validate --domain hardware
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl --llm --domain hardware --validate -so output/mask_stats.xlsx
 
@@ -550,6 +550,7 @@ python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force -
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 3 -o output/nomenclature1.xlsx
 
 python cli.py batch data/СТИ_КумАПП_из_АСУ_НСИ.xlsx -d cache/masks.db --domain hardware --workers 2 -o output/СТИ_КумАПП_из_АСУ_НСИ.xlsx
+python cli.py generate-masks -d cache/masks.db -i models/ens_hardware.pkl --force --llm --domain hardware --validate --standard "ОСТ 1 31104-80" -so output/mask_stats.xlsx
 
 # Batch-обработка (Excel → JSON + result.db)
 python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/nomenclature1.json

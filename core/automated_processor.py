@@ -1,8 +1,10 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError — инициализация через debug_candidates.
+# 2026-06-03 15:15:00 (МСК, UTC+3) — FIX: mismatched required params (≠покрытие) → success=False.
+# 2026-06-03 15:05:00 (МСК, UTC+3) — FIX: _result_from_cache — защита от None/invalid.
 # 2026-06-03 15:00:00 (МСК, UTC+3) — FIX: _validate_extraction не отбрасывает неизвестные типы.
-#   Заклепка не в allowed list → теперь используется с capitalize, кандидаты ENS ищутся.
 # 2026-06-03 14:50:00 (МСК, UTC+3) — FIX: ё→е нормализация в process() перед extract_all.
 # 2026-06-02 15:00:00 — FIX: V2 generic — порог >=3 параметров (предотвращает вырожденные exact match)
 # 2026-06-02 14:30:00 — FEAT: exact_name match — первый этап, до fuzzy + вынос _build_parametric_result
@@ -468,11 +470,30 @@ class AutomatedParametricProcessor:
             logger.debug("Cache check error: %s", e)
         return None
 
+    @staticmethod
+    def _ensure_dict(val):
+        """Преобразует значение из БД в dict. Защита от JSON-строк и None.
+        2026-06-03 15:05 (МСК, UTC+3): добавлено после ошибки 'NoneType' not subscriptable.
+        """
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                return {}
+        return {}
+
     def _result_from_cache(self, cached: Dict[str, Any]) -> ProcessingResult:
         """Восстановить ProcessingResult из кэшированной записи result.db."""
-        params = cached.get('params') or {}
-        ens_params = cached.get('ens_params') or {}
-        ens_params_mask = cached.get('ens_params_mask') or {}
+        # 2026-06-03 15:05 (МСК, UTC+3): защита от None/invalid cached records
+        if not cached or not isinstance(cached, dict):
+            logger.warning("[CACHE] Invalid cached record: %s", type(cached).__name__)
+            return ProcessingResult(success=False)
+
+        params = self._ensure_dict(cached.get('params'))
+        ens_params = self._ensure_dict(cached.get('ens_params'))
+        ens_params_mask = self._ensure_dict(cached.get('ens_params_mask'))
         ens_match = None
         if cached.get('ens_code'):
             ens_match = {
@@ -483,11 +504,11 @@ class AutomatedParametricProcessor:
                 'type': cached.get('match_type'),
                 'params': ens_params
             }
-        details = cached.get('details') or {}
+        details = self._ensure_dict(cached.get('details'))
         details['from_cache'] = True
         details['cached_at'] = cached.get('updated_at')
 
-        level_str = cached.get('level', 'parametric_match')
+        level_str = cached.get('level', 'parametric_match') or 'parametric_match'
         try:
             level = ProcessingLevel(level_str)
         except ValueError:
@@ -511,6 +532,19 @@ class AutomatedParametricProcessor:
     def process(self, text: str, article: str = "", force: bool = False) -> ProcessingResult:
         """
         Обработка одной строки номенклатуры.
+        """
+        try:
+            result = self._process_impl(text, article, force)
+            return result
+        except Exception:
+            import traceback
+            logger.error("[PROCESS_ERROR] %s: %s", text[:50], traceback.format_exc())
+            return ProcessingResult(success=False)
+
+
+    def _process_impl(self, text: str, article: str = "", force: bool = False) -> ProcessingResult:
+        """
+        Обработка одной строки номенклатуры (impl).
         """
         import time
         start_time = time.time()
@@ -544,7 +578,7 @@ class AutomatedParametricProcessor:
             if cached:
                 logger.info("[CACHE] HIT for '%s' / %s (code=%s, mask=%s)",
                             clean_text[:50], extracted_standard,
-                            cached.get('ens_code', 'N/A'), cached.get('mask_pattern', 'N/A')[:30])
+                            cached.get('ens_code', 'N/A'), (cached.get('mask_pattern') or 'N/A')[:30])
                 return self._result_from_cache(cached)
             else:
                 logger.info("[CACHE] MISS for '%s' / %s", clean_text[:50], extracted_standard)
@@ -1284,6 +1318,20 @@ class AutomatedParametricProcessor:
         # Determine success
         matching_cfg = _get_matching_config()
         success = confidence >= matching_cfg.success_threshold
+
+        # 2026-06-03 15:15 (МСК, UTC+3): mismatched required params (кроме покрытия) → success=False
+        # Болт 10-75-Кд при 10-52-Кд в ЕНС: длина mismatched → неуспех, даже если score >= threshold
+        best_debug = None  # инициализация — может не быть при exact match
+        if success and debug_candidates:
+            best_cd_list = [cd for cd in debug_candidates if cd.get('is_best')]
+            if best_cd_list:
+                best_cd = best_cd_list[0]
+                mismatched = best_cd.get('params_mismatched', {})
+                for param_name in mismatched:
+                    if param_name != 'покрытие':
+                        success = False
+                        logger.info("[РЕЗУЛЬТАТ] Сброс success: mismatched обязательный параметр '%s'", param_name)
+                        break
 
         # Build details
         # FEAT 2026-06-02: only best_match in debug_candidates (not all top-5)
