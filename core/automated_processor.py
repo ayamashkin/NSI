@@ -2,6 +2,10 @@
 # FILE: core/automated_processor.py
 # REPO: https://github.com/ayamashkin/NSI
 # =============================================================================
+# 2026-06-03 14:20:00 (МСК, UTC+3) — ОТКАТ: удалён костыль ОСТ1→ОСТ 1 из
+# canonicalize_standard(). Фикс выполняется в utils/standard_utils.py.
+# Добавлен domain kwarg в __init__ для совместимости с cli.py.
+# =============================================================================
 # FIX 2026-06-01 16:02:00 UTC+3:
 # Fixed imports: generators.llm_mask_generator -> core.llm_mask_generator,
 # database.mask_database -> core.mask_database. Fixed list_masks -> get_all_masks.
@@ -230,9 +234,11 @@ class AutomatedParametricProcessor:
         settings: Optional[Any] = None,
         result_db_path: Optional[str] = None,
         cache_ttl_days: int = 7,
-        no_cache: bool = False
+        no_cache: bool = False,
+        domain: str = "",
     ):
         self.mask_db = mask_db
+        self.domain = domain
         self.llm_clients = llm_clients or {}
         self.ens_index_path = ens_index_path
         self.min_mask_score = min_mask_score
@@ -581,19 +587,6 @@ class AutomatedParametricProcessor:
             return variants
         return variants
 
-    @staticmethod
-    def _normalize_coating_word_order(coating: str) -> str:
-        """Normalize coating by sorting dot-separated words alphabetically.
-        'Окс.Фос.ЭФП' -> 'Окс.ЭФП.Фос' (sorted) — matches 'Фос.Окс.ЭФП' after same normalization.
-        FIX 2026-06-03: prevents ens_code=null on word-order permutations.
-        """
-        if not coating or "." not in coating:
-            return coating
-        parts = [p.strip() for p in coating.split(".") if p.strip()]
-        if len(parts) <= 1:
-            return coating
-        return ".".join(sorted(parts))
-
     def _get_cached_ens_candidates(self, standard: str, item_type: str) -> List[Dict]:
         """Кэшированная загрузка ENS candidates (thread-safe)."""
         key = (standard.upper(), item_type.upper())
@@ -787,13 +780,7 @@ class AutomatedParametricProcessor:
                 candidate_val = candidate.get(param_name) or candidate.get(param_name.replace('_', ' '), '')
 
                 if param_name in TEXT_FIELDS:
-                    # FIX 2026-06-03: normalize word order for multi-word coatings
-                    # "Окс.Фос.ЭФП" vs "Фос.Окс.ЭФП" — same words, different order
-                    norm_extracted = self._normalize_coating_word_order(extracted_val)
-                    norm_candidate = self._normalize_coating_word_order(candidate_val)
-                    if norm_extracted == norm_candidate and len(norm_extracted) > len(extracted_val) // 2:
-                        sim = 1.0  # Word-order match — treat as exact
-                    elif param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
+                    if param_name == 'покрытие' and coating_variants and len(coating_variants) > 1:
                         best_sim = max(self._token_similarity(v, candidate_val) for v in coating_variants)
                         sim = best_sim
                     else:

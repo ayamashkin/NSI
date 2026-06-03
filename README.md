@@ -525,9 +525,6 @@ python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardw
 
 python cli.py batch data/nomenclature2.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
 
-# Анализ качества
-python cli.py analyze-quality data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 4 -o output/quality.xlsx -j output/quality.json --domain hardware
-
 # Диагностика отдельной строки
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/ens_hardware.pkl --domain hardware
 ```
