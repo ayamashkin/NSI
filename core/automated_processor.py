@@ -1,9 +1,11 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# ПОСЛЕДНИЕ 10 ИЗМЕНЕНИЙ (МСК, UTC+3):
 # 2026-06-03 16:05:00 (МСК, UTC+3) — FIX: coating substitution → match_type='exact_substitution'.
 #   Было 'fuzzy', стало 'Точное совпадение (после замены покрытия)' + score=1.0.
 # 2026-06-03 16:00:00 (МСК, UTC+3) — FIX: "exact (in name)" с несовпадающим ENS → success=False.
+# 2026-06-04 10:30:00 (МСК, UTC+3) — FIX: _fix_loaded_mask для существующих масок.
+#   Покрытие опциональное (БП=без покрытия) + шаг резьбы через - или х.
 # 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError.
 # 2026-06-03 15:15:00 (МСК, UTC+3) — FIX: mismatched required params (≠покрытие) → success=False.
 # 2026-06-03 15:05:00 (МСК, UTC+3) — FIX: _result_from_cache — защита от None/invalid.
@@ -622,10 +624,12 @@ class AutomatedParametricProcessor:
         if mask and mask.is_active:
             logger.info("[ЭТАП 1] ✓ Маска найдена: id=%s, стандарт=%s, тип=%s",
                         mask.id, getattr(mask, 'standard', standard), mask.item_type)
+            mask = self._fix_loaded_mask(mask)
             return self._parametric_match(clean_text, mask, extracted, start_time)
         elif mask:
             logger.info("[ЭТАП 1] ⚠ Маска найдена, но неактивна")
             mask.is_active = True
+            mask = self._fix_loaded_mask(mask)
             return self._parametric_match(clean_text, mask, extracted, start_time)
         else:
             logger.info("[ЭТАП 1] ✗ Маска не найдена")
@@ -1131,6 +1135,44 @@ class AutomatedParametricProcessor:
                 parts.append(str(val).strip())
         parts.append(standard)
         return ' '.join(parts)
+
+    def _fix_loaded_mask(self, mask):
+        """Post-processing fixes для масок из БД.
+        2026-06-04 10:30 (МСК, UTC+3):
+        - Покрытие опциональное (БП = без покрытия)
+        - Шаг резьбы через - или х
+        """
+        if not mask or not getattr(mask, 'pattern', None):
+            return mask
+        pattern = mask.pattern
+        original = pattern
+
+        # FIX 1: покрытие опциональное перед ОСТ/ГОСТ
+        # [-\s]+(?P<покрытие>[\w.]+)[-\s]+ОСТ → (?:[-\s]+(?P<покрытие>[\w.]+))?[-\s]+ОСТ
+        # Вся группа "разделитель+покрытие" опциональна
+        pattern = pattern.replace(
+            '[-\\s]+(?P<покрытие>[\\w.]+)[-\\s]+ОСТ',
+            '(?:[-\\s]+(?P<покрытие>[\\w.]+))?[-\\s]+ОСТ'
+        )
+        pattern = pattern.replace(
+            '[-\\s]+(?P<покрытие>[\\w.]+)[-\\s]+ГОСТ',
+            '(?:[-\\s]+(?P<покрытие>[\\w.]+))?[-\\s]+ГОСТ'
+        )
+
+        # FIX 2: шаг резьбы через - или х
+        pattern = pattern.replace(
+            '[xXхХ×](?P<шаг_резьбы>',
+            '[xXхХ×\\-](?P<шаг_резьбы>'
+        )
+
+        if pattern != original:
+            try:
+                re.compile(pattern, re.IGNORECASE)
+                mask.pattern = pattern
+                logger.debug("[_fix_loaded_mask] Fixed: %s...", pattern[:80])
+            except re.error as e:
+                logger.warning("[_fix_loaded_mask] Invalid pattern: %s", e)
+        return mask
 
     def _parametric_match(self, text: str, mask: Any, extracted: Dict, start_time: float) -> ProcessingResult:
         """
