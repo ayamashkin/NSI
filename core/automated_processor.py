@@ -4,6 +4,8 @@
 # 2026-06-03 16:05:00 (МСК, UTC+3) — FIX: coating substitution → match_type='exact_substitution'.
 #   Было 'fuzzy', стало 'Точное совпадение (после замены покрытия)' + score=1.0.
 # 2026-06-03 16:00:00 (МСК, UTC+3) — FIX: "exact (in name)" с несовпадающим ENS → success=False.
+# 2026-06-04 13:20:00 (МСК, UTC+3) — FIX: exact coating match бонус +0.01 в matched_weight.
+#   Кд=Кд выигрывает у Кд~Ц9.фос.окс при равном score. Tie-breaker для fuzzy matching.
 # 2026-06-04 10:30:00 (МСК, UTC+3) — FIX: _fix_loaded_mask для существующих масок.
 #   Покрытие опциональное (БП=без покрытия) + шаг резьбы через - или х.
 # 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError.
@@ -1014,6 +1016,20 @@ class AutomatedParametricProcessor:
                     else:
                         candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
+            # 2026-06-04 13:20 (МСК, UTC+3): бонус за exact coating match
+            # Кд=Кд должен выигрывать у Кд~Ц9.фос.окс при равном score
+            # FIX 2026-06-04: бонус за token_matched + доп.бонус если покрытие кандидата
+            # начинается с извлеченного покрытия (Кд9.хр начинается с Кд, Ц9.фос.окс — нет)
+            coating_comparison = candidate_debug.get('params_comparison', {}).get('покрытие', {})
+            coating_status = coating_comparison.get('status', '')
+            if coating_status in ('exact', 'token_matched'):
+                matched_weight += 0.01
+                # Дополнительный бонус за prefix match: Кд9.хр начинается с Кд
+                extracted_coating = str(extracted_params.get('покрытие', '')).lower().strip()
+                candidate_coating = str(coating_comparison.get('ens_value', '')).lower().strip()
+                if candidate_coating.startswith(extracted_coating):
+                    matched_weight += 0.01
+
             score = matched_weight / total_weight if total_weight > 0 else 0.0
             exact_count = sum(1 for p in candidate_debug['params_comparison'].values() if p['status'] == 'exact')
             candidate_debug['score'] = round(score, 3)
@@ -1026,7 +1042,8 @@ class AutomatedParametricProcessor:
             is_better = score > best_score
             if score == best_score and exact_count > best_exact_count:
                 is_better = True
-
+            # 2026-06-04 13:20 (МСК, UTC+3): exact coating match даёт +0.01 бонус
+            # в matched_weight — tie-breaker при равном score/exact_count
             if is_better:
                 # FIX 2026-06-02: clear is_best from previous best candidate
                 if prev_best_idx is not None and prev_best_idx < len(debug_candidates):
@@ -1160,6 +1177,12 @@ class AutomatedParametricProcessor:
         )
 
         # FIX 2: шаг резьбы через - или х
+        # В паттерне может быть как [xXхХ×](?P<шаг_резьбы> так и (?:[xXхХ×](?P<шаг_резьбы>
+        pattern = pattern.replace(
+            '(?:[xXхХ×](?P<шаг_резьбы>',
+            '(?:[xXхХ×\\-](?P<шаг_резьбы>'
+        )
+        # Fallback: без (?: префикса
         pattern = pattern.replace(
             '[xXхХ×](?P<шаг_резьбы>',
             '[xXхХ×\\-](?P<шаг_резьбы>'
