@@ -524,7 +524,8 @@ python cli.py generate-masks -d cache/masks.db -i models/ens_hardware_test.pkl -
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.xlsx --domain hardware --no-cache
 python cli.py batch data/nomenclature.xlsx -d cache/masks.db -i models/ens_hardware_test.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
 
-python cli.py batch data/nomenclature2.xlsx -d cache/masks.db -i models/ens_hardware.pkl --workers 1 -o output/nomenclature.json --domain hardware  --no-cache
+python cli.py batch data/nomenclature2.xlsx -d cache/masks.db -i models/ens_hardware.pkl --workers 1 -o output/nomenclature2.json --domain hardware --no-cache
+python cli.py batch data/nomenclature2.xlsx -d cache/masks.db -i models/ens_hardware.pkl --workers 1 -o output/nomenclature2.xlsx --domain hardware --no-cache
 
 # Диагностика отдельной строки
 python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/masks.db --ens-index models/ens_hardware.pkl --domain hardware  --no-cache

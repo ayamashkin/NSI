@@ -1,22 +1,11 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# ПОСЛЕДНИЕ 10 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-03 16:05:00 (МСК, UTC+3) — FIX: coating substitution → match_type='exact_substitution'.
-#   Было 'fuzzy', стало 'Точное совпадение (после замены покрытия)' + score=1.0.
-# 2026-06-03 16:00:00 (МСК, UTC+3) — FIX: "exact (in name)" с несовпадающим ENS → success=False.
-# 2026-06-04 13:20:00 (МСК, UTC+3) — FIX: exact coating match бонус +0.01 в matched_weight.
-#   Кд=Кд выигрывает у Кд~Ц9.фос.окс при равном score. Tie-breaker для fuzzy matching.
-# 2026-06-04 10:30:00 (МСК, UTC+3) — FIX: _fix_loaded_mask для существующих масок.
-#   Покрытие опциональное (БП=без покрытия) + шаг резьбы через - или х.
-# 2026-06-03 15:45:00 (МСК, UTC+3) — FIX: best_debug UnboundLocalError.
-# 2026-06-03 15:15:00 (МСК, UTC+3) — FIX: mismatched required params (≠покрытие) → success=False.
-# 2026-06-03 15:05:00 (МСК, UTC+3) — FIX: _result_from_cache — защита от None/invalid.
-# 2026-06-03 15:00:00 (МСК, UTC+3) — FIX: _validate_extraction не отбрасывает неизвестные типы.
-# 2026-06-03 14:50:00 (МСК, UTC+3) — FIX: ё→е нормализация в process() перед extract_all.
-# 2026-06-02 15:00:00 — FIX: V2 generic — порог >=3 параметров (предотвращает вырожденные exact match)
-# 2026-06-02 14:30:00 — FEAT: exact_name match — первый этап, до fuzzy + вынос _build_parametric_result
-# 2026-06-02 14:00:00 — FEAT: структурированное логирование — этапы + таблица кандидатов
-# 2026-06-01 16:02:00 — ИСПРАВЛЕНИЕ: imports generators.* → core.*, list_masks → get_all_masks
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-04 14:35:00 — FIX: confidence capped at 1.0 (min(score, 1.0)). Было 1.002, стало 1.0.
+# 2026-06-04 14:15:00 — FIX: баг с отступами — блок обновления best_match не выполнялся (is_better).
+# 2026-06-04 13:20:00 — FIX: exact coating match бонус +0.01. Кд=Кд выигрывает у Кд~Ц9.фос.окс.
+# 2026-06-04 10:30:00 — FIX: _fix_loaded_mask. Покрытие опциональное + шаг через - или х.
+# 2026-06-03 16:05:00 — FIX: coating substitution → match_type='exact_substitution', score=1.0.
 # =============================================================================
 """
 Main Processor Module
@@ -454,7 +443,8 @@ class AutomatedParametricProcessor:
         try:
             from core.result_database import ResultDatabaseManager
             manager = ResultDatabaseManager(db_path=self.result_db_path)
-            logger.debug("[CACHE] DB lookup: article=%r name=%s", article, text[:50])
+            text_safe = text or ""
+            logger.debug("[CACHE] DB lookup: article=%r name=%s", article, text_safe[:50])
             cached = manager.get_result(article, text)
             if cached:
                 logger.debug("[CACHE] DB found: ens_code=%s updated_at=%s", cached.get('ens_code'), cached.get('updated_at'))
@@ -472,7 +462,7 @@ class AutomatedParametricProcessor:
                     self._cache_stats['hits'] += 1
                     return cached
             else:
-                logger.debug("[CACHE] DB miss for '%s...'", text[:50])
+                logger.debug("[CACHE] DB miss for '%s...'", text_safe[:50])
         except Exception as e:
             logger.debug("Cache check error: %s", e)
         return None
@@ -529,7 +519,7 @@ class AutomatedParametricProcessor:
             ens_params=ens_params,
             ens_params_mask=ens_params_mask,
             ens_match=ens_match,
-            confidence=float(cached.get('confidence', 0.0)),
+            confidence=min(float(cached.get('confidence', 0.0)), 1.0),
             processing_time_ms=0.0,
             details=details,
             item_type=cached.get('item_type', ''),
@@ -1381,16 +1371,16 @@ class AutomatedParametricProcessor:
             if val is not None:
                 ens_params_from_match[key] = val
 
-        # Calculate confidence
-        confidence = best_score
+        # Calculate confidence (capped at 1.0)
+        confidence = min(best_score, 1.0)
         if match_type == 'exact_name':
             confidence = 1.0
         elif match_type == 'exact':
             confidence = 1.0
         elif match_type == 'fuzzy':
-            confidence = best_score
+            confidence = min(best_score, 1.0)
         elif match_type == 'fuzzy_coating_variant':
-            confidence = best_score * 0.95
+            confidence = min(best_score * 0.95, 1.0)
 
         # Determine success
         matching_cfg = _get_matching_config()
@@ -1423,14 +1413,17 @@ class AutomatedParametricProcessor:
                             break
 
         # Build details
-        # FEAT 2026-06-02: only best_match in debug_candidates (not all top-5)
-        best_debug = [cd for cd in debug_candidates if cd.get('is_best')]
+        # FEAT 2026-06-04: топ-5 кандидатов от лучших к худшим (score↓, exact_count↓)
+        sorted_debug = sorted(
+            debug_candidates,
+            key=lambda x: (-x['score'], -x.get('exact_count', 0))
+        )[:5] if debug_candidates else []
         details = {
             'match_type': match_type,
             'match_type_ru': match_type_ru,
             'mask_id': getattr(mask, 'id', None),
             'mask_pattern': getattr(mask, 'pattern', None),
-            'debug_candidates': best_debug[:1] if best_debug else [],
+            'debug_candidates': sorted_debug,
         }
 
         if substitution_info:
@@ -1440,7 +1433,22 @@ class AutomatedParametricProcessor:
                 confidence = max(confidence, matching_cfg.success_threshold)
                 logger.info("[РЕЗУЛЬТАТ] Принудительный успех (подстановка покрытия)")
 
-        # Normalize mask.params
+        bm_code = _get_meta_value(best_match, 'code', self._field_mapping) if best_match else 'N/A'
+        bm_name = _get_meta_value(best_match, 'name', self._field_mapping) if best_match else 'N/A'
+
+        # FEAT 2026-06-04: ens_params_mask — извлечь параметры из ens_name той же маской
+        # (по аналогии с extract_params из text)
+        ens_params_from_mask = {}
+        if best_match and mask and getattr(mask, 'pattern', None):
+            ens_name_for_mask = bm_name
+            if ens_name_for_mask and ens_name_for_mask != 'N/A':
+                try:
+                    ens_extracted_for_mask = self.parametric_client.extract_params(ens_name_for_mask, mask.pattern)
+                    ens_params_from_mask = self._remap_params(ens_extracted_for_mask, mask.params)
+                except Exception:
+                    pass
+
+        # Normalize mask.params (fallback: dict с ключами из mask.params)
         mask_params_norm = mask.params
         if isinstance(mask_params_norm, str):
             try:
@@ -1462,9 +1470,6 @@ class AutomatedParametricProcessor:
                 else:
                     flat.append(item)
             mask_params_norm = {p: None for p in flat} if flat else {}
-
-        bm_code = _get_meta_value(best_match, 'code', self._field_mapping) if best_match else 'N/A'
-        bm_name = _get_meta_value(best_match, 'name', self._field_mapping) if best_match else 'N/A'
         if success:
             logger.info("[РЕЗУЛЬТАТ] ✓ Успех: code=%s, name=%s, confidence=%.3f",
                         bm_code, bm_name[:50], confidence)
@@ -1478,7 +1483,7 @@ class AutomatedParametricProcessor:
             success=success,
             params=params,
             ens_params=ens_params_from_match,
-            ens_params_mask=mask_params_norm,
+            ens_params_mask=ens_params_from_mask or mask_params_norm,
             ens_match=ens_match,
             confidence=round(confidence, 3),
             processing_time_ms=round(processing_time, 2),
@@ -1548,7 +1553,7 @@ class AutomatedParametricProcessor:
                     'score': best.get('score', 0.0),
                     **best
                 }
-                confidence = best.get('score', 0.0)
+                confidence = min(best.get('score', 0.0), 1.0)
                 matching_cfg = _get_matching_config()
                 success = confidence >= matching_cfg.fuzzy_threshold
                 return ProcessingResult(

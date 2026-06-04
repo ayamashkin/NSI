@@ -1,11 +1,11 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре)
-# 2026-06-02 14:00:00 — FEAT: структурированное логирование этапов в automated_processor
-# 2026-06-01 08:44:00 — FIX: UnboundLocalError в batch() — убран nested import json
-# 2026-05-29 16:05:00 — FIX: ens_params_mask — human-readable в Excel
-# 2026-05-29 15:55:00 — FIX: batch() no_cache параметр, --no-cache флаг
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-04 14:30:00 — FEAT: 3 колонки params/ens_params/ens_params_mask + детали с top-5.
+# 2026-06-04 14:15:00 — FIX: CRLF → LF (line endings), добавлены хелперы форматирования.
+# 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре).
+# 2026-06-02 14:00:00 — FEAT: структурированное логирование этапов в automated_processor.
+# 2026-06-01 08:44:00 — FIX: UnboundLocalError в batch() — убран nested import json.
 # =============================================================================
 
 import click
@@ -59,6 +59,47 @@ def _truncate_dataframe_cells(df, max_length=1000):
                 lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
             )
     return df
+
+def _format_params_cell(params_dict, max_items=20):
+    """Форматировать dict параметров в многострочный текст для Excel."""
+    if not params_dict:
+        return ''
+    lines = []
+    for k, v in params_dict.items():
+        if v is not None:
+            lines.append(f"{k}={v}")
+            if len(lines) >= max_items:
+                lines.append(f"... ({len(params_dict)} всего)")
+                break
+    return '\n'.join(lines)
+
+def _format_top_candidates(details_dict):
+    """Форматировать top-5 кандидатов из details в читаемый текст."""
+    if not details_dict:
+        return ''
+    top = details_dict.get('top_candidates', []) or details_dict.get('debug_candidates', [])
+    if not top:
+        return ''
+    lines = []
+    for i, cd in enumerate(top, 1):
+        name = cd.get('name', 'N/A')[:40]
+        code = cd.get('ens_code', 'N/A')
+        score = cd.get('score', 0)
+        lines.append(f"{i}. [{code}] {name} (score={score})")
+        comp = cd.get('params_comparison', {})
+        for pk, pv in comp.items():
+            status = pv.get('status', '?') if isinstance(pv, dict) else str(pv)
+            extracted = pv.get('extracted', '?') if isinstance(pv, dict) else '?'
+            ens_val = pv.get('ens_value', '?') if isinstance(pv, dict) else '?'
+            if status == 'exact':
+                lines.append(f"   {pk}: {extracted}={ens_val}")
+            elif status == 'exact (in name)':
+                lines.append(f"   {pk}: {extracted}~{ens_val} (in name)")
+            elif 'token' in status:
+                lines.append(f"   {pk}: {extracted}~{ens_val}")
+            else:
+                lines.append(f"   {pk}: {extracted}!={ens_val}")
+    return '\n'.join(lines)
 
 @click.group()
 @click.option('--config', '-c', default='config/config.yaml', help='Путь к конфигурации')
@@ -487,8 +528,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 if success_only and not result.success:
                     stats['filtered'] += 1
                     return idx, None
-            # 2026-06-03 15:50 (МСК, UTC+3): не сохраняем неуспешные результаты
-            if result_db and getattr(result, 'success', False):
+            if result_db:
                 logger.debug("[CLI_CACHE] Saving result to %s for '%s' (code=%s)",
                              result_db, result.text[:50], result.ens_code)
                 try:
@@ -570,7 +610,11 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             mism = result.fuzzy_mismatched_params
             out_row['Несовпавшие параметры'] = json.dumps(mism, ensure_ascii=False) if mism else None
             out_row['маска'] = str(result.mask_pattern)[:1000] if result.mask_pattern else ''
-            # Human-readable parameters from mask
+            # FEAT 2026-06-04: 3 новые колонки — params, ens_params, ens_params_mask (многострочные)
+            out_row['params'] = _format_params_cell(result.params)
+            out_row['ens_params'] = _format_params_cell(result.ens_params)
+            out_row['ens_params_mask'] = _format_params_cell(result.ens_params_mask)
+            # Legacy: параметры_маски — оставляем для обратной совместимости
             if result.ens_params_mask:
                 if isinstance(result.ens_params_mask, dict):
                     out_row['параметры_маски'] = ', '.join(
@@ -607,19 +651,21 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 except Exception:
                     pass
             out_row['маски_в_бд'] = 'Да' if has_mask else 'Нет'
+            # FEAT 2026-06-04: при score < 1 — читаемый top-5 вместо сырого JSON
             if include_details and result.details:
-                out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
+                if result.confidence is not None and result.confidence < 1.0:
+                    top_text = _format_top_candidates(result.details)
+                    if top_text:
+                        out_row['детали'] = top_text
+                    else:
+                        out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
+                else:
+                    out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
             excel_rows.append(out_row)
         df_out = pd.DataFrame(excel_rows)
         df_out = _truncate_dataframe_cells(df_out, max_length=1000)
         if 'Уверенность' in df_out.columns:
             df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
-        # 2026-06-03 16:15 (МСК, UTC+3): удаляем control characters (\x00-\x1F) перед Excel
-        # Иначе openpyxl падает: IllegalCharacterError: ГОСТ 1 \x01336-80
-        import re
-        _control_char_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
-        for col in df_out.columns:
-            df_out[col] = df_out[col].apply(lambda x: _control_char_re.sub('', str(x)) if pd.notna(x) and x is not None else x)
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_out.to_excel(writer, sheet_name='Results', index=False)
             if 'Уверенность' in df_out.columns:
