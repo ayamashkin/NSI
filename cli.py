@@ -614,6 +614,12 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
         df_out = _truncate_dataframe_cells(df_out, max_length=1000)
         if 'Уверенность' in df_out.columns:
             df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
+        # 2026-06-03 16:15 (МСК, UTC+3): удаляем control characters (\x00-\x1F) перед Excel
+        # Иначе openpyxl падает: IllegalCharacterError: ГОСТ 1 \x01336-80
+        import re
+        _control_char_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+        for col in df_out.columns:
+            df_out[col] = df_out[col].apply(lambda x: _control_char_re.sub('', str(x)) if pd.notna(x) and x is not None else x)
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_out.to_excel(writer, sheet_name='Results', index=False)
             if 'Уверенность' in df_out.columns:
