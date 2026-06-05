@@ -1,11 +1,12 @@
 # =============================================================================
-# ФАЙЛ: core/domain_config.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-02 03:00:00 — FEAT: ens_field_mapping — configurable ENS field names (code/name/standard/item_type)
-# 2026-05-29 13:30:00 — FEAT: twin_groups — regex↔DB field mappings (свойства→группа_прочности)
-# 2026-05-28 22:32:00 — FEAT: loose_match_fields — substring-match validation (покрытие)
-# 2026-05-28 12:45:00 — FEAT: min_examples (default 5) — threshold для index builder
-# 2026-05-27 21:15:00 — FEAT: meta_regex_groups — configurable regex meta-groups
+# FILE: core/domain_config.py
+# REPO: https://github.com/ayamashkin/NSI
+# LAST 5 CHANGES (UTC+3):
+# 2026-05-29 13:30:00 — FEAT: added twin_groups field for regex↔DB field mappings (e.g., свойства→группа_прочности)
+# 2026-05-28 22:32:00 — Added loose_match_fields for substring-match validation (e.g. coating)
+# 2026-05-28 12:45:00 — Added min_examples field (default 5) for index builder threshold
+# 2026-05-27 21:15:00 — Added meta_regex_groups for configurable regex meta-groups
+# 2026-05-27 18:15:00 — Added prompt_template for domain prompts
 # =============================================================================
 """
 Domain Configuration Module
@@ -39,9 +40,6 @@ class DomainConfig:
     min_examples: int = 5  # minimum examples per (standard, type) to include in index
     loose_match_fields: Set[str] = field(default_factory=set)  # fields where substring match is OK
     twin_groups: List[List[str]] = field(default_factory=list)  # [regex_field, db_field] mappings
-    # FEAT 2026-06-02: configurable ENS field names (canonical_key: source_field_name)
-    # Example: {'code': 'Код', 'name': 'Наименование', 'standard': 'НТД', 'item_type': 'Наименование_типа'}
-    ens_field_mapping: Optional[Dict[str, str]] = None
 
     @classmethod
     def load(cls, domain: str, base_path: str = "config/domains") -> "DomainConfig":
@@ -94,7 +92,6 @@ class DomainConfig:
             min_examples=int(idx.get("min_examples", 5)),
             loose_match_fields=loose_fields,
             twin_groups=twin_groups,
-            ens_field_mapping=data.get("ens_field_mapping"),
         )
 
     def canonicalize_field_name(self, original: str) -> str:

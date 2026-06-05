@@ -1,11 +1,11 @@
 # =============================================================================
 # ФАЙЛ: cli.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-04 16:30:00 — FIX: _format_params_cell защита от list (AttributeError: 'list' has no 'items').
 # 2026-06-04 14:30:00 — FEAT: 3 колонки params/ens_params/ens_params_mask + детали с top-5.
 # 2026-06-04 14:15:00 — FIX: CRLF → LF (line endings), добавлены хелперы форматирования.
 # 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре).
 # 2026-06-02 14:00:00 — FEAT: структурированное логирование этапов в automated_processor.
-# 2026-06-01 08:44:00 — FIX: UnboundLocalError в batch() — убран nested import json.
 # =============================================================================
 
 import click
@@ -64,6 +64,12 @@ def _format_params_cell(params_dict, max_items=20):
     """Форматировать dict параметров в многострочный текст для Excel."""
     if not params_dict:
         return ''
+    # FIX 2026-06-04: защита от list (ens_params_mask иногда list, не dict)
+    if isinstance(params_dict, list):
+        lines = [str(item) for item in params_dict if item is not None]
+        return '\n'.join(lines[:max_items]) if lines else ''
+    if not isinstance(params_dict, dict):
+        return str(params_dict)[:1000]
     lines = []
     for k, v in params_dict.items():
         if v is not None:

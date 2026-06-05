@@ -1477,13 +1477,15 @@ class AutomatedParametricProcessor:
             logger.info("[РЕЗУЛЬТАТ] ✗ Неудача: лучший code=%s, score=%.3f, порог=%.2f",
                         bm_code, best_score, matching_cfg.success_threshold)
 
+        # FIX 2026-06-04: mask_params_norm может быть list — нормализуем в dict
+        _mask_params_norm = mask_params_norm if isinstance(mask_params_norm, dict) else {}
         return ProcessingResult(
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
             success=success,
             params=params,
             ens_params=ens_params_from_match,
-            ens_params_mask=ens_params_from_mask or mask_params_norm,
+            ens_params_mask=ens_params_from_mask or _mask_params_norm,
             ens_match=ens_match,
             confidence=round(confidence, 3),
             processing_time_ms=round(processing_time, 2),
