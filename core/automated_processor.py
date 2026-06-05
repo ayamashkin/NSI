@@ -1,8 +1,8 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-05 08:35:00 — FIX: Нормализация кириллической М (U+041C) → латинская M (U+004D) перед extract.
 # 2026-06-04 14:35:00 — FIX: confidence capped at 1.0 (min(score, 1.0)). Было 1.002, стало 1.0.
-# 2026-06-04 14:15:00 — FIX: баг с отступами — блок обновления best_match не выполнялся (is_better).
 # 2026-06-04 13:20:00 — FIX: exact coating match бонус +0.01. Кд=Кд выигрывает у Кд~Ц9.фос.окс.
 # 2026-06-04 10:30:00 — FIX: _fix_loaded_mask. Покрытие опциональное + шаг через - или х.
 # 2026-06-03 16:05:00 — FIX: coating substitution → match_type='exact_substitution', score=1.0.
@@ -553,6 +553,9 @@ class AutomatedParametricProcessor:
         # 2026-06-03 14:50:00 (МСК, UTC+3): Заклёпка → Заклепка (ё→е нормализация)
         # Иначе standard_extractor не распознаёт тип с кириллической ё
         clean_text = clean_text.replace("ё", "е").replace("Ё", "Е")
+        # FIX 2026-06-05 08:35 (МСК, UTC+3): Кириллическая М (U+041C) → латинская M (U+004D)
+        # перед числом — метрическая резьба М10, М12 и т.д.
+        clean_text = re.sub(r'(?<![a-zA-Zа-яА-Я])М(?=\d)', 'M', clean_text)
 
         extracted = self.standard_extractor.extract_all(clean_text)
         standard_info = extracted.get('standard_info')
