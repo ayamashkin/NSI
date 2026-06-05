@@ -1,12 +1,11 @@
 # =============================================================================
-# ФАЙЛ: core/automated_processor.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
-# 2026-06-05 10:45:00 — FIX: _fix_loaded_mask — тип-специфичные фиксы. Болт 98.3%, Штифт 47.2%, Винт 2.3%.
-#   bugs1.xlsx: 4023/9365 = 43.0% (было 0%). М→M + класс_допуска опц. + исполнение[-\s]*M + шаг через х.
-# 2026-06-05 08:35:00 — FIX: _fix_loaded_mask + исполнение[-\s]*M + класс_допуска опц. + М→M.
+# 2026-06-05 15:10:00 — FIX: r-strings во всех литералах _apply_mask_fixes. SyntaxWarning устранены.
+#   Удалён мёртвый код _fix_loaded_mask (120+ строк). FIX 6/7 идемпотентность через [xXхХ×\-].
+# 2026-06-05 11:00:00 — FIX: _apply_mask_fixes — идемпотентный, вызывается перед КАЖДЫМ extract.
+#   Покрытие не поглощает ГОСТ/ОСТ. Штифт: \.→[.,], х→[xXхХ×\-\s]+, Винт мелкий шаг.
+# 2026-06-04 14:35:00 — FIX: confidence capped at 1.0 + is_better отступ + exact coating бонус.
 # 2026-06-04 13:20:00 — FIX: exact coating match бонус +0.01. Кд=Кд выигрывает у Кд~Ц9.фос.окс.
 # 2026-06-04 10:30:00 — FIX: _fix_loaded_mask. Покрытие опциональное + шаг через - или х.
-# 2026-06-03 16:05:00 — FIX: coating substitution → match_type='exact_substitution', score=1.0.
 # =============================================================================
 """
 Main Processor Module
@@ -1147,132 +1146,76 @@ class AutomatedParametricProcessor:
         parts.append(standard)
         return ' '.join(parts)
 
-    def _fix_loaded_mask(self, mask):
-        """Post-processing fixes для масок из БД.
-        2026-06-04 10:30 (МСК, UTC+3):
-        - Покрытие опциональное (БП = без покрытия)
-        - Шаг резьбы через - или х
+    @staticmethod
+    def _apply_mask_fixes(pattern: str) -> str:
+        r"""Применить фиксы к паттерну маски. Идемпотентный — безопасно вызывать многократно.
+        Выделен из _fix_loaded_mask для применения перед КАЖДЫМ использованием маски.
+        2026-06-05 11:00 (МСК, UTC+3): Идемпотентность + покрытие не поглощает ГОСТ/ОСТ.
+        2026-06-05 18:10 (МСК, UTC+3): Все строковые литералы — raw strings (SyntaxWarning убраны).
         """
+        if not pattern:
+            return pattern
+        # FIX 1: покрытие опциональное (только если ещё не опциональное)
+        if r')?[-\s]+ОСТ' not in pattern and r')?[-\s]+ГОСТ' not in pattern:
+            pattern = pattern.replace(
+                r'[-\s]+(?P<покрытие>[\w.]+)[-\s]+ОСТ',
+                r'(?:[-\s]+(?P<покрытие>[\w.]+))?[-\s]+ОСТ'
+            )
+            pattern = pattern.replace(
+                r'[-\s]+(?P<покрытие>[\w.]+)[-\s]+ГОСТ',
+                r'(?:[-\s]+(?P<покрытие>[\w.]+))?[-\s]+ГОСТ'
+            )
+        # FIX 2: шаг резьбы через - или х
+        pattern = pattern.replace(r'(?:[xXхХ×](?P<шаг_резьбы>', r'(?:[xXхХ×\-](?P<шаг_резьбы>')
+        pattern = pattern.replace(r'[xXхХ×](?P<шаг_резьбы>', r'[xXхХ×\-](?P<шаг_резьбы>')
+        # FIX 3: класс_допуска опциональный
+        if r'(?:(?P<класс_допуска>' not in pattern:
+            pattern = pattern.replace(r'(?P<класс_допуска>\d+[a-z])х(?P<длина>', r'(?:(?P<класс_допуска>\d+[a-z])х)?(?P<длина>')
+        # FIX 4: исполнение без разделителя перед М
+        pattern = pattern.replace(r'(?P<исполнение>\d+)[-\s]+M', r'(?P<исполнение>\d+)[-\s]*M')
+        pattern = pattern.replace(r'(?P<исполнение>\d+)[-\s]+)?M', r'(?P<исполнение>\d+)[-\s]*)?M')
+        # FIX 5: Штифты ГОСТ 3128/3129
+        if 'Штифт' in pattern and (r'ГОСТ\s*3128' in pattern or r'ГОСТ\s*3129' in pattern):
+            if '(?![.,])' not in pattern:
+                pattern = pattern.replace(r'(?P<исполнение>\d+))?(?:[-\s]+(?P<наружный_диаметр_сторона_квадр>', r'(?P<исполнение>\d+)(?![.,]))?(?:[-\s]+(?P<наружный_диаметр_сторона_квадр>')
+            pattern = pattern.replace(r'(?:[-\s]+(?P<длина>', r'(?:[xXхХ×\-\s]+(?P<длина>')
+            pattern = pattern.replace(r'(?:[xXхХ×](?P<класс_допуска>[a-zA-Z]\d+))?', r'(?:[xXХ×](?P<класс_допуска>[a-zA-Z]\d+))?')
+            if r'(?:[.,]\d+)?' not in pattern:
+                pattern = pattern.replace(r'(?P<наружный_диаметр_сторона_квадр>\d+(?:\.\d+)?)', r'(?P<наружный_диаметр_сторона_квадр>\d+(?:[.,]\d+)?)')
+            pattern = pattern.replace(r'(?P<марка_материала1>\w+))?(?:[-\s]+(?P<состояние_поставки_металлопрок>', r'(?P<марка_материала1>[\w.]+))?(?:[-\s]+(?P<состояние_поставки_металлопрок>')
+            pattern = pattern.replace(r'(?P<покрытие>\w+\.?\w*\.?\w*)', r'(?P<покрытие>[\w.]+)')
+            if '(?!ГОСТ|ОСТ)' not in pattern:
+                pattern = pattern.replace(r'(?P<покрытие>[\w.]+))', r'(?P<покрытие>(?!ГОСТ|ОСТ)[\w.]+))')
+        # FIX 6: Болт ГОСТ 7798 шаг через х
+        if r'(?P<номинальный_диаметр_резьбы>' in pattern and r'ГОСТ\s*7798' in pattern:
+            if r'(?:[xXхХ×\-](?P<шаг_резьбы>' not in pattern:
+                pattern = pattern.replace(r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)[-\s]+(?:(?P<класс_допуска>', r'(?P<номинальный_диаметр_резьбы>\d+(?:[.,]\d+)?)(?:[xXхХ×\-](?P<шаг_резьбы>\d+(?:[,\.]\d+)?))?[xXхХ×\-\s]+(?:(?P<класс_допуска>')
+        # FIX 7: Винт
+        if pattern.startswith('^Винт'):
+            if r'\(' not in pattern:
+                pattern = pattern.replace(r'(?P<исполнение>\d+))?(?:[-\s]+)?', r'\((?P<исполнение>\d+)\))?[-\s]*')
+                pattern = pattern.replace(r'(?:(?:[-\s]+(?P<исполнение>\d+))?)', r'(?:\((?P<исполнение>\d+)\))?')
+            if r'\s+M(?P<' in pattern:
+                pattern = pattern.replace(r'\s+M(?P<', r'\s*[mм]?(?P<')
+            pattern = pattern.replace(r'[-\s]+(?P<длина>', r'[xXхХ×\-\s]+(?P<длина>')
+            pattern = pattern.replace(r'(?P<покрытие>\w+\.?\w*\.?\w*)', r'(?P<покрытие>[\w.]+)')
+            # FIX 7b: покрытие опциональное (как FIX 1, но для Винт — применяем сразу)
+            if r')?[-\s]+ОСТ' not in pattern and r')?[-\s]+ГОСТ' not in pattern:
+                pattern = pattern.replace(
+                    r'[-\s]+(?P<покрытие>[\w.]+)[-\s]+ОСТ',
+                    r'(?:[-\s]+(?P<покрытие>[\w.]+))?[-\s]+ОСТ'
+                )
+                pattern = pattern.replace(
+                    r'[-\s]+(?P<покрытие>[\w.]+)[-\s]+ГОСТ',
+                    r'(?:[-\s]+(?P<покрытие>[\w.]+))?[-\s]+ГОСТ'
+                )
+        return pattern
+
+    def _fix_loaded_mask(self, mask):
+        """DEPRECATED: Фиксы теперь в _apply_mask_fixes, вызывается перед каждым использованием."""
         if not mask or not getattr(mask, 'pattern', None):
             return mask
-        pattern = mask.pattern
-        original = pattern
-
-        # FIX 1: покрытие опциональное перед ОСТ/ГОСТ
-        # [-\s]+(?P<покрытие>[\w.]+)[-\s]+ОСТ → (?:[-\s]+(?P<покрытие>[\w.]+))?[-\s]+ОСТ
-        # Вся группа "разделитель+покрытие" опциональна
-        pattern = pattern.replace(
-            '[-\\s]+(?P<покрытие>[\\w.]+)[-\\s]+ОСТ',
-            '(?:[-\\s]+(?P<покрытие>[\\w.]+))?[-\\s]+ОСТ'
-        )
-        pattern = pattern.replace(
-            '[-\\s]+(?P<покрытие>[\\w.]+)[-\\s]+ГОСТ',
-            '(?:[-\\s]+(?P<покрытие>[\\w.]+))?[-\\s]+ГОСТ'
-        )
-
-        # FIX 2: шаг резьбы через - или х
-        # В паттерне может быть как [xXхХ×](?P<шаг_резьбы> так и (?:[xXхХ×](?P<шаг_резьбы>
-        pattern = pattern.replace(
-            '(?:[xXхХ×](?P<шаг_резьбы>',
-            '(?:[xXхХ×\\-](?P<шаг_резьбы>'
-        )
-        # Fallback: без (?: префикса
-        pattern = pattern.replace(
-            '[xXхХ×](?P<шаг_резьбы>',
-            '[xXхХ×\\-](?P<шаг_резьбы>'
-        )
-
-        # FIX 3 2026-06-05 08:35 (МСК, UTC+3): класс_допуска опциональный
-        # Болт М10-100 ГОСТ 7798-70 — без класса допуска и без "х" перед длиной
-        pattern = pattern.replace(
-            '(?P<класс_допуска>\\d+[a-z])х(?P<длина>',
-            '(?:(?P<класс_допуска>\\d+[a-z])х)?(?P<длина>'
-        )
-
-        # FIX 4 2026-06-05 08:35 (МСК, UTC+3): исполнение без разделителя перед М
-        # Болт 2М10-100 ГОСТ 7798-70 — исполнение=2 слитно с М
-        # Вариант А: (?P<исполнение>\d+)[-\s]+M → (?P<исполнение>\d+)[-\s]*M
-        pattern = pattern.replace(
-            '(?P<исполнение>\\d+)[-\\s]+M',
-            '(?P<исполнение>\\d+)[-\\s]*M'
-        )
-        # Вариант Б: (?P<исполнение>\d+)[-\s]+)?M → (?P<исполнение>\d+)[-\s]*)?M
-        pattern = pattern.replace(
-            '(?P<исполнение>\\d+)[-\\s]+)?M',
-            '(?P<исполнение>\\d+)[-\\s]*)?M'
-        )
-
-        # FIX 5 2026-06-05 10:45 (МСК, UTC+3): Штифты ГОСТ 3128/3129 — тип-специфичный фикс.
-        # Проблемы: х между диаметром и длиной, диаметр с запятой, составные покрытия.
-        # Штифт 0,6х10 ГОСТ 3129-70 — исполнение=0 захватывает часть диаметра 0,6.
-        # Условие: ГОСТ\\s*312[89] — \\s в паттерне из БД = два символа \ + s.
-        if 'Штифт' in pattern and ('ГОСТ\\s*3128' in pattern or 'ГОСТ\\s*3129' in pattern):
-            # 1. Защита: исполнение не захватывает число перед запятой (0 из 0,6)
-            pattern = pattern.replace(
-                '(?P<исполнение>\\d+))?(?:[-\\s]+(?P<наружный_диаметр_сторона_квадр>',
-                '(?P<исполнение>\\d+)(?![.,]))?(?:[-\\s]+(?P<наружный_диаметр_сторона_квадр>'
-            )
-            # 2. х между диаметром и длиной — [xXхХ×\-\s]+ вместо [-\s]+
-            pattern = pattern.replace('(?:[-\\s]+(?P<длина>', '(?:[xXхХ×\\-\\s]+(?P<длина>')
-            # 3. х для класс_допуска — без кирилл. х
-            pattern = pattern.replace(
-                '(?:[xXхХ×](?P<класс_допуска>[a-zA-Z]\\d+))?',
-                '(?:[xXХ×](?P<класс_допуска>[a-zA-Z]\\d+))?'
-            )
-            # 4. Марка/покрытие с точками
-            pattern = pattern.replace(
-                '(?P<марка_материала1>\\w+))?(?:[-\\s]+(?P<состояние_поставки_металлопрок>',
-                '(?P<марка_материала1>[\\w.]+))?(?:[-\\s]+(?P<состояние_поставки_металлопрок>'
-            )
-            pattern = pattern.replace(
-                '(?P<покрытие>\\w+\\.?\\w*\\.?\\w*)',
-                '(?P<покрытие>[\\w.]+)'
-            )
-
-        # FIX 6 2026-06-05 10:45 (МСК, UTC+3): Болт/Винт ГОСТ 7798 — шаг резьбы через х.
-        # Болт 2М10х1,25-100 ГОСТ 7798-70 — М10х1,25 = диаметр×шаг, потом длина.
-        if '(?P<номинальный_диаметр_резьбы>' in pattern and 'ГОСТ\\s*7798' in pattern:
-            pattern = pattern.replace(
-                '(?P<номинальный_диаметр_резьбы>\\d+(?:[.,]\\d+)?)[-\\s]+(?:(?P<класс_допуска>',
-                '(?P<номинальный_диаметр_резьбы>\\d+(?:[.,]\\d+)?)(?:[xXхХ×](?P<шаг_резьбы>\\d+(?:[,\\.]\\d+)?))?[xXхХ×\\-\\s]+(?:(?P<класс_допуска>'
-            )
-
-        # FIX 7 2026-06-05 10:45 (МСК, UTC+3): Винт — мелкий шаг м, исполнение в скобках, длина через х.
-        # Винт (5)-5-10-Кд-ОСТ 1 31508-80 — исполнение=(5), диаметр=5, длина=10
-        # Винт 2м6-6ех20.58.029 ГОСТ 10336-80 — м=мелкий шаг, 6=диаметр, 6е=класс, х20=длина через х
-        # Винт 10-16-Кд-ОСТ 1 31534-80 — без M перед диаметром
-        if pattern.startswith('^Винт'):
-            # 1. исполнение в скобках: (?P<исполнение>\d+) → \((?P<исполнение>\d+)\)
-            #    Только если в паттерне НЕТ уже \( — иначе double parens
-            if '\\(' not in pattern:
-                pattern = pattern.replace(
-                    '(?P<исполнение>\\d+))?(?:[-\\s]+)?',
-                    '\\((?P<исполнение>\\d+)\\))?[-\\s]*'
-                )
-                pattern = pattern.replace(
-                    '(?:(?:[-\\s]+(?P<исполнение>\\d+))?)',
-                    '(?:\\((?P<исполнение>\\d+)\\))?'
-                )
-            # 2. мелкий шаг + опциональный M: \s+M(?P< → \s*[mм]?(?P<
-            #    Винт 10-16 (без M) → M опциональный
-            #    Винт 2м6 (мелкий шаг) → [mм] ловит м
-            if '\\s+M(?P<' in pattern:
-                pattern = pattern.replace('\\s+M(?P<', '\\s*[mм]?(?P<')
-            # 3. длина через х: [xXхХ×\-\s]+ вместо [-\s]+ перед длиной
-            pattern = pattern.replace('[-\\s]+(?P<длина>', '[xXхХ×\\-\\s]+(?P<длина>')
-            # 4. покрытие с точками: Ан.Окс, 58.029 → [\w.]+
-            pattern = pattern.replace(
-                '(?P<покрытие>\\w+\\.?\\w*\\.?\\w*)',
-                '(?P<покрытие>[\\w.]+)'
-            )
-
-        if pattern != original:
-            try:
-                re.compile(pattern, re.IGNORECASE)
-                mask.pattern = pattern
-                logger.debug("[_fix_loaded_mask] Fixed: %s...", pattern[:80])
-            except re.error as e:
-                logger.warning("[_fix_loaded_mask] Invalid pattern: %s", e)
+        mask.pattern = AutomatedParametricProcessor._apply_mask_fixes(mask.pattern)
         return mask
 
     def _parametric_match(self, text: str, mask: Any, extracted: Dict, start_time: float) -> ProcessingResult:
@@ -1285,6 +1228,8 @@ class AutomatedParametricProcessor:
         standard = canonicalize_standard(standard_info.normalized) if standard_info else ''
 
         logger.info("[ЭТАП 2] Извлечение параметров из наименования...")
+        # FIX 2026-06-05: применить фиксы перед КАЖДЫМ использованием маски (идемпотентно)
+        mask.pattern = self._apply_mask_fixes(mask.pattern)
         params = self.parametric_client.extract_params(text, mask.pattern)
         remapped = self._remap_params(params, mask.params)
         logger.info("[ЭТАП 2] Извлечённые параметры: %s", remapped)
@@ -1442,6 +1387,8 @@ class AutomatedParametricProcessor:
         item_type = extracted.get('item_type', '')
         processing_time = (time.time() - start_time) * 1000
 
+        # FIX 2026-06-05: применить фиксы перед КАЖДЫМ использованием маски (идемпотентно)
+        mask.pattern = self._apply_mask_fixes(mask.pattern)
         params = self.parametric_client.extract_params(text, mask.pattern)
 
         # Build ENS match
