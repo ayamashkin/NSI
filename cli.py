@@ -1,8 +1,9 @@
 # =============================================================================
 # ФАЙЛ: cli.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-05 08:00:00 — FIX: IllegalCharacterError — _sanitize_dataframe_for_excel чистит control chars из ВСЕХ ячеек.
+# 2026-06-04 17:00:00 — FIX: IllegalCharacterError — _sanitize_dataframe_for_excel чистит control chars из ВСЕХ ячеек.
 # 2026-06-04 16:30:00 — FIX: _format_params_cell защита от list (AttributeError: 'list' has no 'items').
-# 2026-06-04 14:30:00 — FEAT: 3 колонки params/ens_params/ens_params_mask + детали с top-5.
 # 2026-06-04 14:15:00 — FIX: CRLF → LF (line endings), добавлены хелперы форматирования.
 # 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре).
 # 2026-06-02 14:00:00 — FEAT: структурированное логирование этапов в automated_processor.
@@ -78,6 +79,21 @@ def _format_params_cell(params_dict, max_items=20):
                 lines.append(f"... ({len(params_dict)} всего)")
                 break
     return '\n'.join(lines)
+
+def _strip_control_chars(text):
+    """Удалить control characters (кроме \n \r \t) для Excel."""
+    if not isinstance(text, str):
+        return text
+    return ''.join(ch for ch in text if ch == '\n' or ch == '\r' or ch == '\t' or ord(ch) >= 32)
+
+
+def _sanitize_dataframe_for_excel(df):
+    """Очистить ВСЕ строковые ячейки DataFrame от control characters."""
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(lambda x: _strip_control_chars(x) if isinstance(x, str) else x)
+    return df
+
 
 def _format_top_candidates(details_dict):
     """Форматировать top-5 кандидатов из details в читаемый текст."""
@@ -670,6 +686,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             excel_rows.append(out_row)
         df_out = pd.DataFrame(excel_rows)
         df_out = _truncate_dataframe_cells(df_out, max_length=1000)
+        df_out = _sanitize_dataframe_for_excel(df_out)
         if 'Уверенность' in df_out.columns:
             df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
