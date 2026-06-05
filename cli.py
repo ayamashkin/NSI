@@ -1,11 +1,9 @@
 # =============================================================================
 # ФАЙЛ: cli.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
-# 2026-06-05 08:35:00 — FIX: IllegalCharacterError — _clean() чистит control chars на уровне создания out_row.
-# 2026-06-04 16:30:00 — FIX: _format_params_cell защита от list (AttributeError: 'list' has no 'items').
-# 2026-06-04 14:15:00 — FIX: CRLF → LF (line endings), добавлены хелперы форматирования.
-# 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре).
-# 2026-06-02 14:00:00 — FEAT: структурированное логирование этапов в automated_processor.
+# 2026-06-05 10:45:00 — FIX: _clean() чистит control chars + 3 колонки params/ens_params/ens_params_mask.
+# 2026-06-04 16:30:00 — FIX: _format_params_cell защита от list + IllegalCharacterError sanitize.
+# 2026-06-02 14:30:00 — FIX: маски_в_бд UPPER + структурированное логирование этапов.
 # =============================================================================
 
 import click
