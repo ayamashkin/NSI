@@ -1,8 +1,7 @@
 # =============================================================================
 # ФАЙЛ: cli.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
-# 2026-06-05 08:00:00 — FIX: IllegalCharacterError — _sanitize_dataframe_for_excel чистит control chars из ВСЕХ ячеек.
-# 2026-06-04 17:00:00 — FIX: IllegalCharacterError — _sanitize_dataframe_for_excel чистит control chars из ВСЕХ ячеек.
+# 2026-06-05 08:35:00 — FIX: IllegalCharacterError — _clean() чистит control chars на уровне создания out_row.
 # 2026-06-04 16:30:00 — FIX: _format_params_cell защита от list (AttributeError: 'list' has no 'items').
 # 2026-06-04 14:15:00 — FIX: CRLF → LF (line endings), добавлены хелперы форматирования.
 # 2026-06-02 14:30:00 — FIX: маски_в_бд — поиск с UPPER item_type (как в процессоре).
@@ -87,12 +86,13 @@ def _strip_control_chars(text):
     return ''.join(ch for ch in text if ch == '\n' or ch == '\r' or ch == '\t' or ord(ch) >= 32)
 
 
-def _sanitize_dataframe_for_excel(df):
-    """Очистить ВСЕ строковые ячейки DataFrame от control characters."""
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].apply(lambda x: _strip_control_chars(x) if isinstance(x, str) else x)
-    return df
+def _clean(val):
+    """Очистить значение от control characters для Excel. Числа/None пропускает."""
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, str):
+        return _strip_control_chars(val)
+    return val
 
 
 def _format_top_candidates(details_dict):
@@ -608,16 +608,13 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             out_row = {}
             for col in df.columns:
                 val = df.iloc[idx][col]
-                if pd.isna(val):
-                    out_row[str(col)] = None
-                else:
-                    out_row[str(col)] = val
-            out_row['Код ЕНС'] = str(result.ens_code)[:50] if result.ens_code else ''
-            out_row['Наименование ЕНС'] = str(result.ens_name)[:500] if result.ens_name else ''
-            out_row['Уровень'] = str(result.level.value if hasattr(result.level, 'value') else result.level) if result.level else ''
+                out_row[str(col)] = _clean(val)
+            out_row['Код ЕНС'] = _clean(str(result.ens_code)[:50]) if result.ens_code else ''
+            out_row['Наименование ЕНС'] = _clean(str(result.ens_name)[:500]) if result.ens_name else ''
+            out_row['Уровень'] = _clean(str(result.level.value if hasattr(result.level, 'value') else result.level)) if result.level else ''
             out_row['Распознано'] = 'Да' if result.success else 'Нет'
             out_row['Уверенность'] = round(float(result.confidence or 0.0), 3)
-            out_row['Тип сопоставления'] = str(result.match_type_ru) if result.match_type_ru else 'Не определено'
+            out_row['Тип сопоставления'] = _clean(str(result.match_type_ru)) if result.match_type_ru else 'Не определено'
             sub = result.coating_substitution
             if sub:
                 clean_sub = {
@@ -631,7 +628,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 out_row['Подстановка покрытия'] = None
             mism = result.fuzzy_mismatched_params
             out_row['Несовпавшие параметры'] = json.dumps(mism, ensure_ascii=False) if mism else None
-            out_row['маска'] = str(result.mask_pattern)[:1000] if result.mask_pattern else ''
+            out_row['маска'] = _clean(str(result.mask_pattern)[:1000]) if result.mask_pattern else ''
             # FEAT 2026-06-04: 3 новые колонки — params, ens_params, ens_params_mask (многострочные)
             out_row['params'] = _format_params_cell(result.params)
             out_row['ens_params'] = _format_params_cell(result.ens_params)
@@ -639,9 +636,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             # Legacy: параметры_маски — оставляем для обратной совместимости
             if result.ens_params_mask:
                 if isinstance(result.ens_params_mask, dict):
-                    out_row['параметры_маски'] = ', '.join(
+                    out_row['параметры_маски'] = _clean(', '.join(
                         f"{k}={v}" for k, v in result.ens_params_mask.items() if v is not None
-                    )
+                    ))
                 elif isinstance(result.ens_params_mask, list):
                     readable = []
                     for item in result.ens_params_mask:
@@ -655,13 +652,13 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                                 readable.append(str(parsed))
                         except (json.JSONDecodeError, TypeError):
                             readable.append(str(item))
-                    out_row['параметры_маски'] = ', '.join(readable)
+                    out_row['параметры_маски'] = _clean(', '.join(readable))
                 else:
-                    out_row['параметры_маски'] = str(result.ens_params_mask)
+                    out_row['параметры_маски'] = _clean(str(result.ens_params_mask))
             else:
                 out_row['параметры_маски'] = ''
-            out_row['стандарт'] = str(result.standard) if result.standard else ''
-            out_row['тип'] = str(result.item_type) if result.item_type else ''
+            out_row['стандарт'] = _clean(str(result.standard)) if result.standard else ''
+            out_row['тип'] = _clean(str(result.item_type)) if result.item_type else ''
             has_mask = False
             if result.standard and result.item_type:
                 try:
@@ -678,15 +675,14 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 if result.confidence is not None and result.confidence < 1.0:
                     top_text = _format_top_candidates(result.details)
                     if top_text:
-                        out_row['детали'] = top_text
+                        out_row['детали'] = _clean(top_text)
                     else:
-                        out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
+                        out_row['детали'] = _clean(json.dumps(result.details, ensure_ascii=False, default=str))
                 else:
-                    out_row['детали'] = json.dumps(result.details, ensure_ascii=False, default=str)
+                    out_row['детали'] = _clean(json.dumps(result.details, ensure_ascii=False, default=str))
             excel_rows.append(out_row)
         df_out = pd.DataFrame(excel_rows)
         df_out = _truncate_dataframe_cells(df_out, max_length=1000)
-        df_out = _sanitize_dataframe_for_excel(df_out)
         if 'Уверенность' in df_out.columns:
             df_out['Уверенность'] = pd.to_numeric(df_out['Уверенность'], errors='coerce').fillna(0.0)
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
