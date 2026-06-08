@@ -540,7 +540,7 @@ python cli.py diagnose "Болт (2)-8-26-Кд-ОСТ 1 31133-80" --db cache/mas
 python cli.py ens build-index "data/_ЕНС_Крепеж_05.05.2026.xlsx" -o models/ens_hardware.pkl -d hardware
 
 # Генерация масок (дозаполнение — путь берётся из доменного конфига)
-python cli.py generate-masks -d cache/masks.db --domain hardware --llm --validate -so output/mask_stats_all.xlsx
+python cli.py generate-masks -d cache/masks.db --domain hardware --llm   --validate -so output/mask_stats_all.xlsx
 
 # Генерация масок (перегенерация)
 python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force --validate -so output/mask_stats.xlsx
