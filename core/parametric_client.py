@@ -76,7 +76,7 @@ class ParametricENSClient:
         FIX 2026-06-01 11:44:00 UTC+3: added debug logging for pattern and match result.
         """
         logger.debug("[extract_params] text=%r pattern=%r", text, pattern)
-        match = re.match(pattern, text)
+        match = re.match(pattern, text, re.IGNORECASE)
         if not match:
             logger.debug("[extract_params] re.match returned None — pattern does NOT match text")
             return {}
