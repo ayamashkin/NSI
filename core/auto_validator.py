@@ -902,8 +902,8 @@ class AutoValidator:
         if "покрытие" in param_key:
             if v1 in v2 or v2 in v1:
                 return True
-        # FIX 2026-05-28 21:58 UTC+3: substring match only for minor differences (.0 suffix, ≤2 chars)
-        # Reject "22" vs "22х1.5" (different values, one contains other by accident)
+        # FIX 2026-06-09: substring match — strict numeric check instead of len-diff
+        # Reject "2.5" vs "5" (abs(3-1)=2 was passing), "12" vs "1.2", "100" vs "10"
         if v1 in v2 or v2 in v1:
             longer = v2 if len(v2) > len(v1) else v1
             shorter = v1 if len(v2) > len(v1) else v2
@@ -911,9 +911,24 @@ class AutoValidator:
             # Allow only .0 / ,0 suffix differences
             if remaining in (".0", ",0", ".00", ",00"):
                 return True
-            # Allow tiny formatting differences (≤ 2 chars)
-            if abs(len(v1) - len(v2)) <= 2:
-                return True
+            # Strict numeric check: if both are numbers, compare with relative tolerance
+            try:
+                f_longer = float(longer)
+                f_shorter = float(shorter)
+                if f_shorter != 0:
+                    rel_diff = abs(f_longer - f_shorter) / abs(f_shorter)
+                    if rel_diff < 0.001:  # 0.1% relative tolerance — strict for substring hits
+                        return True
+                # Numeric but different values → real mismatch
+                return False
+            except (ValueError, TypeError):
+                pass
+            # Non-numeric with substring containment → check if same token family
+            # e.g. "22" vs "22x1.5" (different dimensions) → reject
+            # e.g. "6g" vs "6" → reject (class tolerance vs diameter)
+            if remaining and re.match(r'^[a-zA-Zа-яА-Я]+$', remaining):
+                # Shorter is prefix of longer with letter suffix — different params
+                return False
             # Otherwise: real mismatch (e.g., "22" vs "22х1.5", "6" vs "6g")
             return False
         try:

@@ -988,27 +988,37 @@ class AutomatedParametricProcessor:
 
                     # FIX 2026-06-02: if field doesn't match, check if value is in candidate NAME
                     # ENS data may have stale field values but correct name
+                    # FIX 2026-06-09: exclude matches inside standard codes (ГОСТ XXXX-XX, ОСТ XXX-XX)
                     in_name = False
+                    in_name_weight_factor = 0.5  # reduced weight for in-name matches
                     if not matched and candidate_name:
                         # Strict: value must appear as token in name (e.g. "12" in "Болт (2)-12-44-...")
                         name_lower = candidate_name.lower().replace(',', '.')
                         val_str = str(extracted_val).lower().strip().replace(',', '.')
                         # Token boundary check: preceded by non-digit, followed by non-digit
-                        in_name = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d.])', name_lower))
+                        # Token boundary: preceded by non-digit, followed by non-digit
+                        # Allow '.' after number as separator (e.g. "50.Хим" → "50" is a token)
+                        in_name_raw = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d])', name_lower))
+                        if in_name_raw:
+                            # Exclude matches inside standard code portion of name
+                            # e.g. "70" in "ГОСТ 3129-70", "1" in "ОСТ1 10569-72"
+                            std_code_pattern = r'(?:гост|ост|ту)\s*\d[\d\s\.\-]*(?:\-\d+)?'
+                            name_without_std = re.sub(std_code_pattern, '', name_lower)
+                            in_name = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d])', name_without_std))
 
                     status = 'exact' if matched else ('exact (in name)' if in_name else 'mismatched')
                     candidate_debug['params_comparison'][param_name] = {
                         'status': status,
                         'extracted': str(extracted_val),
                         'ens_value': str(candidate_val) if candidate_val else None,
-                        'similarity': 1.0 if (matched or in_name) else 0.0,
+                        'similarity': 1.0 if matched else (0.5 if in_name else 0.0),
                     }
-                    if matched or in_name:
+                    if matched:
                         matched_weight += weight
-                        if in_name:
-                            candidate_debug['params_matched'][param_name] = "{} == {} (in name)".format(extracted_val, candidate_val)
-                        else:
-                            candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
+                        candidate_debug['params_matched'][param_name] = "{} == {}".format(extracted_val, candidate_val)
+                    elif in_name:
+                        matched_weight += weight * in_name_weight_factor
+                        candidate_debug['params_matched'][param_name] = "{} ≈ {} (in name)".format(extracted_val, candidate_val)
                     else:
                         candidate_debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, candidate_val)
 
@@ -1413,7 +1423,11 @@ class AutomatedParametricProcessor:
         debug_candidates = []
 
         # Try exact match first (only if enough params to avoid degenerate matches)
-        if param_count >= 3:
+        # FIX 2026-06-09: require min 4 params AND ≥70% of ENS candidate params matched
+        # Prevents false exact matches when input is missing critical ENS params
+        V2_MIN_PARAMS = 4
+        V2_MIN_RATIO = 0.70
+        if param_count >= V2_MIN_PARAMS:
             for candidate in candidates:
                 cand_name = _get_meta_value(candidate, 'name', self._field_mapping) or ''
                 if cand_name and generic_pattern:
@@ -1421,16 +1435,25 @@ class AutomatedParametricProcessor:
                     cand_params = {k: _find_field_value(candidate, k) for k in remapped.keys()}
                     cand_generic = self._get_generic_pattern(standard, item_type, cand_params, mask)
                     cand_param_count = len([v for v in cand_params.values() if v is not None and str(v).strip()])
+                    # Count ALL non-empty params in ENS candidate (for ratio check)
+                    total_cand_params = len([v for v in candidate.values() if v is not None and str(v).strip() and not str(k).startswith('_') for k, v in candidate.items()])
                     # Both patterns must have enough params to prevent degenerate matches
-                    if cand_param_count >= 3 and generic_pattern.strip() == cand_generic.strip():
+                    # Also: input params should cover most of ENS params (avoid matching subset)
+                    ratio = param_count / max(cand_param_count, 1)
+                    if (cand_param_count >= V2_MIN_PARAMS and
+                            generic_pattern.strip() == cand_generic.strip() and
+                            ratio >= V2_MIN_RATIO):
                         best_match = candidate
                         best_score = 1.0
                         match_type = 'exact'
                         match_type_ru = 'Точное совпадение (V2 generic)'
                         logger.info("[ЭТАП 2] ✓ Точное совпадение (V2): %s", cand_name[:60])
                         break
+                    elif generic_pattern.strip() == cand_generic.strip():
+                        logger.debug("[ЭТАП 2] V2 generic match rejected: ratio=%.2f < %.2f (input=%d, cand=%d)",
+                                     ratio, V2_MIN_RATIO, param_count, cand_param_count)
         else:
-            logger.debug("[ЭТАП 2] V2 generic skipped: %d params < 3", param_count)
+            logger.debug("[ЭТАП 2] V2 generic skipped: %d params < %d", param_count, V2_MIN_PARAMS)
 
         # If no exact match, try fuzzy match
         if not best_match:
@@ -1554,32 +1577,57 @@ class AutomatedParametricProcessor:
         success = confidence >= matching_cfg.success_threshold
 
         # 2026-06-03 16:00 (МСК, UTC+3): mismatched required params (кроме покрытия) → success=False
-        # 2026-06-06 01:00 (МСК, UTC+3): длина — soft param, mismatch не сбрасывает success
-        SOFT_PARAMS = {'длина'}
+        # FIX 2026-06-09: длина — не безусловно soft, а с tolerance (±10% или ±2мм)
+        def _soft_param_mismatch_ok(param_name: str, extracted_val, ens_val) -> bool:
+            """Check if mismatch for a soft param is within tolerance."""
+            if param_name == 'длина':
+                try:
+                    f1 = float(str(extracted_val).replace(',', '.'))
+                    f2 = float(str(ens_val).replace(',', '.'))
+                    if f2 == 0:
+                        return f1 == 0
+                    rel_diff = abs(f1 - f2) / abs(f2)
+                    abs_diff = abs(f1 - f2)
+                    # Tolerance: < 10% relative AND < 20mm absolute
+                    return rel_diff < 0.10 and abs_diff < 20.0
+                except (ValueError, TypeError):
+                    return False
+            return False  # unknown soft param → not OK
+
+        SOFT_PARAMS = {'длина'}  # length with tolerance, not unconditional pass
         best_debug = None
         if success and debug_candidates:
             best_cd_list = [cd for cd in debug_candidates if cd.get('is_best')]
             if best_cd_list:
                 best_cd = best_cd_list[0]
-                # 1. Прямые mismatches (soft params пропускаем)
+                # 1. Прямые mismatches (soft params проверяем tolerance)
                 mismatched = best_cd.get('params_mismatched', {})
                 for param_name in mismatched:
-                    if param_name not in SOFT_PARAMS and param_name != 'покрытие':
+                    if param_name in SOFT_PARAMS:
+                        # Soft param: check tolerance
+                        comp = best_cd.get('params_comparison', {}).get(param_name, {})
+                        if _soft_param_mismatch_ok(param_name, comp.get('extracted'), comp.get('ens_value')):
+                            logger.info("[РЕЗУЛЬТАТ] Soft param '%s' within tolerance: %s ≈ %s",
+                                        param_name, comp.get('extracted'), comp.get('ens_value'))
+                            continue  # within tolerance → OK
+                    if param_name != 'покрытие':
                         success = False
                         logger.info("[РЕЗУЛЬТАТ] Сброс success: mismatched '%s'", param_name)
                         break
-                # 2. "exact (in name)" с несовпадающим ENS-значением (soft params пропускаем)
+                # 2. "exact (in name)" с несовпадающим ENS-значением (soft params проверяем tolerance)
                 if success:
                     comparisons = best_cd.get('params_comparison', {})
                     for param_name, comp in comparisons.items():
                         if (comp.get('status') == 'exact (in name)' and
-                            comp.get('extracted') != comp.get('ens_value') and
-                            param_name not in SOFT_PARAMS and
-                            param_name != 'покрытие'):
-                            success = False
-                            logger.info("[РЕЗУЛЬТАТ] Сброс success: '%s' exact (in name) but %s ≠ %s",
-                                        param_name, comp.get('extracted'), comp.get('ens_value'))
-                            break
+                            comp.get('extracted') != comp.get('ens_value')):
+                            if param_name in SOFT_PARAMS:
+                                if _soft_param_mismatch_ok(param_name, comp.get('extracted'), comp.get('ens_value')):
+                                    continue  # within tolerance → OK
+                            if param_name != 'покрытие':
+                                success = False
+                                logger.info("[РЕЗУЛЬТАТ] Сброс success: '%s' exact (in name) but %s ≠ %s",
+                                            param_name, comp.get('extracted'), comp.get('ens_value'))
+                                break
 
         # Build details
         # FEAT 2026-06-04: топ-5 кандидатов от лучших к худшим (score↓, exact_count↓)
