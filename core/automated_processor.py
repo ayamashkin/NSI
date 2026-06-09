@@ -1,14 +1,16 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-09 13:00:00 — FIX 24: exact(in_name) — исключены совпадения в коде стандарта.
+#   Длина — не безусловно soft, tolerance ±10%/<20мм. V2 generic: min 4 params, ratio ≥70%.
+# 2026-06-09 13:00:00 — FIX: UnboundLocalError в total_cand_params list comprehension.
+#   Переменная k использовалась до объявления внутри comprehension.
 # 2026-06-08 14:30:00 — FIX 23: исполнение без скобок — \( и \) опциональны.
 #   Болт 1-6-20-Бп = исп(1)+диам(6)+дл(20)+покр(Бп). Было: диам=1,дл=6,покр=20-Бп.
 # 2026-06-08 14:15:00 — CRITICAL FIX: parametric_client.py re.match → re.IGNORECASE.
 #   Все КАПС-наименования ('БОЛТ', 'ШАЙБА') теперь ловятся. ~+50% improvement.
 # 2026-06-08 03:30:00 — FIX 21: разделитель [-.\s]+ перед ОСТ/ГОСТ.
 #   Исправлены опечатки: (?P< не (?!<, ОСТ кирилл не OCT латин. Ловит "Хим.Н-ОСТ".
-# 2026-06-08 03:25:00 — FIX 10v2: ГОСТ 1491/17475 шаг резьбы опционально. +~221.
-# 2026-06-08 03:20:00 — FIX 18/19: покрытие [\w.\-]+, пробел после М [mмMМ]\s*.
 # =============================================================================
 """
 Main Processor Module
@@ -1436,7 +1438,7 @@ class AutomatedParametricProcessor:
                     cand_generic = self._get_generic_pattern(standard, item_type, cand_params, mask)
                     cand_param_count = len([v for v in cand_params.values() if v is not None and str(v).strip()])
                     # Count ALL non-empty params in ENS candidate (for ratio check)
-                    total_cand_params = len([v for v in candidate.values() if v is not None and str(v).strip() and not str(k).startswith('_') for k, v in candidate.items()])
+                    total_cand_params = len([v for k, v in candidate.items() if not str(k).startswith('_') and v is not None and str(v).strip()])
                     # Both patterns must have enough params to prevent degenerate matches
                     # Also: input params should cover most of ENS params (avoid matching subset)
                     ratio = param_count / max(cand_param_count, 1)

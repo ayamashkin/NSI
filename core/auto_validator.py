@@ -1,12 +1,12 @@
 # =============================================================================
 # ФАЙЛ: core/auto_validator.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-09 13:00:00 — FIX: _values_match substring — строгая числовая проверка вместо len-diff ≤2
+#   "2.5" vs "5" больше не считается совпадением. Добавлена проверка letter suffix ("6" vs "6g").
 # 2026-06-02 11:15:00 — FEAT: _get_ens_field — ищет _meta[canonical] → record[field_name]
 # 2026-06-02 11:00:00 — FEAT: _get_ci — case-insensitive dict.get для ENS полей
 # 2026-06-02 08:15:00 — ИСПРАВЛЕНИЕ: optional_params shadowing → шаг_резьбы теперь в таблице
 # 2026-06-02 08:00:00 — ИСПРАВЛЕНИЕ: all_params skip_params фильтр → param_results не фильтруется
-# 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: TokenParser fallback — гибридный парсер когда regexp не матчит
-# 2026-06-01 22:00:00 — ДОБАВЛЕНИЕ: _preprocess_bare_execution — скобки к bare-исполнению
 # =============================================================================
 """
 Auto Validator Module (Domain-based)
