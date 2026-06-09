@@ -549,12 +549,14 @@ python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force -
 python cli.py generate-masks -d cache/masks.db --domain hardware --llm --force -so output/mask_stats.xlsx
 
 # Batch-обработка (Excel → Excel + result.db)
-python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 3 -o output/nomenclature1.xlsx
+python cli.py batch data/nomenclature1.xlsx -d cache/masks.db --domain hardware --workers 3 -o output/nomenclature1.xlsx  --no-cache
+python cli.py batch data/nomenclature1_bugs.xlsx -d cache/masks.db --domain hardware --workers 3 -o output/nomenclature1_bugs.xlsx  --no-cache
 
-python cli.py batch data/СТИ_КумАПП_из_АСУ_НСИ.xlsx -d cache/masks.db --domain hardware --workers 2 -o output/СТИ_КумАПП_из_АСУ_НСИ.xlsx
+python cli.py batch data/СТИ_КумАПП_из_АСУ_НСИ.xlsx -d cache/masks.db --domain hardware --workers 4 -o output/СТИ_КумАПП_из_АСУ_НСИ.xlsx  --no-cache
 
 python cli.py batch data/bugs.xlsx -d cache/masks.db --domain hardware --workers 2 -o output/bugs_nocache.xlsx   --no-cache
 python cli.py batch data/bugs.xlsx -d cache/masks.db --domain hardware --workers 2 -o output/bugs.xlsx
+python cli.py batch data/bugs2.xlsx -d cache/masks.db --domain hardware --workers 2 -o output/bugs2.xlsx
 python cli.py generate-masks -d cache/masks.db -i models/ens_hardware.pkl --force --llm --domain hardware --validate --standard "ОСТ 1 31104-80" -so output/mask_stats.xlsx
 
 # Batch-обработка (Excel → JSON + result.db)
