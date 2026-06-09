@@ -1,14 +1,16 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
-# 2026-06-09 13:00:00 — FIX 24: exact(in_name) — исключены совпадения в коде стандарта.
-#   Длина — не безусловно soft, tolerance ±10%/<20мм. V2 generic: min 4 params, ratio ≥70%.
-# 2026-06-09 13:00:00 — FIX: UnboundLocalError в total_cand_params list comprehension.
+# 2026-06-09 18:30:00 — FEAT: exact_name match — заполнение params/ens_params/ens_params_mask.
+#   Добавлен _build_exact_name_debug: exact_name теперь возвращает debug_candidates с параметрами.
+#   ens_params собирается из ВСЕХ полей best_match (не только remapped keys).
+# 2026-06-09 18:00:00 — FIX 24: exact(in_name) — исключены совпадения в коде стандарта.
+#   Длина — tolerance ±10%/<20мм. V2 generic: min 4 params, ratio ≥70%.
+# 2026-06-09 18:00:00 — FIX: UnboundLocalError в total_cand_params list comprehension.
 #   Переменная k использовалась до объявления внутри comprehension.
 # 2026-06-08 14:30:00 — FIX 23: исполнение без скобок — \( и \) опциональны.
 #   Болт 1-6-20-Бп = исп(1)+диам(6)+дл(20)+покр(Бп). Было: диам=1,дл=6,покр=20-Бп.
 # 2026-06-08 14:15:00 — CRITICAL FIX: parametric_client.py re.match → re.IGNORECASE.
-#   Все КАПС-наименования ('БОЛТ', 'ШАЙБА') теперь ловятся. ~+50% improvement.
 # 2026-06-08 03:30:00 — FIX 21: разделитель [-.\s]+ перед ОСТ/ГОСТ.
 #   Исправлены опечатки: (?P< не (?!<, ОСТ кирилл не OCT латин. Ловит "Хим.Н-ОСТ".
 # =============================================================================
@@ -1151,6 +1153,60 @@ class AutomatedParametricProcessor:
         else:
             logger.info("✗ Совпадение не найдено")
 
+    def _build_exact_name_debug(self, remapped: Dict[str, str], best_match: Dict) -> Dict:
+        """Build debug candidate for exact_name match with param comparisons.
+
+        FEAT 2026-06-09: exact_name теперь возвращает debug_candidates с параметрами,
+        чтобы params/ens_params/ens_params_mask были заполнены и доступны для хранения.
+        """
+        candidate_name = _get_meta_value(best_match, 'name', self._field_mapping) or ''
+        candidate_code = _get_meta_value(best_match, 'code', self._field_mapping) or ''
+        debug = {
+            'name': candidate_name,
+            'ens_code': candidate_code,
+            'params_matched': {},
+            'params_mismatched': {},
+            'params_comparison': {},
+            'score': 1.0,
+            'exact_count': 0,
+            'total_weight': 0.0,
+            'matched_weight': 0.0,
+            'params_count': len(remapped),
+            'is_best': True,
+        }
+        for param_name, extracted_val in remapped.items():
+            if not extracted_val:
+                continue
+            ens_val = _find_field_value(best_match, param_name)
+            ens_str = str(ens_val) if ens_val is not None else None
+            extracted_str = str(extracted_val).strip()
+            if ens_val is not None and str(ens_val).strip() != '':
+                try:
+                    matched = float(extracted_str.replace(',', '.')) == float(str(ens_val).replace(',', '.'))
+                except (ValueError, TypeError):
+                    matched = extracted_str == str(ens_val).strip()
+                if matched:
+                    debug['params_matched'][param_name] = "{} == {}".format(extracted_val, ens_val)
+                    debug['params_comparison'][param_name] = {
+                        'status': 'exact', 'extracted': extracted_str,
+                        'ens_value': ens_str, 'similarity': 1.0,
+                    }
+                    debug['exact_count'] += 1
+                else:
+                    debug['params_mismatched'][param_name] = "{} != {}".format(extracted_val, ens_val)
+                    debug['params_comparison'][param_name] = {
+                        'status': 'mismatched', 'extracted': extracted_str,
+                        'ens_value': ens_str, 'similarity': 0.0,
+                    }
+            else:
+                debug['params_comparison'][param_name] = {
+                    'status': 'no_ens_value', 'extracted': extracted_str,
+                    'ens_value': None, 'similarity': 0.0,
+                }
+        debug['total_weight'] = float(len([v for v in remapped.values() if v]))
+        debug['matched_weight'] = float(debug['exact_count'])
+        return debug
+
     def _get_generic_pattern(self, standard: str, item_type: str, params: Dict[str, str], mask: Any) -> str:
         """Построить generic-паттерн для V2 exact match."""
         parts = [item_type]
@@ -1404,9 +1460,12 @@ class AutomatedParametricProcessor:
                     logger.info("[ЭТАП 1.5] ✓ Точное совпадение по имени: %s", cand_name[:60])
                     break
         if best_match:
+            # FEAT 2026-06-09: exact_name — собрать debug_candidates с параметрами
+            # (чтобы params, ens_params, ens_params_mask были заполнены и доступны)
+            exact_name_debug = self._build_exact_name_debug(remapped, best_match)
             return self._build_parametric_result(
                 text, mask, extracted, remapped, best_match,
-                best_score, match_type, match_type_ru, [],
+                best_score, match_type, match_type_ru, [exact_name_debug],
                 substitution_info, start_time
             )
 
@@ -1557,10 +1616,21 @@ class AutomatedParametricProcessor:
             }
 
         # Get ENS params from best_match
+        # FIX 2026-06-09: exact_name — собираем ВСЕ поля кандидата, не только remapped keys
+        SKIP_ENS_FIELDS = {'код', 'mdm_key', 'id', '_meta', 'автор_последнего_изменения',
+                           'дата_последнего_изменения', 'наименование', 'полное_наименование',
+                           'стандарт', 'тип_изделия', 'нтд', 'нтд_1', 'нтд_2', 'статус'}
         ens_params_from_match = {}
         for key in remapped.keys():
             val = _find_field_value(best_match, key)
             if val is not None:
+                ens_params_from_match[key] = val
+        # FEAT 2026-06-09: добавить дополнительные поля из ENS (класс_допуска, группа_прочности и т.д.)
+        for key, val in best_match.items():
+            if (key and not str(key).startswith('_') and
+                    str(key).lower() not in SKIP_ENS_FIELDS and
+                    val is not None and str(val).strip() != '' and
+                    key not in ens_params_from_match):
                 ens_params_from_match[key] = val
 
         # Calculate confidence (capped at 1.0)
@@ -1598,6 +1668,7 @@ class AutomatedParametricProcessor:
 
         SOFT_PARAMS = {'длина'}  # length with tolerance, not unconditional pass
         best_debug = None
+
         if success and debug_candidates:
             best_cd_list = [cd for cd in debug_candidates if cd.get('is_best')]
             if best_cd_list:
