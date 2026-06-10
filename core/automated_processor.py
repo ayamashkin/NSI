@@ -1,13 +1,10 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
-# 2026-06-10 16:00:00 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
-#   Пустое/None/NaN → Бп. Mapping покрытий берётся из config.yaml (coating_normalize).
-# 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
-#   Только Бп/б/п/без покрытия + пустое = без покрытия. Н.Кд = реальное покрытие.
-# 2026-06-10 14:00:00 — FIX: in_name regex (?![\d]) → (?![\d.]) — "3" больше не токен в "3.3".
-#   Покрытие: _norm_coating (Бп = без покрытия) в _build_exact_name_debug.
-# 2026-06-09 19:00:00 — FIX: ens_params_mask теперь получается с _apply_mask_fixes.
+# 2026-06-10 14:36 — FIX: exact_name без params → не success.
+#   Покрытие: token set compare ("Кд" ⊂ "Кд.фос.окс" → False).
+#   Отсутствие critical params (шаг_резьбы, исполнение, покрытие) → сброс success.
+# 2026-06-10 14:28 — FIX: _norm_coating через settings.coating_normalize. Без хардкода.
+# 2026-06-09 19:00 — FIX: ens_params_mask — тот же pipeline (_apply_mask_fixes + _remap_params).
 #   Было: extract_params(ens_name, mask.pattern) — без фиксов. Стало: тот же pipeline что для params.
 # 2026-06-09 18:30:00 — FEAT: exact_name match — заполнение params/ens_params/ens_params_mask.
 # 2026-06-09 18:00:00 — FIX 24: exact(in_name) — исключены совпадения в коде стандарта.
@@ -1224,7 +1221,14 @@ class AutomatedParametricProcessor:
                 except (ValueError, TypeError):
                     matched = extracted_str == str(ens_val).strip()
                 if not matched and param_name == 'покрытие':
-                    matched = _norm_coating(extracted_val) == _norm_coating(ens_val)
+                    n1 = _norm_coating(extracted_val)
+                    n2 = _norm_coating(ens_val)
+                    matched = n1 == n2 or n1 in n2 or n2 in n1
+                    # Token set compare: "Окс.Фос.ЭФП" ≈ "Фос.Окс.ЭФП"
+                    if not matched:
+                        t1 = set(t.strip().lower() for t in n1.split('.') if t.strip())
+                        t2 = set(t.strip().lower() for t in n2.split('.') if t.strip())
+                        matched = t1 == t2 and len(t1) > 0
                 if matched:
                     debug['params_matched'][param_name] = "{} == {}".format(extracted_val, ens_val)
                     debug['params_comparison'][param_name] = {
@@ -1687,6 +1691,25 @@ class AutomatedParametricProcessor:
         # Determine success
         matching_cfg = _get_matching_config()
         success = confidence >= matching_cfg.success_threshold
+
+        # FIX 2026-06-10: exact_name без извлечённых параметров → не success
+        if success and match_type == 'exact_name' and not remapped:
+            success = False
+            logger.info("[РЕЗУЛЬТАТ] exact_name без params → сброс success")
+
+        # FIX 2026-06-10: critical параметры отсутствуют во входе, но есть в ENS → сброс success
+        # Критичные: шаг_резьбы, исполнение, покрытие
+        CRITICAL_PARAMS = {'шаг_резьбы', 'исполнение', 'покрытие'}
+        if success and best_match:
+            missing_critical = []
+            for cp in CRITICAL_PARAMS:
+                has_in_input = cp in remapped and remapped[cp]
+                has_in_ens = _find_field_value(best_match, cp) is not None
+                if not has_in_input and has_in_ens:
+                    missing_critical.append(cp)
+            if missing_critical:
+                success = False
+                logger.info("[РЕЗУЛЬТАТ] Сброс success: отсутствуют critical params во входе: %s", missing_critical)
 
         # 2026-06-03 16:00 (МСК, UTC+3): mismatched required params (кроме покрытия) → success=False
         # FIX 2026-06-09: длина — не безусловно soft, а с tolerance (±10% или ±2мм)

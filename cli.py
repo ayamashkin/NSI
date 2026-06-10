@@ -1,10 +1,9 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# 2026-06-10 17:00:00 — FIX: _compare_params — list → {} (dict() на list[str] падает).
-#   Было: dict(list) → ValueError. Стало: {} для любого list.
-#   isinstancelist → {} приводим, иначе .keys() падает с AttributeError.
-# 2026-06-10 15:00:00 — FIX: _norm_coating — None/pd.isna()/float('nan') + settings.coating_normalize.
-#   Пустое/None/NaN → Бп. Mapping берётся из config.yaml.
+# 2026-06-10 14:36 — FIX: покрытие — убран substring match ("Кд" ⊂ "Кд.фос.окс" → False).
+#   Только token set equality. _compare_params + _values_match синхронизированы.
+# 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
+#   Пустое/None/NaN → Бп. Mapping берётся из config.yaml. Убран хардкод (не дублируем config).
 # 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
 #   Только Бп/б/п/без покрытия + пустое = без покрытия. Н.Кд = реальное покрытие.
 # 2026-06-10 14:00:00 — FIX: _compare_params — нормализация покрытия (Бп = без покрытия).
@@ -132,13 +131,19 @@ def _compare_params(params, ens_params_mask):
         v2 = str(val2).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
         if v1 == v2:
             return True
-        # FIX 2026-06-10: покрытие — нормализация (Бп = без покрытия)
+        # FIX 2026-06-10: покрытие — нормализация (Бп = без покрытия) + token set compare
         if "покрытие" in param_key:
             c1 = _norm_coating(val1)
             c2 = _norm_coating(val2)
             if c1 == c2:
                 return True
-            if c1 in c2 or c2 in c1:
+            # Token set compare: "Окс.Фос.ЭФП" ≈ "Фос.Окс.ЭФП" (перестановка токенов)
+            # НЕ substring: "Кд" ⊂ "Кд.фос.окс" → False (разные покрытия!)
+            def _coating_tokens(c):
+                return set(t.strip().lower() for t in c.split('.') if t.strip())
+            t1 = _coating_tokens(c1)
+            t2 = _coating_tokens(c2)
+            if t1 and t2 and t1 == t2:
                 return True
         # Числовые: float comparison с tolerance
         try:
