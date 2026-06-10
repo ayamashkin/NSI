@@ -1,8 +1,8 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# 2026-06-10 14:36 — FIX: exact_name без params → не success.
-#   Покрытие: token set compare ("Кд" ⊂ "Кд.фос.окс" → False).
-#   Отсутствие critical params (шаг_резьбы, исполнение, покрытие) → сброс success.
+# 2026-06-10 15:03 — FIX: покрытие — проверка через _compare_params (ens_params_mask).
+#   В automated_processor покрытие не сбрасывает success (stale ens_params).
+#   exact_name + пустые params → копируем из ens_params_from_mask.
 # 2026-06-10 14:28 — FIX: _norm_coating через settings.coating_normalize. Без хардкода.
 # 2026-06-09 19:00 — FIX: ens_params_mask — тот же pipeline (_apply_mask_fixes + _remap_params).
 #   Было: extract_params(ens_name, mask.pattern) — без фиксов. Стало: тот же pipeline что для params.
@@ -1659,13 +1659,16 @@ class AutomatedParametricProcessor:
                 'name': _get_meta_value(best_match, 'name', self._field_mapping),
             }
 
+        # FIX 2026-06-10: exact_name + пустые params → рабочая копия для заполнения из ENS
+        remapped_work = dict(remapped) if remapped else {}
+
         # Get ENS params from best_match
         # FIX 2026-06-09: exact_name — собираем ВСЕ поля кандидата, не только remapped keys
         SKIP_ENS_FIELDS = {'код', 'mdm_key', 'id', '_meta', 'автор_последнего_изменения',
                            'дата_последнего_изменения', 'наименование', 'полное_наименование',
                            'стандарт', 'тип_изделия', 'нтд', 'нтд_1', 'нтд_2', 'статус'}
         ens_params_from_match = {}
-        for key in remapped.keys():
+        for key in remapped_work.keys():
             val = _find_field_value(best_match, key)
             if val is not None:
                 ens_params_from_match[key] = val
@@ -1693,7 +1696,7 @@ class AutomatedParametricProcessor:
         success = confidence >= matching_cfg.success_threshold
 
         # FIX 2026-06-10: exact_name без извлечённых параметров → не success
-        if success and match_type == 'exact_name' and not remapped:
+        if success and match_type == 'exact_name' and not remapped_work:
             success = False
             logger.info("[РЕЗУЛЬТАТ] exact_name без params → сброс success")
 
@@ -1703,7 +1706,7 @@ class AutomatedParametricProcessor:
         if success and best_match:
             missing_critical = []
             for cp in CRITICAL_PARAMS:
-                has_in_input = cp in remapped and remapped[cp]
+                has_in_input = cp in remapped_work and remapped_work[cp]
                 has_in_ens = _find_field_value(best_match, cp) is not None
                 if not has_in_input and has_in_ens:
                     missing_critical.append(cp)
@@ -1746,6 +1749,8 @@ class AutomatedParametricProcessor:
                             logger.info("[РЕЗУЛЬТАТ] Soft param '%s' within tolerance: %s ≈ %s",
                                         param_name, comp.get('extracted'), comp.get('ens_value'))
                             continue  # within tolerance → OK
+                    # FIX 2026-06-10: покрытие — проверка через _compare_params (ens_params_mask), не здесь
+                    # Покрытие в ens_params может быть stale ("Кд3.хр"), сравниваем через ens_params_mask
                     if param_name != 'покрытие':
                         success = False
                         logger.info("[РЕЗУЛЬТАТ] Сброс success: mismatched '%s'", param_name)
@@ -1759,6 +1764,7 @@ class AutomatedParametricProcessor:
                             if param_name in SOFT_PARAMS:
                                 if _soft_param_mismatch_ok(param_name, comp.get('extracted'), comp.get('ens_value')):
                                     continue  # within tolerance → OK
+                            # FIX 2026-06-10: покрытие — проверка через _compare_params (ens_params_mask)
                             if param_name != 'покрытие':
                                 success = False
                                 logger.info("[РЕЗУЛЬТАТ] Сброс success: '%s' exact (in name) but %s ≠ %s",
@@ -1807,6 +1813,12 @@ class AutomatedParametricProcessor:
                 except Exception:
                     pass
 
+        # FIX 2026-06-10: exact_name + пустые params → скопировать из ens_params_from_mask
+        # Имена совпадают → параметры должны быть идентичны. Regex не смог на входе, но смог на ENS.
+        if match_type == 'exact_name' and not remapped_work and ens_params_from_mask:
+            remapped_work = dict(ens_params_from_mask)
+            logger.info("[exact_name] params пустые → скопированы из ens_params_from_mask: %s", list(remapped_work.keys()))
+
         # Normalize mask.params (fallback: dict с ключами из mask.params)
         mask_params_norm = mask.params
         if isinstance(mask_params_norm, str):
@@ -1842,7 +1854,7 @@ class AutomatedParametricProcessor:
             text=text,
             level=ProcessingLevel.LEVEL_6_PARAMETRIC_MATCH,
             success=success,
-            params=params,
+            params=remapped_work,
             ens_params=ens_params_from_match,
             ens_params_mask=ens_params_from_mask or _mask_params_norm,
             ens_match=ens_match,

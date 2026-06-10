@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# 2026-06-10 14:36 — FIX: покрытие — убран substring match ("Кд" ⊂ "Кд.фос.окс" → False).
-#   Только token set equality. _compare_params + _values_match синхронизированы.
+# 2026-06-10 15:03 — FIX: покрытие — таблица сопоставления + token set compare.
+#   _COATING_MAP: "Ц3.хр"→"Ц", "Кд"→"Кд", "Кд3.хр"→"Кд". Сверка через ens_params_mask.
 # 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
 #   Пустое/None/NaN → Бп. Mapping берётся из config.yaml. Убран хардкод (не дублируем config).
 # 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
@@ -96,8 +96,39 @@ def _compare_params(params, ens_params_mask):
     if not params:
         return "⚠ Частичное совпадение", f"params пуст, а в ens_params_mask: {list(ens_params_mask.keys())}"
 
+    # FIX 2026-06-10: таблица сопоставления покрытий (из "Варианты покрытия с соответствиями НД.xlsx")
+    # Ключ: код покрытия → каноническое сокращение по ГОСТ 9.306-85
+    _COATING_MAP = {
+        # Цинковые
+        'ц': 'Ц', 'ц.хр': 'Ц', 'ц3.хр': 'Ц', 'цинковое': 'Ц',
+        # Кадмиевые
+        'кд': 'Кд', 'кд.хр': 'Кд', 'кд3.хр': 'Кд', 'кадмиевое': 'Кд',
+        'кд.фос.окс': 'Кд.фос.окс', 'кд9.фос.окс': 'Кд.фос.окс',
+        # Медно-никелевые
+        'м.н': 'М.Н', 'мн': 'М.Н',
+        'м.н.х.б': 'М.Н.Х',
+        # Окисные
+        'хим.окс.прм': 'Хим.Окс.прм', 'хим.окс': 'Хим.Окс',
+        # Фосфатные
+        'хим.фос.прм': 'Хим.Фос.прм', 'хим.фос': 'Хим.Фос',
+        # Фосфатно-окисные
+        'фос.окс.прм': 'Фос.окс.прм', 'фос.окс': 'Фос.окс',
+        # Оловянные
+        'о': 'О',
+        # Медные
+        'м': 'М',
+        # Анодно-окисные
+        'ан.окс': 'Ан.Окс', 'ан.окс.нхр': 'Ан.Окс',
+        # Пассивирование
+        'хим.пас': 'Хим.Пас',
+        # Серебряные
+        'ср': 'Ср',
+        # Цинково-кобальтовое
+        'цн': 'Цн',
+    }
+
     def _norm_coating(coating):
-        """Нормализация покрытия: отсутствие → 'Бп', остальное через settings.coating_normalize."""
+        """Нормализация покрытия: отсутствие → 'Бп', остальное через mapping + settings."""
         if coating is None:
             return 'Бп'
         try:
@@ -114,8 +145,10 @@ def _compare_params(params, ens_params_mask):
         s = str(coating).strip()
         if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
             return 'Бп'
-        # Все остальные — через mapping из config.yaml
+        # Сначала таблица, потом config.yaml
         c = s.lower()
+        if c in _COATING_MAP:
+            return _COATING_MAP[c]
         try:
             from core.settings import get_settings
             cfg = get_settings()
@@ -792,16 +825,9 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
                 except Exception:
                     pass
             out_row['маски_в_бд'] = 'Да' if has_mask else 'Нет'
-            # FEAT 2026-06-04: при score < 1 — читаемый top-5 вместо сырого JSON
+            # FEAT 2026-06-04: детали — всегда JSON (единый формат для Excel)
             if include_details and result.details:
-                if result.confidence is not None and result.confidence < 1.0:
-                    top_text = _format_top_candidates(result.details)
-                    if top_text:
-                        out_row['детали'] = _clean(top_text)
-                    else:
-                        out_row['детали'] = _clean(json.dumps(result.details, ensure_ascii=False, default=str))
-                else:
-                    out_row['детали'] = _clean(json.dumps(result.details, ensure_ascii=False, default=str))
+                out_row['детали'] = _clean(json.dumps(result.details, ensure_ascii=False, default=str))
             excel_rows.append(out_row)
         df_out = pd.DataFrame(excel_rows)
         df_out = _truncate_dataframe_cells(df_out, max_length=1000)
