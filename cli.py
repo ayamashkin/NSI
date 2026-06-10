@@ -1,10 +1,22 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-10 17:00:00 — FIX: _compare_params — list → {} (dict() на list[str] падает).
+#   Было: dict(list) → ValueError. Стало: {} для любого list.
+#   isinstancelist → {} приводим, иначе .keys() падает с AttributeError.
+# 2026-06-10 15:00:00 — FIX: _norm_coating — None/pd.isna()/float('nan') + settings.coating_normalize.
+#   Пустое/None/NaN → Бп. Mapping берётся из config.yaml.
+# 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
+#   Только Бп/б/п/без покрытия + пустое = без покрытия. Н.Кд = реальное покрытие.
+# 2026-06-10 14:00:00 — FIX: _compare_params — нормализация покрытия (Бп = без покрытия).
+#   (?![\d]) → (?![\d.]) в in_name regex через _values_match float tolerance.
+# 2026-06-09 19:00:00 — FIX: _compare_params использует _values_match (покрытие substring, float tolerance).
+#   Статус "⚠ Частичное" только когда ВСЕ общие параметры совпадают, а в ens_params_mask больше полей.
+# 2026-06-09 18:30:00 — FEAT: 2 новые колонки "Статус сверки" + "Детали сверки" при выводе.
+#   Сверка params vs ens_params_mask: 3 статуса (полное/несовпадение/частичное).
 # 2026-06-05 10:45:00 — FIX: _clean() чистит control chars + 3 колонки params/ens_params/ens_params_mask.
 # 2026-06-04 16:30:00 — FIX: _format_params_cell защита от list + IllegalCharacterError sanitize.
 # 2026-06-02 14:30:00 — FIX: маски_в_бд UPPER + структурированное логирование этапов.
-# =============================================================================
+# 2026-06-02 14:30:00 — FIX: маски_в_бд UPPER + структурированное логирование этапов.
 
 import click
 import logging
@@ -57,6 +69,109 @@ def _truncate_dataframe_cells(df, max_length=1000):
                 lambda x: str(x)[:max_length] if pd.notna(x) and len(str(x)) > max_length else x
             )
     return df
+
+def _compare_params(params, ens_params_mask):
+    """Сверка params vs ens_params_mask.
+
+    FEAT 2026-06-09: 3 статуса сверки:
+    1. "✓ Полное совпадение" — все params совпадают с ens_params_mask, количество равно
+    2. "✗ Несовпадение параметров" — часть params не совпадает с ens_params_mask
+    3. "⚠ Частичное совпадение" — пересечение ок, но в ens_params_mask параметров больше
+
+    FIX 2026-06-09: используем _values_match для покрытия (substring OK) и float compare
+    для чисел — чтобы 100 ≈ 100.0, а не 100 ≠ 100.36.
+    FIX 2026-06-10: защита от list вместо dict (result.ens_params_mask может быть []).
+
+    Возвращает (status, details).
+    """
+    # FIX 2026-06-10: result.ens_params_mask иногда list вместо dict — приводим к dict
+    if isinstance(params, list):
+        params = {}
+    if isinstance(ens_params_mask, list):
+        ens_params_mask = {}
+
+    if not params and not ens_params_mask:
+        return "✓ Полное совпадение", "Оба пустые"
+    if not ens_params_mask:
+        return "✗ Несовпадение параметров", f"ens_params_mask пуст, а params: {list(params.keys())}"
+    if not params:
+        return "⚠ Частичное совпадение", f"params пуст, а в ens_params_mask: {list(ens_params_mask.keys())}"
+
+    def _norm_coating(coating):
+        """Нормализация покрытия: отсутствие → 'Бп', остальное через settings.coating_normalize."""
+        if coating is None:
+            return 'Бп'
+        try:
+            import pandas as pd
+            if pd.isna(coating):
+                return 'Бп'
+        except Exception:
+            pass
+        try:
+            if isinstance(coating, float) and coating != coating:
+                return 'Бп'
+        except Exception:
+            pass
+        s = str(coating).strip()
+        if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
+            return 'Бп'
+        # Все остальные — через mapping из config.yaml
+        c = s.lower()
+        try:
+            from core.settings import get_settings
+            cfg = get_settings()
+            if cfg.coating_normalize and c in cfg.coating_normalize:
+                return cfg.coating_normalize[c]
+        except Exception:
+            pass
+        return s  # как есть
+
+    def _values_match(val1, val2, param_key=""):
+        """Локальная копия логики _values_match из auto_validator."""
+        v1 = str(val1).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+        v2 = str(val2).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+        if v1 == v2:
+            return True
+        # FIX 2026-06-10: покрытие — нормализация (Бп = без покрытия)
+        if "покрытие" in param_key:
+            c1 = _norm_coating(val1)
+            c2 = _norm_coating(val2)
+            if c1 == c2:
+                return True
+            if c1 in c2 or c2 in c1:
+                return True
+        # Числовые: float comparison с tolerance
+        try:
+            f1 = float(v1)
+            f2 = float(v2)
+            return abs(f1 - f2) < 0.001
+        except (ValueError, TypeError):
+            pass
+        return False
+
+    mismatched = []
+    missing_in_params = []
+
+    for key in params:
+        if key in ens_params_mask:
+            if not _values_match(params[key], ens_params_mask[key], key):
+                mismatched.append(f"{key}: params={params[key]}, ens={ens_params_mask[key]}")
+
+    for key in ens_params_mask:
+        if key not in params:
+            missing_in_params.append(f"{key}={ens_params_mask[key]}")
+
+    if mismatched:
+        status = "✗ Несовпадение параметров"
+        details = "; ".join(mismatched)
+        if missing_in_params:
+            details += " | Доп. в ens_params_mask: " + "; ".join(missing_in_params)
+        return status, details
+    elif missing_in_params:
+        return "⚠ Частичное совпадение", "Доп. в ens_params_mask: " + "; ".join(missing_in_params)
+    else:
+        return "✓ Полное совпадение", ""
+
 
 def _format_params_cell(params_dict, max_items=20):
     """Форматировать dict параметров в многострочный текст для Excel."""
@@ -631,6 +746,10 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             out_row['params'] = _format_params_cell(result.params)
             out_row['ens_params'] = _format_params_cell(result.ens_params)
             out_row['ens_params_mask'] = _format_params_cell(result.ens_params_mask)
+            # FEAT 2026-06-09: 2 новые колонки — сверка params vs ens_params_mask
+            _sv_status, _sv_details = _compare_params(result.params, result.ens_params_mask)
+            out_row['Статус сверки'] = _sv_status
+            out_row['Детали сверки'] = _sv_details
             # Legacy: параметры_маски — оставляем для обратной совместимости
             if result.ens_params_mask:
                 if isinstance(result.ens_params_mask, dict):
@@ -702,6 +821,10 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             d = result.to_dict()
             if not include_details:
                 d.pop('details', None)
+            # FEAT 2026-06-09: 2 новых поля — сверка params vs ens_params_mask
+            _sv_status, _sv_details = _compare_params(result.params, result.ens_params_mask)
+            d['param_check_status'] = _sv_status
+            d['param_check_details'] = _sv_details
             json_results.append(d)
         clean_results = _sanitize_for_json(json_results)
         with open(output, 'w', encoding='utf-8') as f:

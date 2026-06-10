@@ -1,9 +1,15 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
 # ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3), от новых к старым:
+# 2026-06-10 16:00:00 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
+#   Пустое/None/NaN → Бп. Mapping покрытий берётся из config.yaml (coating_normalize).
+# 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
+#   Только Бп/б/п/без покрытия + пустое = без покрытия. Н.Кд = реальное покрытие.
+# 2026-06-10 14:00:00 — FIX: in_name regex (?![\d]) → (?![\d.]) — "3" больше не токен в "3.3".
+#   Покрытие: _norm_coating (Бп = без покрытия) в _build_exact_name_debug.
+# 2026-06-09 19:00:00 — FIX: ens_params_mask теперь получается с _apply_mask_fixes.
+#   Было: extract_params(ens_name, mask.pattern) — без фиксов. Стало: тот же pipeline что для params.
 # 2026-06-09 18:30:00 — FEAT: exact_name match — заполнение params/ens_params/ens_params_mask.
-#   Добавлен _build_exact_name_debug: exact_name теперь возвращает debug_candidates с параметрами.
-#   ens_params собирается из ВСЕХ полей best_match (не только remapped keys).
 # 2026-06-09 18:00:00 — FIX 24: exact(in_name) — исключены совпадения в коде стандарта.
 #   Длина — tolerance ±10%/<20мм. V2 generic: min 4 params, ratio ≥70%.
 # 2026-06-09 18:00:00 — FIX: UnboundLocalError в total_cand_params list comprehension.
@@ -1002,13 +1008,15 @@ class AutomatedParametricProcessor:
                         # Token boundary check: preceded by non-digit, followed by non-digit
                         # Token boundary: preceded by non-digit, followed by non-digit
                         # Allow '.' after number as separator (e.g. "50.Хим" → "50" is a token)
-                        in_name_raw = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d])', name_lower))
+                        # FIX 2026-06-10: (?![\d]) → (?![\d.]) — исключаем точку после токена
+                        # Было: "3" находилось в "3.3" (точка пропускалась). Стало: "3.3" — единый токен.
+                        in_name_raw = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d.])', name_lower))
                         if in_name_raw:
                             # Exclude matches inside standard code portion of name
                             # e.g. "70" in "ГОСТ 3129-70", "1" in "ОСТ1 10569-72"
                             std_code_pattern = r'(?:гост|ост|ту)\s*\d[\d\s\.\-]*(?:\-\d+)?'
                             name_without_std = re.sub(std_code_pattern, '', name_lower)
-                            in_name = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d])', name_without_std))
+                            in_name = bool(re.search(r'(?<![\d.])' + re.escape(val_str) + r'(?![\d.])', name_without_std))
 
                     status = 'exact' if matched else ('exact (in name)' if in_name else 'mismatched')
                     candidate_debug['params_comparison'][param_name] = {
@@ -1181,10 +1189,42 @@ class AutomatedParametricProcessor:
             ens_str = str(ens_val) if ens_val is not None else None
             extracted_str = str(extracted_val).strip()
             if ens_val is not None and str(ens_val).strip() != '':
+                # FIX 2026-06-10: покрытие — нормализация.
+                # Базовая логика: пустое/None/NaN → 'Бп'. Всё остальное через settings.coating_normalize.
+                def _norm_coating(c):
+                    # Пустые значения → Бп (без покрытия)
+                    if c is None:
+                        return 'Бп'
+                    try:
+                        import pandas as pd
+                        if pd.isna(c):
+                            return 'Бп'
+                    except Exception:
+                        pass
+                    try:
+                        if isinstance(c, float) and c != c:
+                            return 'Бп'
+                    except Exception:
+                        pass
+                    s = str(c).strip()
+                    if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
+                        return 'Бп'
+                    # Все остальные — через mapping из config.yaml
+                    cc = s.lower()
+                    try:
+                        from core.settings import get_settings
+                        cfg = get_settings()
+                        if cfg.coating_normalize and cc in cfg.coating_normalize:
+                            return cfg.coating_normalize[cc]
+                    except Exception:
+                        pass
+                    return s  # как есть, если нет в mapping
                 try:
                     matched = float(extracted_str.replace(',', '.')) == float(str(ens_val).replace(',', '.'))
                 except (ValueError, TypeError):
                     matched = extracted_str == str(ens_val).strip()
+                if not matched and param_name == 'покрытие':
+                    matched = _norm_coating(extracted_val) == _norm_coating(ens_val)
                 if matched:
                     debug['params_matched'][param_name] = "{} == {}".format(extracted_val, ens_val)
                     debug['params_comparison'][param_name] = {
@@ -1727,14 +1767,20 @@ class AutomatedParametricProcessor:
         bm_name = _get_meta_value(best_match, 'name', self._field_mapping) if best_match else 'N/A'
 
         # FEAT 2026-06-04: ens_params_mask — извлечь параметры из ens_name той же маской
-        # (по аналогии с extract_params из text)
+        # FIX 2026-06-09: использовать тот же pipeline что и для params (с _apply_mask_fixes + _remap_params)
+        # Было: extract_params(ens_name, mask.pattern) — без фиксов, без coating rules
         ens_params_from_mask = {}
         if best_match and mask and getattr(mask, 'pattern', None):
             ens_name_for_mask = bm_name
             if ens_name_for_mask and ens_name_for_mask != 'N/A':
                 try:
+                    # Сохраняем оригинальный паттерн и применяем фиксы (как для входного текста)
+                    original_pattern = mask.pattern
+                    mask.pattern = self._apply_mask_fixes(mask.pattern)
                     ens_extracted_for_mask = self.parametric_client.extract_params(ens_name_for_mask, mask.pattern)
                     ens_params_from_mask = self._remap_params(ens_extracted_for_mask, mask.params)
+                    # Восстанавливаем оригинальный паттерн (идемпотентность)
+                    mask.pattern = original_pattern
                 except Exception:
                     pass
 

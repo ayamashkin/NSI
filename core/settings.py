@@ -1,10 +1,14 @@
 # =============================================================================
 # FILE: core/settings.py
-# REPO: https://github.com/ayamashkin/NSI
-# LAST 5 CHANGES (UTC+3):
+# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
+# 2026-06-10 16:30:00 — CLEAN: удалено поле empty_values (никогда не использовалось в коде).
+#   Раздел validation: empty_values: в config.yaml — удалить.
+# 2026-06-10 15:00:00 — FEAT: добавлено поле coating_normalize в Settings.
+#   Mapping нормализации покрытий вынесен из хардкода в config.yaml.
 # 2026-05-28 21:55:00 — FEAT: added validation_max_examples to MaskGenerationConfig
 # 2026-05-21 08:53:16 — 6b906f29 21.05.2026
 # 2026-05-21 08:23:07 — 51f335da 21.05.2026
+# 2026-05-21 08:05:56 — ee843b22 21.05.2026
 # 2026-05-21 08:05:56 — ee843b22 21.05.2026
 # 2026-05-20 17:47:49 — 19e8ca02 20.05.2026
 # =============================================================================
@@ -140,7 +144,9 @@ class Settings:
     default_service: str = ""
     output: OutputConfig = field(default_factory=OutputConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    empty_values: Dict[str, List[str]] = field(default_factory=dict)
+    # FIX 2026-06-10: mapping нормализации покрытий (вынесен из хардкода)
+    # Пример: {"без покрытия": "Бп", "б/п": "Бп", "н.кд": "Н.Кд"}
+    coating_normalize: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, config_path: str = "config/config.yaml"):
@@ -186,7 +192,7 @@ class Settings:
             default_service=config_data.get("default_service", ""),
             output=output_cfg,
             logging=LoggingConfig(**_filter_fields(LoggingConfig, config_data.get("logging", {}))),
-            empty_values=config_data.get("empty_values", {})
+            coating_normalize=config_data.get("coating_normalize", {})
         )
 
     def get_api_config(self, service: str):
