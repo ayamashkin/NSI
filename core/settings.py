@@ -1,8 +1,8 @@
 # =============================================================================
 # FILE: core/settings.py
-# ПОСЛЕДНИЕ 5 ИЗМЕНЕНИЙ (МСК, UTC+3):
-# 2026-06-10 16:30:00 — CLEAN: удалено поле empty_values (никогда не использовалось в коде).
-#   Раздел validation: empty_values: в config.yaml — удалить.
+# 2026-06-11 12:49 — FEAT: coating_map (объединён с coating_normalize).
+#   coating_normalize удалён. Только coating_map — единая таблица.
+# 2026-06-11 07:50 — CLEAN: удалено empty_values (никогда не использовалось).
 # 2026-06-10 15:00:00 — FEAT: добавлено поле coating_normalize в Settings.
 #   Mapping нормализации покрытий вынесен из хардкода в config.yaml.
 # 2026-05-28 21:55:00 — FEAT: added validation_max_examples to MaskGenerationConfig
@@ -144,9 +144,20 @@ class Settings:
     default_service: str = ""
     output: OutputConfig = field(default_factory=OutputConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    # FIX 2026-06-10: mapping нормализации покрытий (вынесен из хардкода)
-    # Пример: {"без покрытия": "Бп", "б/п": "Бп", "н.кд": "Н.Кд"}
-    coating_normalize: Dict[str, str] = field(default_factory=dict)
+    # FIX 2026-06-11: полная таблица сопоставления покрытий (общая для automated_processor + cli)
+    # Ключ: код покрытия → каноническое значение (включая "без покрытия" → "Бп")
+    coating_map: Dict[str, str] = field(default_factory=lambda: {
+        'ц': 'Ц', 'ц.хр': 'Ц', 'ц3.хр': 'Ц', 'цинковое': 'Ц',
+        'кд': 'Кд', 'кд.хр': 'Кд', 'кд3.хр': 'Кд', 'кадмиевое': 'Кд',
+        'кд.фос.окс': 'Кд.фос.окс', 'кд9.фос.окс': 'Кд.фос.окс',
+        'м.н': 'М.Н', 'мн': 'М.Н', 'м.н.х.б': 'М.Н.Х',
+        'хим.окс.прм': 'Хим.Окс.прм', 'хим.окс': 'Хим.Окс',
+        'хим.фос.прм': 'Хим.Фос.прм', 'хим.фос': 'Хим.Фос',
+        'фос.окс.прм': 'Фос.окс.прм', 'фос.окс': 'Фос.окс',
+        'о': 'О', 'м': 'М',
+        'ан.окс': 'Ан.Окс', 'ан.окс.нхр': 'Ан.Окс',
+        'хим.пас': 'Хим.Пас', 'ср': 'Ср', 'цн': 'Цн',
+    })
 
     @classmethod
     def load(cls, config_path: str = "config/config.yaml"):
@@ -192,7 +203,20 @@ class Settings:
             default_service=config_data.get("default_service", ""),
             output=output_cfg,
             logging=LoggingConfig(**_filter_fields(LoggingConfig, config_data.get("logging", {}))),
-            coating_normalize=config_data.get("coating_normalize", {})
+            coating_map=config_data.get("coating_map", {
+                'без покрытия': 'Бп', 'б/п': 'Бп', 'бп': 'Бп',
+                'н.кд': 'Н.Кд', 'нкд': 'Н.Кд',
+                'ц': 'Ц', 'ц.хр': 'Ц', 'ц3.хр': 'Ц', 'цинковое': 'Ц',
+                'кд': 'Кд', 'кд.хр': 'Кд', 'кд3.хр': 'Кд', 'кадмиевое': 'Кд',
+                'кд.фос.окс': 'Кд.фос.окс', 'кд9.фос.окс': 'Кд.фос.окс',
+                'м.н': 'М.Н', 'мн': 'М.Н', 'м.н.х.б': 'М.Н.Х',
+                'хим.окс.прм': 'Хим.Окс.прм', 'хим.окс': 'Хим.Окс',
+                'хим.фос.прм': 'Хим.Фос.прм', 'хим.фос': 'Хим.Фос',
+                'фос.окс.прм': 'Фос.окс.прм', 'фос.окс': 'Фос.окс',
+                'о': 'О', 'м': 'М',
+                'ан.окс': 'Ан.Окс', 'ан.окс.нхр': 'Ан.Окс',
+                'хим.пас': 'Хим.Пас', 'ср': 'Ср', 'цн': 'Цн',
+            })
         )
 
     def get_api_config(self, service: str):

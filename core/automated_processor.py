@@ -1,6 +1,6 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# 2026-06-11 12:23 — FIX: убрано "покрытие" из CRITICAL_PARAMS (пустое=Бп — дефолт).
+# 2026-06-11 12:49 — FIX: coating_map единая (coating_normalize удалён).
 #   Покрытие не сбрасывает success. coating_map из settings (общая логика).
 #   exact_name + пустые params → копируем из ens_params_from_mask.
 # 2026-06-10 14:28 — FIX: _norm_coating через settings.coating_normalize. Без хардкода.
@@ -1206,15 +1206,13 @@ class AutomatedParametricProcessor:
                     s = str(c).strip()
                     if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
                         return 'Бп'
-                    # FIX 2026-06-11: сначала coating_map (полная таблица), потом coating_normalize
+                    # FIX 2026-06-11: coating_map — единая таблица (coating_normalize удалён)
                     cc = s.lower()
                     try:
                         from core.settings import get_settings
                         cfg = get_settings()
                         if cfg.coating_map and cc in cfg.coating_map:
                             return cfg.coating_map[cc]
-                        if cfg.coating_normalize and cc in cfg.coating_normalize:
-                            return cfg.coating_normalize[cc]
                     except Exception:
                         pass
                     return s  # как есть, если нет в mapping

@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# 2026-06-11 12:23 — FIX: _compare_params — fallback на ens_params.
-#   5 статусов. coating_map из settings. "покрытие" не в CRITICAL_PARAMS.
+# 2026-06-11 12:49 — FIX: coating_map единая (coating_normalize удалён).
+#   _compare_params fallback на ens_params. 5 статусов сверки.
 # 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
 #   Пустое/None/NaN → Бп. Mapping берётся из config.yaml. Убран хардкод (не дублируем config).
 # 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
@@ -126,8 +126,6 @@ def _compare_params(params, ens_params_mask, ens_params=None):
             cfg = get_settings()
             if cfg.coating_map and cc in cfg.coating_map:
                 return cfg.coating_map[cc]
-            if cfg.coating_normalize and cc in cfg.coating_normalize:
-                return cfg.coating_normalize[cc]
         except Exception:
             pass
         return s
