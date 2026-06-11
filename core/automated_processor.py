@@ -1,6 +1,6 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# 2026-06-10 15:03 — FIX: покрытие — проверка через _compare_params (ens_params_mask).
+# 2026-06-11 07:50 — FIX: покрытие — проверка через _compare_params (ens_params_mask).
 #   В automated_processor покрытие не сбрасывает success (stale ens_params).
 #   exact_name + пустые params → копируем из ens_params_from_mask.
 # 2026-06-10 14:28 — FIX: _norm_coating через settings.coating_normalize. Без хардкода.
@@ -1206,11 +1206,13 @@ class AutomatedParametricProcessor:
                     s = str(c).strip()
                     if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
                         return 'Бп'
-                    # Все остальные — через mapping из config.yaml
+                    # FIX 2026-06-11: сначала coating_map (полная таблица), потом coating_normalize
                     cc = s.lower()
                     try:
                         from core.settings import get_settings
                         cfg = get_settings()
+                        if cfg.coating_map and cc in cfg.coating_map:
+                            return cfg.coating_map[cc]
                         if cfg.coating_normalize and cc in cfg.coating_normalize:
                             return cfg.coating_normalize[cc]
                     except Exception:
@@ -1223,12 +1225,13 @@ class AutomatedParametricProcessor:
                 if not matched and param_name == 'покрытие':
                     n1 = _norm_coating(extracted_val)
                     n2 = _norm_coating(ens_val)
-                    matched = n1 == n2 or n1 in n2 or n2 in n1
-                    # Token set compare: "Окс.Фос.ЭФП" ≈ "Фос.Окс.ЭФП"
+                    # FIX 2026-06-11: token set compare (общая логика с cli)
+                    # НЕ substring: "Кд" ⊂ "Кд.фос.окс" → False
+                    matched = n1 == n2
                     if not matched:
                         t1 = set(t.strip().lower() for t in n1.split('.') if t.strip())
                         t2 = set(t.strip().lower() for t in n2.split('.') if t.strip())
-                        matched = t1 == t2 and len(t1) > 0
+                        matched = t1 and t2 and t1 == t2
                 if matched:
                     debug['params_matched'][param_name] = "{} == {}".format(extracted_val, ens_val)
                     debug['params_comparison'][param_name] = {

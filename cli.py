@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# 2026-06-11 07:40 — FIX: _compare_params — 5 статусов, сверка params vs ens_params_mask.
-#   Полное/Не хватает в проверяемом/Не хватает в ЕНС/Несовпадение/Пропущено.
+# 2026-06-11 07:50 — FIX: _compare_params — 5 статусов, coating_map из settings.
+#   Не хватает параметров в проверяемом/ЕНС. coating_map общая с automated_processor.
 # 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
 #   Пустое/None/NaN → Бп. Mapping берётся из config.yaml. Убран хардкод (не дублируем config).
 # 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
@@ -75,8 +75,8 @@ def _compare_params(params, ens_params_mask):
     ЛОГИКА (5 статусов):
     1. ∅ Пропущено — оба пустые (нет данных для сверки)
     2. ✓ Полное совпадение — количество и значения совпадают
-    3. ⚠ Не хватает параметров в проверяемом — все params есть в ens_params_mask, но в ens_params_mask больше
-    4. ⚠ Не хватает параметров в ЕНС — все ens_params_mask есть в params, но в params больше
+    3. ⚠ Не хватает в проверяемом — все params есть в ens_params_mask, но в ens_params_mask больше
+    4. ⚠ Не хватает в ЕНС — все ens_params_mask есть в params, но в params больше
     5. ✗ Несовпадение — есть пересечение, но значения разные
 
     Возвращает (status, details).
@@ -91,20 +91,7 @@ def _compare_params(params, ens_params_mask):
     if not params and not ens_params_mask:
         return "∅ Пропущено", "Оба пустые — нет данных для сверки"
 
-    # Таблица сопоставления покрытий
-    _COATING_MAP = {
-        'ц': 'Ц', 'ц.хр': 'Ц', 'ц3.хр': 'Ц', 'цинковое': 'Ц',
-        'кд': 'Кд', 'кд.хр': 'Кд', 'кд3.хр': 'Кд', 'кадмиевое': 'Кд',
-        'кд.фос.окс': 'Кд.фос.окс', 'кд9.фос.окс': 'Кд.фос.окс',
-        'м.н': 'М.Н', 'мн': 'М.Н', 'м.н.х.б': 'М.Н.Х',
-        'хим.окс.прм': 'Хим.Окс.прм', 'хим.окс': 'Хим.Окс',
-        'хим.фос.прм': 'Хим.Фос.прм', 'хим.фос': 'Хим.Фос',
-        'фос.окс.прм': 'Фос.окс.прм', 'фос.окс': 'Фос.окс',
-        'о': 'О', 'м': 'М',
-        'ан.окс': 'Ан.Окс', 'ан.окс.нхр': 'Ан.Окс',
-        'хим.пас': 'Хим.Пас', 'ср': 'Ср', 'цн': 'Цн',
-    }
-
+    # FIX 2026-06-11: таблица покрытий из settings (общая для automated_processor + cli)
     def _norm_coating(c):
         if c is None:
             return 'Бп'
@@ -123,11 +110,11 @@ def _compare_params(params, ens_params_mask):
         if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
             return 'Бп'
         cc = s.lower()
-        if cc in _COATING_MAP:
-            return _COATING_MAP[cc]
         try:
             from core.settings import get_settings
             cfg = get_settings()
+            if cfg.coating_map and cc in cfg.coating_map:
+                return cfg.coating_map[cc]
             if cfg.coating_normalize and cc in cfg.coating_normalize:
                 return cfg.coating_normalize[cc]
         except Exception:
@@ -173,11 +160,11 @@ def _compare_params(params, ens_params_mask):
     if not only_in_params and not only_in_ens:
         return "✓ Полное совпадение", ""
 
-    # 3. Не хватает в проверяемом (ens_params_mask > params)
+    # 3. Не хватает параметров в проверяемом (ens_params_mask > params)
     if only_in_ens and not only_in_params:
         return "⚠ Не хватает параметров в проверяемом", "Отсутствуют в params: " + "; ".join(f"{k}={ens_params_mask[k]}" for k in sorted(only_in_ens))
 
-    # 4. Не хватает в ЕНС (params > ens_params_mask)
+    # 4. Не хватает параметров в ЕНС (params > ens_params_mask)
     if only_in_params and not only_in_ens:
         return "⚠ Не хватает параметров в ЕНС", "Отсутствуют в ens_params_mask: " + "; ".join(f"{k}={params[k]}" for k in sorted(only_in_params))
 
