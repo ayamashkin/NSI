@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# 2026-06-10 15:03 — FIX: покрытие — таблица сопоставления + token set compare.
-#   _COATING_MAP: "Ц3.хр"→"Ц", "Кд"→"Кд", "Кд3.хр"→"Кд". Сверка через ens_params_mask.
+# 2026-06-11 07:40 — FIX: _compare_params — 5 статусов, сверка params vs ens_params_mask.
+#   Полное/Не хватает в проверяемом/Не хватает в ЕНС/Несовпадение/Пропущено.
 # 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
 #   Пустое/None/NaN → Бп. Mapping берётся из config.yaml. Убран хардкод (не дублируем config).
 # 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
@@ -72,143 +72,117 @@ def _truncate_dataframe_cells(df, max_length=1000):
 def _compare_params(params, ens_params_mask):
     """Сверка params vs ens_params_mask.
 
-    FEAT 2026-06-09: 3 статуса сверки:
-    1. "✓ Полное совпадение" — все params совпадают с ens_params_mask, количество равно
-    2. "✗ Несовпадение параметров" — часть params не совпадает с ens_params_mask
-    3. "⚠ Частичное совпадение" — пересечение ок, но в ens_params_mask параметров больше
-
-    FIX 2026-06-09: используем _values_match для покрытия (substring OK) и float compare
-    для чисел — чтобы 100 ≈ 100.0, а не 100 ≠ 100.36.
-    FIX 2026-06-10: защита от list вместо dict (result.ens_params_mask может быть []).
+    ЛОГИКА (5 статусов):
+    1. ∅ Пропущено — оба пустые (нет данных для сверки)
+    2. ✓ Полное совпадение — количество и значения совпадают
+    3. ⚠ Не хватает параметров в проверяемом — все params есть в ens_params_mask, но в ens_params_mask больше
+    4. ⚠ Не хватает параметров в ЕНС — все ens_params_mask есть в params, но в params больше
+    5. ✗ Несовпадение — есть пересечение, но значения разные
 
     Возвращает (status, details).
     """
-    # FIX 2026-06-10: result.ens_params_mask иногда list вместо dict — приводим к dict
+    # Защита от list
     if isinstance(params, list):
         params = {}
     if isinstance(ens_params_mask, list):
         ens_params_mask = {}
 
+    # 1. Пропущено
     if not params and not ens_params_mask:
-        return "✓ Полное совпадение", "Оба пустые"
-    if not ens_params_mask:
-        return "✗ Несовпадение параметров", f"ens_params_mask пуст, а params: {list(params.keys())}"
-    if not params:
-        return "⚠ Частичное совпадение", f"params пуст, а в ens_params_mask: {list(ens_params_mask.keys())}"
+        return "∅ Пропущено", "Оба пустые — нет данных для сверки"
 
-    # FIX 2026-06-10: таблица сопоставления покрытий (из "Варианты покрытия с соответствиями НД.xlsx")
-    # Ключ: код покрытия → каноническое сокращение по ГОСТ 9.306-85
+    # Таблица сопоставления покрытий
     _COATING_MAP = {
-        # Цинковые
         'ц': 'Ц', 'ц.хр': 'Ц', 'ц3.хр': 'Ц', 'цинковое': 'Ц',
-        # Кадмиевые
         'кд': 'Кд', 'кд.хр': 'Кд', 'кд3.хр': 'Кд', 'кадмиевое': 'Кд',
         'кд.фос.окс': 'Кд.фос.окс', 'кд9.фос.окс': 'Кд.фос.окс',
-        # Медно-никелевые
-        'м.н': 'М.Н', 'мн': 'М.Н',
-        'м.н.х.б': 'М.Н.Х',
-        # Окисные
+        'м.н': 'М.Н', 'мн': 'М.Н', 'м.н.х.б': 'М.Н.Х',
         'хим.окс.прм': 'Хим.Окс.прм', 'хим.окс': 'Хим.Окс',
-        # Фосфатные
         'хим.фос.прм': 'Хим.Фос.прм', 'хим.фос': 'Хим.Фос',
-        # Фосфатно-окисные
         'фос.окс.прм': 'Фос.окс.прм', 'фос.окс': 'Фос.окс',
-        # Оловянные
-        'о': 'О',
-        # Медные
-        'м': 'М',
-        # Анодно-окисные
+        'о': 'О', 'м': 'М',
         'ан.окс': 'Ан.Окс', 'ан.окс.нхр': 'Ан.Окс',
-        # Пассивирование
-        'хим.пас': 'Хим.Пас',
-        # Серебряные
-        'ср': 'Ср',
-        # Цинково-кобальтовое
-        'цн': 'Цн',
+        'хим.пас': 'Хим.Пас', 'ср': 'Ср', 'цн': 'Цн',
     }
 
-    def _norm_coating(coating):
-        """Нормализация покрытия: отсутствие → 'Бп', остальное через mapping + settings."""
-        if coating is None:
+    def _norm_coating(c):
+        if c is None:
             return 'Бп'
         try:
             import pandas as pd
-            if pd.isna(coating):
+            if pd.isna(c):
                 return 'Бп'
         except Exception:
             pass
         try:
-            if isinstance(coating, float) and coating != coating:
+            if isinstance(c, float) and c != c:
                 return 'Бп'
         except Exception:
             pass
-        s = str(coating).strip()
+        s = str(c).strip()
         if s in ('', '-', 'None', 'null', 'nan', 'NaN'):
             return 'Бп'
-        # Сначала таблица, потом config.yaml
-        c = s.lower()
-        if c in _COATING_MAP:
-            return _COATING_MAP[c]
+        cc = s.lower()
+        if cc in _COATING_MAP:
+            return _COATING_MAP[cc]
         try:
             from core.settings import get_settings
             cfg = get_settings()
-            if cfg.coating_normalize and c in cfg.coating_normalize:
-                return cfg.coating_normalize[c]
+            if cfg.coating_normalize and cc in cfg.coating_normalize:
+                return cfg.coating_normalize[cc]
         except Exception:
             pass
-        return s  # как есть
+        return s
 
-    def _values_match(val1, val2, param_key=""):
-        """Локальная копия логики _values_match из auto_validator."""
-        v1 = str(val1).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
-        v2 = str(val2).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
-        if v1 == v2:
+    def _values_match(v1, v2, pk=""):
+        n1 = str(v1).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+        n2 = str(v2).lower().replace(" ", "").replace("-", "").replace("_", "").replace(",", ".")
+        if n1 == n2:
             return True
-        # FIX 2026-06-10: покрытие — нормализация (Бп = без покрытия) + token set compare
-        if "покрытие" in param_key:
-            c1 = _norm_coating(val1)
-            c2 = _norm_coating(val2)
+        if "покрытие" in pk:
+            c1 = _norm_coating(v1)
+            c2 = _norm_coating(v2)
             if c1 == c2:
                 return True
-            # Token set compare: "Окс.Фос.ЭФП" ≈ "Фос.Окс.ЭФП" (перестановка токенов)
-            # НЕ substring: "Кд" ⊂ "Кд.фос.окс" → False (разные покрытия!)
-            def _coating_tokens(c):
-                return set(t.strip().lower() for t in c.split('.') if t.strip())
-            t1 = _coating_tokens(c1)
-            t2 = _coating_tokens(c2)
+            t1 = set(t.strip().lower() for t in c1.split('.') if t.strip())
+            t2 = set(t.strip().lower() for t in c2.split('.') if t.strip())
             if t1 and t2 and t1 == t2:
                 return True
-        # Числовые: float comparison с tolerance
         try:
-            f1 = float(v1)
-            f2 = float(v2)
-            return abs(f1 - f2) < 0.001
+            return abs(float(n1) - float(n2)) < 0.001
         except (ValueError, TypeError):
             pass
         return False
 
+    # Сравниваем пересечение
+    common = set(params.keys()) & set(ens_params_mask.keys())
     mismatched = []
-    missing_in_params = []
+    for key in common:
+        if not _values_match(params[key], ens_params_mask[key], key):
+            mismatched.append(f"{key}: params={params[key]}, ens={ens_params_mask[key]}")
 
-    for key in params:
-        if key in ens_params_mask:
-            if not _values_match(params[key], ens_params_mask[key], key):
-                mismatched.append(f"{key}: params={params[key]}, ens={ens_params_mask[key]}")
-
-    for key in ens_params_mask:
-        if key not in params:
-            missing_in_params.append(f"{key}={ens_params_mask[key]}")
-
+    # 5. Несовпадение — есть пересечение, но значения разные
     if mismatched:
-        status = "✗ Несовпадение параметров"
-        details = "; ".join(mismatched)
-        if missing_in_params:
-            details += " | Доп. в ens_params_mask: " + "; ".join(missing_in_params)
-        return status, details
-    elif missing_in_params:
-        return "⚠ Частичное совпадение", "Доп. в ens_params_mask: " + "; ".join(missing_in_params)
-    else:
+        return "✗ Несовпадение параметров", "; ".join(mismatched)
+
+    # Без несовпадений — проверяем полноту
+    only_in_params = set(params.keys()) - set(ens_params_mask.keys())
+    only_in_ens = set(ens_params_mask.keys()) - set(params.keys())
+
+    # 2. Полное совпадение
+    if not only_in_params and not only_in_ens:
         return "✓ Полное совпадение", ""
+
+    # 3. Не хватает в проверяемом (ens_params_mask > params)
+    if only_in_ens and not only_in_params:
+        return "⚠ Не хватает параметров в проверяемом", "Отсутствуют в params: " + "; ".join(f"{k}={ens_params_mask[k]}" for k in sorted(only_in_ens))
+
+    # 4. Не хватает в ЕНС (params > ens_params_mask)
+    if only_in_params and not only_in_ens:
+        return "⚠ Не хватает параметров в ЕНС", "Отсутствуют в ens_params_mask: " + "; ".join(f"{k}={params[k]}" for k in sorted(only_in_params))
+
+    # Оба имеют уникальные параметры — это несовпадение по полноте
+    return "✗ Несовпадение параметров", f"Уникальные в params: {', '.join(sorted(only_in_params))}; уникальные в ens: {', '.join(sorted(only_in_ens))}"
 
 
 def _format_params_cell(params_dict, max_items=20):
