@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
-# 2026-06-11 07:50 — FIX: покрытие — проверка через _compare_params (ens_params_mask).
-#   В automated_processor покрытие не сбрасывает success (stale ens_params).
+# 2026-06-11 12:23 — FIX: убрано "покрытие" из CRITICAL_PARAMS (пустое=Бп — дефолт).
+#   Покрытие не сбрасывает success. coating_map из settings (общая логика).
 #   exact_name + пустые params → копируем из ens_params_from_mask.
 # 2026-06-10 14:28 — FIX: _norm_coating через settings.coating_normalize. Без хардкода.
 # 2026-06-09 19:00 — FIX: ens_params_mask — тот же pipeline (_apply_mask_fixes + _remap_params).
@@ -1703,9 +1703,9 @@ class AutomatedParametricProcessor:
             success = False
             logger.info("[РЕЗУЛЬТАТ] exact_name без params → сброс success")
 
-        # FIX 2026-06-10: critical параметры отсутствуют во входе, но есть в ENS → сброс success
-        # Критичные: шаг_резьбы, исполнение, покрытие
-        CRITICAL_PARAMS = {'шаг_резьбы', 'исполнение', 'покрытие'}
+        # FIX 2026-06-11: critical параметры отсутствуют во входе, но есть в ENS → сброс success
+        # Покрытие НЕ critical — пустое покрытие = Бп (дефолт), это нормально
+        CRITICAL_PARAMS = {'шаг_резьбы', 'исполнение'}
         if success and best_match:
             missing_critical = []
             for cp in CRITICAL_PARAMS:

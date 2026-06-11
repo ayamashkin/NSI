@@ -1,7 +1,7 @@
 # =============================================================================
 # ФАЙЛ: cli.py
-# 2026-06-11 07:50 — FIX: _compare_params — 5 статусов, coating_map из settings.
-#   Не хватает параметров в проверяемом/ЕНС. coating_map общая с automated_processor.
+# 2026-06-11 12:23 — FIX: _compare_params — fallback на ens_params.
+#   5 статусов. coating_map из settings. "покрытие" не в CRITICAL_PARAMS.
 # 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
 #   Пустое/None/NaN → Бп. Mapping берётся из config.yaml. Убран хардкод (не дублируем config).
 # 2026-06-10 14:30:00 — FIX: _norm_coating — убраны "Н.Кд"/"нкд" (никель-кадмий ≠ без покрытия).
@@ -69,29 +69,40 @@ def _truncate_dataframe_cells(df, max_length=1000):
             )
     return df
 
-def _compare_params(params, ens_params_mask):
-    """Сверка params vs ens_params_mask.
+def _compare_params(params, ens_params_mask, ens_params=None):
+    """Сверка params vs ens_params_mask (fallback: ens_params).
 
     ЛОГИКА (5 статусов):
-    1. ∅ Пропущено — оба пустые (нет данных для сверки)
+    1. ∅ Пропущено — оба пустые
     2. ✓ Полное совпадение — количество и значения совпадают
-    3. ⚠ Не хватает в проверяемом — все params есть в ens_params_mask, но в ens_params_mask больше
-    4. ⚠ Не хватает в ЕНС — все ens_params_mask есть в params, но в params больше
+    3. ⚠ Не хватает параметров в проверяемом — все params есть в ens, но в ens больше
+    4. ⚠ Не хватает параметров в ЕНС — все ens есть в params, но в params больше
     5. ✗ Несовпадение — есть пересечение, но значения разные
 
-    Возвращает (status, details).
+    FIX 2026-06-11: fallback на ens_params когда ens_params_mask пустой/None.
     """
     # Защита от list
     if isinstance(params, list):
         params = {}
     if isinstance(ens_params_mask, list):
         ens_params_mask = {}
+    if isinstance(ens_params, list):
+        ens_params = {}
+
+    # FIX 2026-06-11: fallback на ens_params когда ens_params_mask пустой
+    ens = ens_params_mask or {}
+    if (not ens or all(v is None or str(v).strip() == '' for v in ens.values())) and ens_params:
+        ens = {k: v for k, v in ens_params.items()
+               if v is not None and str(v).strip() != ''
+               and not str(k).startswith('_')
+               and str(k).lower() not in {'код', 'mdm_key', 'id', 'наименование',
+                                          'полное_наименование', 'стандарт', 'тип_изделия'}}
 
     # 1. Пропущено
-    if not params and not ens_params_mask:
+    if not params and not ens:
         return "∅ Пропущено", "Оба пустые — нет данных для сверки"
 
-    # FIX 2026-06-11: таблица покрытий из settings (общая для automated_processor + cli)
+    # Таблица сопоставления покрытий из settings
     def _norm_coating(c):
         if c is None:
             return 'Бп'
@@ -142,34 +153,39 @@ def _compare_params(params, ens_params_mask):
         return False
 
     # Сравниваем пересечение
-    common = set(params.keys()) & set(ens_params_mask.keys())
+    common = set(params.keys()) & set(ens.keys())
     mismatched = []
     for key in common:
-        if not _values_match(params[key], ens_params_mask[key], key):
-            mismatched.append(f"{key}: params={params[key]}, ens={ens_params_mask[key]}")
+        if not _values_match(params[key], ens[key], key):
+            mismatched.append(f"{key}: params={params[key]}, ens={ens[key]}")
 
-    # 5. Несовпадение — есть пересечение, но значения разные
+    # 5. Несовпадение
     if mismatched:
         return "✗ Несовпадение параметров", "; ".join(mismatched)
 
     # Без несовпадений — проверяем полноту
-    only_in_params = set(params.keys()) - set(ens_params_mask.keys())
-    only_in_ens = set(ens_params_mask.keys()) - set(params.keys())
+    only_in_params = set(params.keys()) - set(ens.keys())
+    only_in_ens = set(ens.keys()) - set(params.keys())
 
     # 2. Полное совпадение
     if not only_in_params and not only_in_ens:
         return "✓ Полное совпадение", ""
 
-    # 3. Не хватает параметров в проверяемом (ens_params_mask > params)
+    # 3. Не хватает параметров в проверяемом (ens > params)
     if only_in_ens and not only_in_params:
-        return "⚠ Не хватает параметров в проверяемом", "Отсутствуют в params: " + "; ".join(f"{k}={ens_params_mask[k]}" for k in sorted(only_in_ens))
+        details = "; ".join(f"{k}={ens[k]}" for k in sorted(only_in_ens))
+        return "⚠ Не хватает параметров в проверяемом", f"Отсутствуют: {details}"
 
-    # 4. Не хватает параметров в ЕНС (params > ens_params_mask)
+    # 4. Не хватает параметров в ЕНС (params > ens)
     if only_in_params and not only_in_ens:
-        return "⚠ Не хватает параметров в ЕНС", "Отсутствуют в ens_params_mask: " + "; ".join(f"{k}={params[k]}" for k in sorted(only_in_params))
+        details = "; ".join(f"{k}={params[k]}" for k in sorted(only_in_params))
+        return "⚠ Не хватает параметров в ЕНС", f"Отсутствуют: {details}"
 
-    # Оба имеют уникальные параметры — это несовпадение по полноте
-    return "✗ Несовпадение параметров", f"Уникальные в params: {', '.join(sorted(only_in_params))}; уникальные в ens: {', '.join(sorted(only_in_ens))}"
+    # Оба имеют уникальные параметры
+    return "✗ Несовпадение параметров", (
+        f"Уникальные в params: {', '.join(sorted(only_in_params))}; "
+        f"Уникальные в ЕНС: {', '.join(sorted(only_in_ens))}"
+    )
 
 
 def _format_params_cell(params_dict, max_items=20):
@@ -746,7 +762,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             out_row['ens_params'] = _format_params_cell(result.ens_params)
             out_row['ens_params_mask'] = _format_params_cell(result.ens_params_mask)
             # FEAT 2026-06-09: 2 новые колонки — сверка params vs ens_params_mask
-            _sv_status, _sv_details = _compare_params(result.params, result.ens_params_mask)
+            _sv_status, _sv_details = _compare_params(result.params, result.ens_params_mask, result.ens_params)
             out_row['Статус сверки'] = _sv_status
             out_row['Детали сверки'] = _sv_details
             # Legacy: параметры_маски — оставляем для обратной совместимости
@@ -814,7 +830,7 @@ def batch(input_file, db, ens_index, output, llm, validate, success_only,
             if not include_details:
                 d.pop('details', None)
             # FEAT 2026-06-09: 2 новых поля — сверка params vs ens_params_mask
-            _sv_status, _sv_details = _compare_params(result.params, result.ens_params_mask)
+            _sv_status, _sv_details = _compare_params(result.params, result.ens_params_mask, result.ens_params)
             d['param_check_status'] = _sv_status
             d['param_check_details'] = _sv_details
             json_results.append(d)
