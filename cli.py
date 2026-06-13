@@ -1,5 +1,8 @@
 # =============================================================================
 # ФАЙЛ: cli.py
+# 2026-06-11 15:38 — FIX: _compare_params приоритет ens_params над ens_params_mask.
+# Объединение источников: база из ens_params, недостающие из ens_params_mask.
+# Исправляет ложные "Несовпадение" при артефактах парсинга маски.
 # 2026-06-11 12:49 — FIX: coating_map единая (coating_normalize удалён).
 #   _compare_params fallback на ens_params. 5 статусов сверки.
 # 2026-06-10 14:25 — FIX: _norm_coating — убран хардкод, всё через settings.coating_normalize.
@@ -70,7 +73,7 @@ def _truncate_dataframe_cells(df, max_length=1000):
     return df
 
 def _compare_params(params, ens_params_mask, ens_params=None):
-    """Сверка params vs ens_params_mask (fallback: ens_params).
+    """Сверка params vs объединённый набор ЕНС (ens_params + ens_params_mask).
 
     ЛОГИКА (5 статусов):
     1. ∅ Пропущено — оба пустые
@@ -79,7 +82,9 @@ def _compare_params(params, ens_params_mask, ens_params=None):
     4. ⚠ Не хватает параметров в ЕНС — все ens есть в params, но в params больше
     5. ✗ Несовпадение — есть пересечение, но значения разные
 
-    FIX 2026-06-11: fallback на ens_params когда ens_params_mask пустой/None.
+    FIX 2026-06-11 15:38: приоритет ens_params (достоверные данные ЕНС) над ens_params_mask.
+    Объединение: база из ens_params, недостающие/пустые поля — из ens_params_mask.
+    Исправляет ложные "Несовпадение" при артефактах парсинга маски.
     """
     # Защита от list
     if isinstance(params, list):
@@ -89,14 +94,26 @@ def _compare_params(params, ens_params_mask, ens_params=None):
     if isinstance(ens_params, list):
         ens_params = {}
 
-    # FIX 2026-06-11: fallback на ens_params когда ens_params_mask пустой
-    ens = ens_params_mask or {}
-    if (not ens or all(v is None or str(v).strip() == '' for v in ens.values())) and ens_params:
+    # FIX 2026-06-11 15:38: приоритет ens_params над ens_params_mask.
+    # База — ens_params (достоверные данные из ЕНС), недостающие поля — из ens_params_mask.
+    # Исправляет ложные "Несовпадение" при артефактах парсинга маски (например, длина=100.36 вместо 100).
+    ens = {}
+    if ens_params:
         ens = {k: v for k, v in ens_params.items()
                if v is not None and str(v).strip() != ''
                and not str(k).startswith('_')
                and str(k).lower() not in {'код', 'mdm_key', 'id', 'наименование',
                                           'полное_наименование', 'стандарт', 'тип_изделия'}}
+    if ens_params_mask:
+        for k, v in ens_params_mask.items():
+            if v is not None and str(v).strip() != '':
+                if k not in ens or ens[k] is None or str(ens[k]).strip() == '':
+                    ens[k] = v
+    if ens_params_mask:
+        for k, v in ens_params_mask.items():
+            if v is not None and str(v).strip() != '':
+                if k not in ens or ens[k] is None or str(ens[k]).strip() == '':
+                    ens[k] = v
 
     # 1. Пропущено
     if not params and not ens:

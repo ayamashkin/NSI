@@ -1,5 +1,7 @@
 # =============================================================================
 # ФАЙЛ: core/automated_processor.py
+# 2026-06-11 15:45 — FIX: unified pipeline для ens_params. База из записи ЕНС, дополнение из ens_params_mask.
+# Исправляет рассинхронизацию источников. Ключи совпадают с params/ens_params_mask.
 # 2026-06-11 12:49 — FIX: coating_map единая (coating_normalize удалён).
 #   Покрытие не сбрасывает success. coating_map из settings (общая логика).
 #   exact_name + пустые params → копируем из ens_params_from_mask.
@@ -7,15 +9,6 @@
 # 2026-06-09 19:00 — FIX: ens_params_mask — тот же pipeline (_apply_mask_fixes + _remap_params).
 #   Было: extract_params(ens_name, mask.pattern) — без фиксов. Стало: тот же pipeline что для params.
 # 2026-06-09 18:30:00 — FEAT: exact_name match — заполнение params/ens_params/ens_params_mask.
-# 2026-06-09 18:00:00 — FIX 24: exact(in_name) — исключены совпадения в коде стандарта.
-#   Длина — tolerance ±10%/<20мм. V2 generic: min 4 params, ratio ≥70%.
-# 2026-06-09 18:00:00 — FIX: UnboundLocalError в total_cand_params list comprehension.
-#   Переменная k использовалась до объявления внутри comprehension.
-# 2026-06-08 14:30:00 — FIX 23: исполнение без скобок — \( и \) опциональны.
-#   Болт 1-6-20-Бп = исп(1)+диам(6)+дл(20)+покр(Бп). Было: диам=1,дл=6,покр=20-Бп.
-# 2026-06-08 14:15:00 — CRITICAL FIX: parametric_client.py re.match → re.IGNORECASE.
-# 2026-06-08 03:30:00 — FIX 21: разделитель [-.\s]+ перед ОСТ/ГОСТ.
-#   Исправлены опечатки: (?P< не (?!<, ОСТ кирилл не OCT латин. Ловит "Хим.Н-ОСТ".
 # =============================================================================
 """
 Main Processor Module
@@ -1815,10 +1808,17 @@ class AutomatedParametricProcessor:
                     pass
 
         # FIX 2026-06-10: exact_name + пустые params → скопировать из ens_params_from_mask
-        # Имена совпадают → параметры должны быть идентичны. Regex не смог на входе, но смог на ENS.
         if match_type == 'exact_name' and not remapped_work and ens_params_from_mask:
             remapped_work = dict(ens_params_from_mask)
             logger.info("[exact_name] params пустые → скопированы из ens_params_from_mask: %s", list(remapped_work.keys()))
+
+        # FIX 2026-06-11 15:45: unified pipeline — дополнение ens_params из ens_params_mask.
+        # База из записи ЕНС, недостающие/пустые/артефактные поля — из regex на ЕНС-имени.
+        if ens_params_from_mask:
+            for key, val in ens_params_from_mask.items():
+                if val is not None and str(val).strip() != '':
+                    if key not in ens_params_from_match or ens_params_from_match[key] is None or str(ens_params_from_match[key]).strip() == '':
+                        ens_params_from_match[key] = val
 
         # Normalize mask.params (fallback: dict с ключами из mask.params)
         mask_params_norm = mask.params
